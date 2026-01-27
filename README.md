@@ -141,9 +141,32 @@ The daemon must:
 5. Close the fd when done
 
 See `examples/` for implementations in:
+- **fdrecv** (`fdrecv.c`) - Minimal C daemon that execs any handler with fd as stdin/stdout
 - Go (`streaming_daemon.go`) - Multi-threaded, production-ready
 - PHP (`streaming_daemon.php`) - Uses `socket_cmsg_space()` for SCM_RIGHTS
 - Python (`test_daemon.py`) - Simple single-threaded test daemon
+
+### Using fdrecv
+
+The simplest option - use any program as a handler:
+
+```bash
+# Build
+cc -o fdrecv examples/fdrecv.c
+
+# Run with shell script
+fdrecv /var/run/streaming-daemon.sock ./handler.sh
+
+# Run with PHP
+fdrecv /var/run/streaming-daemon.sock php handler.php
+
+# Run with any command
+fdrecv /var/run/streaming-daemon.sock python3 handler.py
+```
+
+The handler receives:
+- stdin/stdout connected to the client socket
+- `HANDOFF_DATA` environment variable with the JSON data from PHP
 
 ## Headers
 
