@@ -168,6 +168,18 @@ The handler receives:
 - stdin/stdout connected to the client socket
 - `HANDOFF_DATA` environment variable with the JSON data from PHP
 
+Example with figlet:
+```bash
+fdrecv /var/run/streaming-daemon.sock ./figlet_handler.sh
+
+curl "http://localhost/api/stream?prompt=Hello+World"
+#  _   _      _ _        __        __         _     _
+# | | | | ___| | | ___   \ \      / /__  _ __| | __| |
+# | |_| |/ _ \ | |/ _ \   \ \ /\ / / _ \| '__| |/ _` |
+# |  _  |  __/ | | (_) |   \ V  V / (_) | |  | | (_| |
+# |_| |_|\___|_|_|\___/     \_/\_/ \___/|_|  |_|\__,_|
+```
+
 ## Headers
 
 ### X-Socket-Handoff (required)
