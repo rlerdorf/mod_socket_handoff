@@ -21,6 +21,9 @@
 # Go build artifacts
 examples/streaming-daemon
 
+# C build artifacts
+examples/fdrecv
+
 # Python bytecode
 *.pyc
 __pycache__/
