@@ -141,8 +141,9 @@ The daemon must:
 5. Close the fd when done
 
 See `examples/` for implementations in:
-- Go
-- Python
+- Go (`streaming_daemon.go`) - Multi-threaded, production-ready
+- PHP (`streaming_daemon.php`) - Uses `socket_cmsg_space()` for SCM_RIGHTS
+- Python (`test_daemon.py`) - Simple single-threaded test daemon
 
 ## Headers
 
