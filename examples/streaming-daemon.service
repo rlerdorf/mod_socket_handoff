@@ -1,0 +1,47 @@
+# Systemd service file for the streaming daemon
+#
+# Install:
+#   sudo cp streaming-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable streaming-daemon
+#   sudo systemctl start streaming-daemon
+#
+# Logs:
+#   sudo journalctl -u streaming-daemon -f
+
+[Unit]
+Description=LLM Streaming Daemon
+Documentation=https://github.com/your-org/mod_proxy_fdpass_filter
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Path to the daemon binary
+ExecStart=/usr/local/bin/streaming-daemon
+
+# Restart on failure
+Restart=always
+RestartSec=5
+
+# Environment variables
+Environment=OPENAI_API_KEY=your-api-key-here
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=streaming-daemon
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Allow writing to /var/run for the socket
+ReadWritePaths=/var/run
+
+[Install]
+WantedBy=multi-user.target

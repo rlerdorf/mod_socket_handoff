@@ -1,0 +1,2 @@
+# Load the socket handoff module
+LoadModule socket_handoff_module /usr/lib/apache2/modules/mod_socket_handoff.so

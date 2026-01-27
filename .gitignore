@@ -1,0 +1,26 @@
+# Compiled Apache module files
+*.la
+*.lo
+*.slo
+*.o
+*.so
+
+# Libtool directory
+.libs/
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE directories
+.idea/
+.vscode/
+
+# Go build artifacts
+examples/streaming-daemon
+
+# Python bytecode
+*.pyc
+__pycache__/
