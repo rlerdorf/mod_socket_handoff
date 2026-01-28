@@ -56,12 +56,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 
 #define HANDOFF_HEADER "X-Socket-Handoff"
 #define HANDOFF_DATA_HEADER "X-Handoff-Data"
 #define HANDOFF_FILTER_NAME "SOCKET_HANDOFF"
-
 module AP_MODULE_DECLARE_DATA socket_handoff_module;
 
 /* Per-server configuration */
@@ -69,6 +70,8 @@ typedef struct {
     int enabled;
     int enabled_set;
     const char *allowed_socket_prefix;
+    int connect_timeout_ms;
+    int connect_timeout_ms_set;
 } socket_handoff_config;
 
 /* Create per-server config */
@@ -78,6 +81,8 @@ static void *create_server_config(apr_pool_t *p, server_rec *s)
     conf->enabled = 1;
     conf->enabled_set = 0;
     conf->allowed_socket_prefix = "/var/run/";
+    conf->connect_timeout_ms = 2000;
+    conf->connect_timeout_ms_set = 0;
     return conf;
 }
 
@@ -93,6 +98,11 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
     conf->allowed_socket_prefix = add->allowed_socket_prefix
         ? add->allowed_socket_prefix
         : base->allowed_socket_prefix;
+    conf->connect_timeout_ms = add->connect_timeout_ms_set
+        ? add->connect_timeout_ms
+        : base->connect_timeout_ms;
+    conf->connect_timeout_ms_set = add->connect_timeout_ms_set
+        || base->connect_timeout_ms_set;
 
     return conf;
 }
@@ -139,16 +149,50 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
 
-    return sendmsg(unix_sock, &msg, 0);
+    ssize_t sent = sendmsg(unix_sock, &msg, 0);
+    if (sent < 0) {
+        return -1;
+    }
+
+    if (data && data_len > 0 && (size_t)sent < data_len) {
+        size_t remaining = data_len - (size_t)sent;
+        const char *p = data + sent;
+        while (remaining > 0) {
+            ssize_t n = send(unix_sock, p, remaining, 0);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (n == 0) {
+                /* No progress possible: treat as error to avoid infinite loop */
+                errno = EPIPE;
+                return -1;
+            }
+            remaining -= (size_t)n;
+            p += n;
+        }
+    }
+
+    return 0;
 }
 
 /*
- * Connect to Unix domain socket
+ * Connect to Unix domain socket with timeout
  */
-static int connect_to_socket(const char *socket_path, request_rec *r)
+static int connect_to_socket(const char *socket_path,
+                             int timeout_ms,
+                             request_rec *r)
 {
     int sock;
     struct sockaddr_un addr;
+    int flags;
+    int setfl_ret;
+    struct pollfd pfd;
+    int poll_ret;
+    int so_error;
+    socklen_t so_error_len;
 
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -169,12 +213,91 @@ static int connect_to_socket(const char *socket_path, request_rec *r)
 
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
+    /* Set non-blocking for connect with timeout */
+    flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_socket_handoff: fcntl(F_GETFL) failed: %s", strerror(errno));
+        /* Continue with blocking connect */
+    } else {
+        setfl_ret = fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        if (setfl_ret < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fcntl(F_SETFL) failed: %s", strerror(errno));
+            /* Continue with blocking connect */
+            flags = -1;
+        }
+    }
+
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "mod_socket_handoff: connect() to %s failed: %s",
-            socket_path, strerror(errno));
-        close(sock);
-        return -1;
+        if (errno != EINPROGRESS) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: connect() to %s failed: %s",
+                socket_path, strerror(errno));
+            close(sock);
+            return -1;
+        }
+
+        /* Wait for connection with timeout */
+        pfd.fd = sock;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        do {
+            poll_ret = poll(&pfd, 1, timeout_ms);
+        } while (poll_ret < 0 && errno == EINTR);
+
+        if (poll_ret == 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: connect() to %s timed out after %d ms",
+                socket_path, timeout_ms);
+            close(sock);
+            return -1;
+        }
+        if (poll_ret < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: poll() for connect() to %s failed: %s",
+                socket_path, strerror(errno));
+            close(sock);
+            return -1;
+        }
+
+        /* Check for poll error conditions */
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: poll() on connect() to %s indicated error",
+                socket_path);
+            close(sock);
+            return -1;
+        }
+
+        /* Check socket error status */
+        so_error = 0;
+        so_error_len = sizeof(so_error);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                       &so_error, &so_error_len) < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: getsockopt(SO_ERROR) failed: %s",
+                strerror(errno));
+            close(sock);
+            return -1;
+        }
+        if (so_error != 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: connect() to %s failed: %s",
+                socket_path, strerror(so_error));
+            close(sock);
+            return -1;
+        }
+    }
+
+    /* Restore blocking mode */
+    if (flags >= 0) {
+        if (fcntl(sock, F_SETFL, flags) < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
+                strerror(errno));
+            /* Non-fatal, continue with non-blocking socket */
+        }
     }
 
     return sock;
@@ -188,10 +311,9 @@ static int connect_to_socket(const char *socket_path, request_rec *r)
  * - By swapping in a dummy, the real client socket stays open
  * - The external daemon now owns the real socket
  */
-static apr_status_t swap_to_dummy_socket(conn_rec *c, apr_pool_t *p,
-                                         request_rec *r)
+static apr_status_t create_dummy_socket(apr_socket_t **dummy_socket,
+                                        apr_pool_t *p, request_rec *r)
 {
-    apr_socket_t *dummy_socket;
     apr_status_t rv;
 
     /*
@@ -199,19 +321,13 @@ static apr_status_t swap_to_dummy_socket(conn_rec *c, apr_pool_t *p,
      * It doesn't matter that it's not connected - we just need
      * something for Apache to close instead of the real socket.
      */
-    rv = apr_socket_create(&dummy_socket, APR_INET, SOCK_STREAM,
+    rv = apr_socket_create(dummy_socket, APR_INET, SOCK_STREAM,
                            APR_PROTO_TCP, p);
     if (rv != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_WARNING, rv, r,
             "mod_socket_handoff: Could not create dummy socket");
         return rv;
     }
-
-    /*
-     * Replace the connection's socket with our dummy.
-     * The core module stores the socket in conn_config.
-     */
-    ap_set_core_module_config(c->conn_config, dummy_socket);
 
     return APR_SUCCESS;
 }
@@ -323,6 +439,7 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     const char *handoff_data;
     apr_os_sock_t client_fd;
     apr_socket_t *client_socket;
+    apr_socket_t *dummy_socket = NULL;
     int daemon_sock;
     apr_bucket *e;
     apr_bucket *next;
@@ -364,6 +481,12 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         handoff_data = apr_table_get(r->err_headers_out, HANDOFF_DATA_HEADER);
     }
 
+    /* Create a dummy socket upfront; if this fails, don't hand off */
+    if (create_dummy_socket(&dummy_socket, r->pool, r) != APR_SUCCESS) {
+        ap_remove_output_filter(f);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     /* Remove our headers so client never sees them */
     apr_table_unset(r->headers_out, HANDOFF_HEADER);
     apr_table_unset(r->err_headers_out, HANDOFF_HEADER);
@@ -394,7 +517,7 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     }
 
     /* Connect to the streaming daemon */
-    daemon_sock = connect_to_socket(socket_path, r);
+    daemon_sock = connect_to_socket(socket_path, conf->connect_timeout_ms, r);
     if (daemon_sock < 0) {
         return HTTP_SERVICE_UNAVAILABLE;
     }
@@ -417,11 +540,11 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
      * The daemon now owns the client connection.
      * This trick is borrowed from mod_proxy_fdpass.
      */
-    if (swap_to_dummy_socket(c, r->pool, r) != APR_SUCCESS) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_socket_handoff: Dummy socket swap failed - "
-            "connection may be closed prematurely");
-    }
+    /*
+     * Replace the connection's socket with our dummy.
+     * The core module stores the socket in conn_config.
+     */
+    ap_set_core_module_config(c->conn_config, dummy_socket);
 
     /*
      * Mark connection as aborted.
@@ -474,6 +597,35 @@ static const char *set_allowed_prefix(cmd_parms *cmd, void *dummy,
     return NULL;
 }
 
+/* Maximum connect timeout: 60 seconds */
+#define MAX_CONNECT_TIMEOUT_MS 60000
+
+static const char *set_connect_timeout(cmd_parms *cmd, void *dummy,
+                                       const char *arg)
+{
+    socket_handoff_config *conf = ap_get_module_config(
+        cmd->server->module_config, &socket_handoff_module);
+    char *endptr;
+    long timeout;
+
+    errno = 0;
+    timeout = strtol(arg, &endptr, 10);
+
+    /* Check for conversion errors */
+    if (endptr == arg || *endptr != '\0') {
+        return "SocketHandoffConnectTimeoutMs must be a valid integer";
+    }
+    if (errno == ERANGE || timeout < 1 || timeout > MAX_CONNECT_TIMEOUT_MS) {
+        return apr_psprintf(cmd->pool,
+            "SocketHandoffConnectTimeoutMs must be between 1 and %d",
+            MAX_CONNECT_TIMEOUT_MS);
+    }
+
+    conf->connect_timeout_ms = (int)timeout;
+    conf->connect_timeout_ms_set = 1;
+    return NULL;
+}
+
 /* Configuration directives */
 static const command_rec socket_handoff_cmds[] = {
     AP_INIT_FLAG(
@@ -489,6 +641,13 @@ static const command_rec socket_handoff_cmds[] = {
         NULL,
         RSRC_CONF,
         "Required prefix for socket paths (default: /var/run/)"
+    ),
+    AP_INIT_TAKE1(
+        "SocketHandoffConnectTimeoutMs",
+        set_connect_timeout,
+        NULL,
+        RSRC_CONF,
+        "Timeout for connecting to handoff daemon in milliseconds (default: 2000)"
     ),
     {NULL}
 };
