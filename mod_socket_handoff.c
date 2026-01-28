@@ -49,6 +49,7 @@
 #include "apr_strings.h"
 #include "apr_buckets.h"
 #include "apr_network_io.h"
+#include "apr_file_info.h"
 #include "util_filter.h"
 
 #include <sys/socket.h>
@@ -223,43 +224,82 @@ static int validate_socket_path(const char *socket_path,
                                 const char *allowed_prefix,
                                 request_rec *r)
 {
-    char resolved_path[PATH_MAX];
-    char resolved_prefix[PATH_MAX];
+    char *resolved_path = NULL;
+    char *resolved_prefix = NULL;
+    char *truename_path = NULL;
+    char *truename_prefix = NULL;
+    const char *prefix_with_slash = NULL;
+    const char *truename_prefix_with_slash = NULL;
+    apr_status_t rv;
 
     if (!allowed_prefix || allowed_prefix[0] == '\0') {
         /* No prefix configured - allow all (not recommended) */
         return 1;
     }
 
-    /* Resolve to absolute path to prevent ../ attacks */
-    if (realpath(socket_path, resolved_path) == NULL) {
-        /* Socket might not exist yet - check prefix directly */
-        if (strncmp(socket_path, allowed_prefix, strlen(allowed_prefix)) != 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                "mod_socket_handoff: Socket path %s not under allowed "
-                "prefix %s", socket_path, allowed_prefix);
-            return 0;
-        }
-        return 1;
+    /* Canonicalize paths without requiring the socket to exist */
+    rv = apr_filepath_merge(&resolved_path, NULL, socket_path,
+                            APR_FILEPATH_NOTRELATIVE, r->pool);
+    if (rv != APR_SUCCESS || !resolved_path) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+            "mod_socket_handoff: Invalid socket path %s", socket_path);
+        return 0;
     }
 
-    if (realpath(allowed_prefix, resolved_prefix) == NULL) {
-        /* Can't resolve prefix - use string comparison */
-        if (strncmp(resolved_path, allowed_prefix,
-                    strlen(allowed_prefix)) != 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                "mod_socket_handoff: Resolved path %s not under prefix %s",
-                resolved_path, allowed_prefix);
-            return 0;
-        }
-        return 1;
+    rv = apr_filepath_merge(&resolved_prefix, NULL, allowed_prefix,
+                            APR_FILEPATH_NOTRELATIVE, r->pool);
+    if (rv != APR_SUCCESS || !resolved_prefix) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+            "mod_socket_handoff: Invalid allowed prefix %s", allowed_prefix);
+        return 0;
     }
 
-    if (strncmp(resolved_path, resolved_prefix, strlen(resolved_prefix)) != 0) {
+    if (resolved_prefix[strlen(resolved_prefix) - 1] == '/') {
+        prefix_with_slash = resolved_prefix;
+    } else {
+        prefix_with_slash = apr_pstrcat(r->pool, resolved_prefix, "/", NULL);
+    }
+
+    if (strncmp(resolved_path, prefix_with_slash,
+                strlen(prefix_with_slash)) != 0) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Path %s resolves outside allowed prefix",
             socket_path);
         return 0;
+    }
+
+    /*
+     * If the socket path exists, resolve symlinks and re-check. This closes
+     * symlink-escape attacks while allowing non-existent paths to be validated
+     * lexically (e.g., when daemons create the socket later).
+     */
+    rv = apr_filepath_merge(&truename_path, NULL, socket_path,
+                            APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                            r->pool);
+    if (rv == APR_SUCCESS && truename_path) {
+        rv = apr_filepath_merge(&truename_prefix, NULL, allowed_prefix,
+                                APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                                r->pool);
+        if (rv != APR_SUCCESS || !truename_prefix) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                "mod_socket_handoff: Invalid allowed prefix %s", allowed_prefix);
+            return 0;
+        }
+
+        if (truename_prefix[strlen(truename_prefix) - 1] == '/') {
+            truename_prefix_with_slash = truename_prefix;
+        } else {
+            truename_prefix_with_slash = apr_pstrcat(r->pool, truename_prefix, "/", NULL);
+        }
+
+        if (strncmp(truename_path, truename_prefix_with_slash,
+                    strlen(truename_prefix_with_slash)) != 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: Path %s resolves outside allowed prefix "
+                "after symlink resolution",
+                socket_path);
+            return 0;
+        }
     }
 
     return 1;
