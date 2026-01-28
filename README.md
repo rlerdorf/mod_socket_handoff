@@ -32,32 +32,25 @@ Streaming LLM responses:
 
 ## How It Works
 
-```
-Client Request
-     |
-     v
-+------------------------------------------+
-|              Apache Worker               |
-|  +----------+    +--------------------+  |
-|  | mod_php  | -> | socket_handoff     |  |
-|  | (auth)   |    | - sees header      |  |
-|  +----------+    | - passes client fd |  |
-|                  | - dummy socket     |  |
-|                  +--------------------+  |
-+------------------------------------------+
-     |                      |
-     | Worker freed         | SCM_RIGHTS
-     v                      v
-                  +-------------------+
-                  | Streaming Daemon  |
-                  | - receives fd     |
-                  | - sends response  |
-                  | - streams data    |
-                  +-------------------+
-                           |
-                           v
-                    Client receives
-                    SSE stream
+```mermaid
+flowchart TD
+    A[Client Request] --> B[Apache Worker]
+
+    subgraph B[Apache Worker]
+        direction LR
+        C[mod_php<br/>authentication] --> D[mod_socket_handoff<br/>sees X-Socket-Handoff header]
+    end
+
+    B --> E[Worker freed immediately]
+    D -->|SCM_RIGHTS<br/>passes client fd| F[Streaming Daemon]
+
+    subgraph F[Streaming Daemon]
+        direction TB
+        G[Receives fd] --> H[Sends HTTP response]
+        H --> I[Streams data to client]
+    end
+
+    F --> J[Client receives SSE stream]
 ```
 
 ## Build
