@@ -1,8 +1,9 @@
 /*
- * Streaming Daemon for mod_socket_handoff
+ * Streaming Daemon Example for mod_socket_handoff
  *
- * Production-ready daemon that receives client connections from Apache
- * and streams LLM responses.
+ * This daemon receives client connections from Apache via SCM_RIGHTS
+ * and streams responses directly to clients. Use this as a template
+ * for integrating with LLM APIs or other streaming services.
  *
  * Build:
  *   go build -o streaming-daemon streaming_daemon.go
@@ -24,20 +25,22 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
 
 const (
-	// Socket path - must match FdpassFilterAllowedPrefix in Apache config
+	// Socket path - must match SocketHandoffAllowedPrefix in Apache config
 	DaemonSocket = "/var/run/streaming-daemon.sock"
 )
 
-// HandoffData is the JSON structure passed from PHP
+// HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
+// Customize this struct to match your application's needs.
 type HandoffData struct {
 	UserID    int64  `json:"user_id"`
 	Prompt    string `json:"prompt"`
-	Model     string `json:"model"`
+	Model     string `json:"model,omitempty"`
 	MaxTokens int    `json:"max_tokens,omitempty"`
 	Timestamp int64  `json:"timestamp,omitempty"`
 }
@@ -103,7 +106,7 @@ func main() {
 func handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	// Receive file descriptor and handoff data
+	// Receive file descriptor and handoff data from Apache
 	clientFd, data, err := receiveFd(conn)
 	if err != nil {
 		log.Printf("Failed to receive fd: %v", err)
@@ -116,8 +119,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	var handoff HandoffData
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &handoff); err != nil {
-			log.Printf("Failed to parse handoff data: %v (raw: %s)", err, string(data))
-			// Continue with empty handoff
+			log.Printf("Failed to parse handoff data: %v", err)
 		}
 	}
 
@@ -128,11 +130,11 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		log.Printf("Stream error: %v", err)
 	}
 
-	// Close the client socket
-	syscall.Close(clientFd)
 	log.Printf("  Connection closed")
 }
 
+// receiveFd receives a file descriptor and data from the Unix socket connection.
+// Apache sends the client socket fd via SCM_RIGHTS along with the handoff data.
 func receiveFd(conn net.Conn) (int, []byte, error) {
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
@@ -149,7 +151,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	buf := make([]byte, 4096)
 
 	// Buffer for control message (SCM_RIGHTS)
-	// CmsghdrLen is 16 on 64-bit Linux, plus 4 bytes for one int (the fd)
+	// Size: 16 bytes for Cmsghdr on 64-bit Linux + 4 bytes for the fd
 	oob := make([]byte, 24)
 
 	n, oobn, _, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
@@ -176,104 +178,95 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("no file descriptors received")
 	}
 
-	// Return first fd and the data
 	return fds[0], buf[:n], nil
 }
 
+// streamToClient sends an SSE response to the client.
+// Replace the demo response with your LLM API integration.
 func streamToClient(ctx context.Context, clientFd int, handoff HandoffData) error {
-	// Create file from fd for easier I/O
+	// Wrap the fd in an os.File for easier I/O.
+	// IMPORTANT: os.NewFile takes ownership of the fd. Use file.Close() to close it,
+	// NOT syscall.Close(). The defer ensures the fd stays valid during streaming.
 	file := os.NewFile(uintptr(clientFd), "client")
 	if file == nil {
 		return fmt.Errorf("could not create file from fd")
 	}
+	defer file.Close()
+
 	writer := bufio.NewWriter(file)
 
-	// Send HTTP response headers
-	// Note: PHP hasn't sent any response, so we send the full HTTP response
-	fmt.Fprintf(writer, "HTTP/1.1 200 OK\r\n")
-	fmt.Fprintf(writer, "Content-Type: text/event-stream\r\n")
-	fmt.Fprintf(writer, "Cache-Control: no-cache\r\n")
-	fmt.Fprintf(writer, "Connection: close\r\n")
-	fmt.Fprintf(writer, "X-Accel-Buffering: no\r\n")
+	// Send HTTP headers for SSE
+	headers := []string{
+		"HTTP/1.1 200 OK",
+		"Content-Type: text/event-stream",
+		"Cache-Control: no-cache",
+		"Connection: close",
+		"X-Accel-Buffering: no", // Disable buffering in nginx/proxies
+	}
+	for _, h := range headers {
+		fmt.Fprintf(writer, "%s\r\n", h)
+	}
 	fmt.Fprintf(writer, "\r\n")
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
 
-	// In production, you would call the LLM API here
-	// For this example, we simulate a streaming response
-	return simulateStream(ctx, writer, handoff)
+	// Stream the response
+	// TODO: Replace this with your LLM API call
+	return streamDemoResponse(ctx, writer, handoff)
 }
 
-func simulateStream(ctx context.Context, writer *bufio.Writer, handoff HandoffData) error {
-	// Simulate an LLM response - streamed token by token with realistic delays
-	response := fmt.Sprintf(`Hello! I received your request.
+// streamDemoResponse simulates an LLM streaming response.
+// Replace this with your actual LLM integration, e.g.:
+//
+//	stream, _ := openai.CreateChatCompletionStream(ctx, request)
+//	for {
+//	    chunk, err := stream.Recv()
+//	    if err == io.EOF { break }
+//	    sendSSE(writer, chunk.Choices[0].Delta.Content)
+//	}
+func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff HandoffData) error {
+	response := fmt.Sprintf(
+		"Hello! I received your prompt: %q\n\n"+
+			"This response is being streamed from a daemon that received "+
+			"the client socket via SCM_RIGHTS. The Apache worker has been freed.\n\n"+
+			"Replace this demo with your LLM API integration.",
+		truncate(handoff.Prompt, 100))
 
-User ID: %d
-Prompt: %q
-
-Let me help you with that. Here's my response:
-
-The Apache worker that handled your initial request has already been freed. This response is being streamed directly from a lightweight Go daemon that received the client socket via SCM_RIGHTS file descriptor passing.
-
-This architecture allows:
-1. Heavy PHP processes to handle authentication
-2. Lightweight daemons to handle long-running streams
-3. Better resource utilization under load
-
-The connection handoff is transparent to the client - you see a single HTTP request with a streaming response.
-
-This is the end of my response. Have a great day!`, handoff.UserID, truncate(handoff.Prompt, 100))
-
-	// Split into lines and stream each line with delays
-	lines := splitLines(response)
-
-	for i, line := range lines {
+	// Stream word by word to simulate LLM token generation
+	words := strings.Fields(response)
+	for i, word := range words {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Stream each line as a separate SSE event
-		data, _ := json.Marshal(map[string]interface{}{
-			"content": line,
-			"index":   i,
-		})
-		fmt.Fprintf(writer, "data: %s\n\n", data)
-		if err := writer.Flush(); err != nil {
-			return fmt.Errorf("write failed: %w", err)
+		// Add space before word (except first)
+		content := word
+		if i > 0 {
+			content = " " + word
 		}
 
-		// Simulate LLM thinking time - varies by line length
-		// Shorter lines = faster, longer lines = slower (like real token generation)
-		delay := 100 + (len(line) * 10)
-		if delay > 500 {
-			delay = 500
+		// Send SSE event
+		if err := sendSSE(writer, content); err != nil {
+			return err
 		}
-		time.Sleep(time.Duration(delay) * time.Millisecond)
+
+		// Simulate token generation delay
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Send done marker
+	// Send completion marker
 	fmt.Fprintf(writer, "data: [DONE]\n\n")
 	return writer.Flush()
 }
 
-func splitLines(s string) []string {
-	var lines []string
-	current := ""
-	for _, r := range s {
-		if r == '\n' {
-			lines = append(lines, current)
-			current = ""
-		} else {
-			current += string(r)
-		}
-	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	return lines
+// sendSSE sends a single SSE event with the given content.
+func sendSSE(writer *bufio.Writer, content string) error {
+	data, _ := json.Marshal(map[string]string{"content": content})
+	fmt.Fprintf(writer, "data: %s\n\n", data)
+	return writer.Flush()
 }
 
 func truncate(s string, n int) string {
