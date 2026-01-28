@@ -160,6 +160,14 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         while (remaining > 0) {
             ssize_t n = send(unix_sock, p, remaining, 0);
             if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (n == 0) {
+                /* No progress possible: treat as error to avoid infinite loop */
+                errno = EPIPE;
                 return -1;
             }
             remaining -= (size_t)n;
@@ -171,7 +179,7 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
 }
 
 /*
- * Connect to Unix domain socket
+ * Connect to Unix domain socket with timeout
  */
 static int connect_to_socket(const char *socket_path,
                              int timeout_ms,
@@ -180,6 +188,11 @@ static int connect_to_socket(const char *socket_path,
     int sock;
     struct sockaddr_un addr;
     int flags;
+    int setfl_ret;
+    struct pollfd pfd;
+    int poll_ret;
+    int so_error;
+    socklen_t so_error_len;
 
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -200,9 +213,20 @@ static int connect_to_socket(const char *socket_path,
 
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
+    /* Set non-blocking for connect with timeout */
     flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_socket_handoff: fcntl(F_GETFL) failed: %s", strerror(errno));
+        /* Continue with blocking connect */
+    } else {
+        setfl_ret = fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        if (setfl_ret < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fcntl(F_SETFL) failed: %s", strerror(errno));
+            /* Continue with blocking connect */
+            flags = -1;
+        }
     }
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -214,25 +238,50 @@ static int connect_to_socket(const char *socket_path,
             return -1;
         }
 
-        struct pollfd pfd;
-        int poll_ret;
+        /* Wait for connection with timeout */
         pfd.fd = sock;
         pfd.events = POLLOUT;
+        pfd.revents = 0;
         do {
             poll_ret = poll(&pfd, 1, timeout_ms);
         } while (poll_ret < 0 && errno == EINTR);
-        if (poll_ret <= 0) {
+
+        if (poll_ret == 0) {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                "mod_socket_handoff: connect() to %s timed out",
+                "mod_socket_handoff: connect() to %s timed out after %d ms",
+                socket_path, timeout_ms);
+            close(sock);
+            return -1;
+        }
+        if (poll_ret < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: poll() for connect() to %s failed: %s",
+                socket_path, strerror(errno));
+            close(sock);
+            return -1;
+        }
+
+        /* Check for poll error conditions */
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: poll() on connect() to %s indicated error",
                 socket_path);
             close(sock);
             return -1;
         }
 
-        int so_error = 0;
-        socklen_t so_error_len = sizeof(so_error);
+        /* Check socket error status */
+        so_error = 0;
+        so_error_len = sizeof(so_error);
         if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
-                       &so_error, &so_error_len) < 0 || so_error != 0) {
+                       &so_error, &so_error_len) < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: getsockopt(SO_ERROR) failed: %s",
+                strerror(errno));
+            close(sock);
+            return -1;
+        }
+        if (so_error != 0) {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: connect() to %s failed: %s",
                 socket_path, strerror(so_error));
@@ -241,8 +290,14 @@ static int connect_to_socket(const char *socket_path,
         }
     }
 
+    /* Restore blocking mode */
     if (flags >= 0) {
-        fcntl(sock, F_SETFL, flags);
+        if (fcntl(sock, F_SETFL, flags) < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
+                strerror(errno));
+            /* Non-fatal, continue with non-blocking socket */
+        }
     }
 
     return sock;
@@ -542,16 +597,31 @@ static const char *set_allowed_prefix(cmd_parms *cmd, void *dummy,
     return NULL;
 }
 
+/* Maximum connect timeout: 60 seconds */
+#define MAX_CONNECT_TIMEOUT_MS 60000
+
 static const char *set_connect_timeout(cmd_parms *cmd, void *dummy,
                                        const char *arg)
 {
     socket_handoff_config *conf = ap_get_module_config(
         cmd->server->module_config, &socket_handoff_module);
-    int timeout = atoi(arg);
-    if (timeout < 0) {
-        return "SocketHandoffConnectTimeoutMs must be >= 0";
+    char *endptr;
+    long timeout;
+
+    errno = 0;
+    timeout = strtol(arg, &endptr, 10);
+
+    /* Check for conversion errors */
+    if (endptr == arg || *endptr != '\0') {
+        return "SocketHandoffConnectTimeoutMs must be a valid integer";
     }
-    conf->connect_timeout_ms = timeout;
+    if (errno == ERANGE || timeout < 1 || timeout > MAX_CONNECT_TIMEOUT_MS) {
+        return apr_psprintf(cmd->pool,
+            "SocketHandoffConnectTimeoutMs must be between 1 and %d",
+            MAX_CONNECT_TIMEOUT_MS);
+    }
+
+    conf->connect_timeout_ms = (int)timeout;
     conf->connect_timeout_ms_set = 1;
     return NULL;
 }

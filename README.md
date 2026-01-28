@@ -103,6 +103,7 @@ Default: `/var/run/`
 ### SocketHandoffConnectTimeoutMs
 
 Timeout (in milliseconds) when connecting to the handoff daemon Unix socket.
+Valid range: 1-60000 (1ms to 60 seconds).
 
 ```apache
 SocketHandoffConnectTimeoutMs 2000
