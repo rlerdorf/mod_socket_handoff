@@ -33,24 +33,21 @@ Streaming LLM responses:
 ## How It Works
 
 ```mermaid
-flowchart TD
-    A[Client Request] --> B[Apache Worker]
+---
+config:
+  look: handDrawn
+  mirrorActors: false
 
-    subgraph B[Apache Worker]
-        direction LR
-        C[mod_php<br/>authentication] --> D[mod_socket_handoff<br/>sees X-Socket-Handoff header]
-    end
-
-    B --> E[Worker freed immediately]
-    D -->|SCM_RIGHTS<br/>passes client fd| F[Streaming Daemon]
-
-    subgraph F[Streaming Daemon]
-        direction TB
-        G[Receives fd] --> H[Sends HTTP response]
-        H --> I[Streams data to client]
-    end
-
-    F --> J[Client receives SSE stream]
+---
+sequenceDiagram
+    Client->>+Apache: Request
+    Note right of Apache: PHP auth + Business logic<br>X-Socket-Handoff<br>X-Handoff-Data (json)
+    Apache->>Daemon: fd (SCM_RIGHTS) + json data
+    Note right of Apache: Apache worker released
+    deactivate Apache
+    Daemon->>+LLM: Prompt
+    LLM-->>Daemon: streamed response
+    Daemon-->>Client: SSE response
 ```
 
 ## Build
