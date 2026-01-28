@@ -226,7 +226,10 @@ static int validate_socket_path(const char *socket_path,
 {
     char *resolved_path = NULL;
     char *resolved_prefix = NULL;
+    char *truename_path = NULL;
+    char *truename_prefix = NULL;
     const char *prefix_with_slash = NULL;
+    const char *truename_prefix_with_slash = NULL;
     apr_status_t rv;
 
     if (!allowed_prefix || allowed_prefix[0] == '\0') {
@@ -263,6 +266,40 @@ static int validate_socket_path(const char *socket_path,
             "mod_socket_handoff: Path %s resolves outside allowed prefix",
             socket_path);
         return 0;
+    }
+
+    /*
+     * If the socket path exists, resolve symlinks and re-check. This closes
+     * symlink-escape attacks while allowing non-existent paths to be validated
+     * lexically (e.g., when daemons create the socket later).
+     */
+    rv = apr_filepath_merge(&truename_path, NULL, socket_path,
+                            APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                            r->pool);
+    if (rv == APR_SUCCESS && truename_path) {
+        rv = apr_filepath_merge(&truename_prefix, NULL, allowed_prefix,
+                                APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                                r->pool);
+        if (rv != APR_SUCCESS || !truename_prefix) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                "mod_socket_handoff: Invalid allowed prefix %s", allowed_prefix);
+            return 0;
+        }
+
+        if (truename_prefix[strlen(truename_prefix) - 1] == '/') {
+            truename_prefix_with_slash = truename_prefix;
+        } else {
+            truename_prefix_with_slash = apr_pstrcat(r->pool, truename_prefix, "/", NULL);
+        }
+
+        if (strncmp(truename_path, truename_prefix_with_slash,
+                    strlen(truename_prefix_with_slash)) != 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "mod_socket_handoff: Path %s resolves outside allowed prefix "
+                "after symlink resolution",
+                socket_path);
+            return 0;
+        }
     }
 
     return 1;
