@@ -75,6 +75,7 @@ LoadModule socket_handoff_module modules/mod_socket_handoff.so
 
 SocketHandoffEnabled On
 SocketHandoffAllowedPrefix /var/run/
+SocketHandoffConnectTimeoutMs 2000
 ```
 
 ## Configuration Directives
@@ -98,6 +99,16 @@ SocketHandoffAllowedPrefix /var/run/
 ```
 
 Default: `/var/run/`
+
+### SocketHandoffConnectTimeoutMs
+
+Timeout (in milliseconds) when connecting to the handoff daemon Unix socket.
+
+```apache
+SocketHandoffConnectTimeoutMs 2000
+```
+
+Default: `2000`
 
 ## PHP Usage
 
