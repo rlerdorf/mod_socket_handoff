@@ -76,8 +76,19 @@ impl UnixSocketListener {
             ))
         })?;
 
-        // Set permissions
-        set_socket_permissions(&socket_path, config.socket_mode)?;
+        // Set permissions; if this fails, clean up the bound socket before returning
+        if let Err(e) = set_socket_permissions(&socket_path, config.socket_mode) {
+            // Ensure the listener is closed before attempting to remove the socket file.
+            drop(listener);
+            if let Err(remove_err) = std::fs::remove_file(&socket_path) {
+                tracing::warn!(
+                    error = %remove_err,
+                    socket_path = %socket_path.display(),
+                    "Failed to remove socket after permission-setting error"
+                );
+            }
+            return Err(e);
+        }
 
         // Create connection semaphore
         let connection_semaphore = Arc::new(Semaphore::new(config.max_connections));

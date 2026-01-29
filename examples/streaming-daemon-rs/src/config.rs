@@ -221,14 +221,39 @@ impl Config {
                 self.server.max_connections = n;
             }
         }
-        if let Ok(v) = std::env::var("DAEMON_HANDOFF_TIMEOUT") {
+        if let Ok(v) = std::env::var("DAEMON_HANDOFF_TIMEOUT_SECS") {
             if let Ok(n) = v.parse() {
                 self.server.handoff_timeout_secs = n;
             }
         }
-        if let Ok(v) = std::env::var("DAEMON_WRITE_TIMEOUT") {
+        if let Ok(v) = std::env::var("DAEMON_WRITE_TIMEOUT_SECS") {
             if let Ok(n) = v.parse() {
                 self.server.write_timeout_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("DAEMON_SHUTDOWN_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse() {
+                self.server.shutdown_timeout_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("DAEMON_SOCKET_MODE") {
+            // Parse as octal if prefixed with 0o or 0, otherwise decimal
+            let v = v.trim();
+            if let Some(stripped) = v.strip_prefix("0o") {
+                if let Ok(n) = u32::from_str_radix(stripped, 8) {
+                    self.server.socket_mode = n;
+                }
+            } else if v.starts_with('0') && v.len() > 1 {
+                if let Ok(n) = u32::from_str_radix(v, 8) {
+                    self.server.socket_mode = n;
+                }
+            } else if let Ok(n) = v.parse() {
+                self.server.socket_mode = n;
+            }
+        }
+        if let Ok(v) = std::env::var("DAEMON_HANDOFF_BUFFER_SIZE") {
+            if let Ok(n) = v.parse() {
+                self.server.handoff_buffer_size = n;
             }
         }
 

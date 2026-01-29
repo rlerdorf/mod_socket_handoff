@@ -61,9 +61,6 @@ pub enum HandoffError {
     #[error("Handoff timeout")]
     Timeout,
 
-    #[error("Parse error: {0}")]
-    ParseError(String),
-
     #[error("System error: {0}")]
     System(#[from] nix::Error),
 }

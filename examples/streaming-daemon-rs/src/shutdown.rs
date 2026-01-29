@@ -80,11 +80,14 @@ impl ShutdownCoordinator {
     /// Wait for all connections to drain.
     pub async fn wait_for_drain(&self) {
         loop {
+            // Create the notification future before checking the count to avoid
+            // missing a notify that happens after the load but before awaiting.
+            let notified = self.inner.drain_notify.notified();
             let count = self.inner.active_connections.load(Ordering::Relaxed);
             if count == 0 {
                 return;
             }
-            self.inner.drain_notify.notified().await;
+            notified.await;
         }
     }
 

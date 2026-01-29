@@ -68,21 +68,33 @@ The release binary will be at `target/release/streaming-daemon-rs`.
 
 ### Environment Variables
 
-All configuration can be set via environment variables:
+The following settings can be overridden via environment variables:
 
 ```bash
-# Socket path
+# Server settings
 export DAEMON_SOCKET_PATH=/var/run/streaming-daemon-rs.sock
+export DAEMON_MAX_CONNECTIONS=50000
+export DAEMON_HANDOFF_TIMEOUT_SECS=5
+export DAEMON_WRITE_TIMEOUT_SECS=30
+export DAEMON_SHUTDOWN_TIMEOUT_SECS=120
+export DAEMON_SOCKET_MODE=0o660          # Octal format supported
+export DAEMON_HANDOFF_BUFFER_SIZE=65536
 
 # Backend selection
-export DAEMON_BACKEND_PROVIDER=openai
-export OPENAI_API_KEY=sk-...
+export DAEMON_BACKEND_PROVIDER=openai    # or "mock"
+export DAEMON_DEFAULT_MODEL=gpt-4o
 
-# Connection limits
-export DAEMON_MAX_CONNECTIONS=50000
+# OpenAI settings
+export OPENAI_API_KEY=sk-...
+export OPENAI_API_BASE=https://api.openai.com/v1
+
+# Metrics
+export DAEMON_METRICS_ENABLED=true
+export DAEMON_METRICS_ADDR=127.0.0.1:9090
 
 # Logging
 export DAEMON_LOG_LEVEL=debug
+export DAEMON_LOG_FORMAT=pretty          # or "json"
 export RUST_LOG=streaming_daemon_rs=debug
 ```
 
