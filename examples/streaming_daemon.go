@@ -350,6 +350,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		for i := range msgs {
 			fds, err := syscall.ParseUnixRights(&msgs[i])
 			if err != nil {
+				log.Printf("Warning: failed to parse Unix rights for cleanup: %v", err)
 				continue
 			}
 			for _, fd := range fds {
