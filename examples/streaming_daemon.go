@@ -42,6 +42,11 @@ const (
 	WriteTimeout    = 30 * time.Second // Max time for a single write to client
 	ShutdownTimeout = 35 * time.Second // Graceful shutdown timeout (should exceed WriteTimeout)
 	MaxConnections  = 1000             // Max concurrent connections
+
+	// MaxHandoffDataSize is the maximum size of handoff JSON data from Apache.
+	// This should be large enough to hold LLM prompts. Increase if needed.
+	// Note: Apache's LimitRequestFieldSize defaults to 8190 bytes per header.
+	MaxHandoffDataSize = 65536 // 64KB
 )
 
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
@@ -124,7 +129,9 @@ func main() {
 			// Check if context is cancelled before processing connection
 			select {
 			case <-ctx.Done():
-				conn.Close()
+				if err := conn.Close(); err != nil {
+					log.Printf("Error closing connection during shutdown: %v", err)
+				}
 				return
 			default:
 			}
@@ -256,8 +263,8 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
 	}
 
-	// Buffer for handoff data
-	buf := make([]byte, 4096)
+	// Buffer for handoff data (sized to hold large LLM prompts)
+	buf := make([]byte, MaxHandoffDataSize)
 
 	// Buffer for control message (SCM_RIGHTS)
 	// Size: 16 bytes for Cmsghdr on 64-bit Linux + 4 bytes for the fd
@@ -266,6 +273,11 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	n, oobn, _, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
 	if err != nil {
 		return -1, nil, fmt.Errorf("recvmsg failed: %w", err)
+	}
+
+	// Warn if data may have been truncated
+	if n == MaxHandoffDataSize {
+		log.Printf("Warning: handoff data may be truncated (received max %d bytes)", n)
 	}
 
 	// Parse control message to extract fd
