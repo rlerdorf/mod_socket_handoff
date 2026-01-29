@@ -140,6 +140,9 @@ func main() {
 
 	<-ctx.Done()
 
+	// Close listener to stop accepting new connections
+	listener.Close()
+
 	// Wait for active connections to finish (with timeout)
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
 	done := make(chan struct{})
@@ -171,7 +174,11 @@ func safeHandleConnection(ctx context.Context, conn net.Conn) {
 }
 
 func handleConnection(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("Error closing connection: %v", err)
+		}
+	}()
 
 	// Receive file descriptor and handoff data from Apache
 	clientFd, data, err := receiveFd(conn)
@@ -218,16 +225,21 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("not a Unix connection")
 	}
 
-	// Set deadline to prevent blocking forever if Apache doesn't send
-	if err := unixConn.SetReadDeadline(time.Now().Add(HandoffTimeout)); err != nil {
-		return -1, nil, fmt.Errorf("could not set deadline: %w", err)
-	}
-
 	file, err := unixConn.File()
 	if err != nil {
 		return -1, nil, fmt.Errorf("could not get file: %w", err)
 	}
 	defer file.Close()
+
+	// Set receive timeout on the raw fd using SO_RCVTIMEO
+	// Note: SetReadDeadline on net.Conn doesn't apply to syscall.Recvmsg
+	tv := syscall.Timeval{
+		Sec:  int64(HandoffTimeout / time.Second),
+		Usec: int64((HandoffTimeout % time.Second) / time.Microsecond),
+	}
+	if err := syscall.SetsockoptTimeval(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
+	}
 
 	// Buffer for handoff data
 	buf := make([]byte, 4096)
@@ -266,6 +278,12 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 // streamToClient sends an SSE response to the client.
 // Replace the demo response with your LLM API integration.
 func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
+	// Set write timeout on the client socket
+	if conn, err := net.FileConn(clientFile); err == nil {
+		conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+		defer conn.Close()
+	}
+
 	writer := bufio.NewWriter(clientFile)
 
 	// Send HTTP headers for SSE
@@ -277,9 +295,13 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 		"X-Accel-Buffering: no", // Disable buffering in nginx/proxies
 	}
 	for _, h := range headers {
-		fmt.Fprintf(writer, "%s\r\n", h)
+		if _, err := fmt.Fprintf(writer, "%s\r\n", h); err != nil {
+			return fmt.Errorf("failed to write header: %w", err)
+		}
 	}
-	fmt.Fprintf(writer, "\r\n")
+	if _, err := fmt.Fprintf(writer, "\r\n"); err != nil {
+		return fmt.Errorf("failed to write header terminator: %w", err)
+	}
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
@@ -337,7 +359,10 @@ func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff Hando
 
 // sendSSE sends a single SSE event with the given content.
 func sendSSE(writer *bufio.Writer, content string) error {
-	data, _ := json.Marshal(map[string]string{"content": content})
+	data, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		return fmt.Errorf("json marshal failed: %w", err)
+	}
 	if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
 		return fmt.Errorf("write failed: %w", err)
 	}
