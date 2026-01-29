@@ -47,6 +47,7 @@ fn recv_fd(socket: &UnixStream, buffer_size: usize) -> std::io::Result<(OwnedFd,
     let bytes_received = msg.bytes;
 
     // Extract file descriptor from control message
+    // We expect exactly one fd; any extras are closed
     let mut received_fd: Option<OwnedFd> = None;
 
     for cmsg in msg
@@ -54,11 +55,22 @@ fn recv_fd(socket: &UnixStream, buffer_size: usize) -> std::io::Result<(OwnedFd,
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
     {
         if let ControlMessageOwned::ScmRights(fds) = cmsg {
-            if !fds.is_empty() {
-                // SAFETY: The fd was received via SCM_RIGHTS and is valid
-                received_fd = Some(unsafe { OwnedFd::from_raw_fd(fds[0]) });
-                break;
+            if fds.is_empty() {
+                continue;
             }
+            // Take the first fd
+            // SAFETY: The fd was received via SCM_RIGHTS and is valid
+            received_fd = Some(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+
+            // Close extra fds if any to avoid leaks
+            for &extra_fd in &fds[1..] {
+                // SAFETY: These are valid fds from SCM_RIGHTS
+                unsafe {
+                    let _ = OwnedFd::from_raw_fd(extra_fd);
+                    // OwnedFd will close on drop
+                }
+            }
+            break;
         }
     }
 
@@ -73,14 +85,14 @@ fn recv_fd(socket: &UnixStream, buffer_size: usize) -> std::io::Result<(OwnedFd,
 }
 
 #[test]
-fn test_scm_rights_send() {
+fn test_scm_rights_send_and_receive() {
     // Test that SCM_RIGHTS sending and receiving works
     // This validates both sending and receiving file descriptors
 
     // Create a socket pair
     let (sender, receiver) = UnixStream::pair().unwrap();
 
-    // Create a dummy TCP socket to send
+    // Create a TCP socket pair for testing
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let mut client = std::net::TcpStream::connect(addr).unwrap();
