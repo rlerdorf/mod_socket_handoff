@@ -3,7 +3,7 @@
 //! These tests require a Unix-like environment with socket support.
 
 use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use nix::cmsg_space;
@@ -83,7 +83,7 @@ fn test_scm_rights_send() {
     // Create a dummy TCP socket to send
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let client = std::net::TcpStream::connect(addr).unwrap();
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
     let (accepted, _) = listener.accept().unwrap();
 
     let data = br#"{"user_id": 123, "prompt": "test"}"#;
@@ -100,8 +100,9 @@ fn test_scm_rights_send() {
 
     // Verify the fd works by converting it to a TcpStream and performing I/O
     // SAFETY: received_fd is a valid TCP socket fd received via SCM_RIGHTS
+    // We transfer ownership from OwnedFd to TcpStream using into_raw_fd
     let mut received_stream =
-        unsafe { std::net::TcpStream::from_raw_fd(received_fd.as_raw_fd()) };
+        unsafe { std::net::TcpStream::from_raw_fd(received_fd.into_raw_fd()) };
 
     // Write some data through the received socket
     let test_data = b"Hello from received fd";
@@ -109,13 +110,8 @@ fn test_scm_rights_send() {
 
     // Read it back on the client side to verify the fd works
     let mut client_buf = vec![0u8; test_data.len()];
-    let mut client = client;
     client.read_exact(&mut client_buf).unwrap();
     assert_eq!(client_buf, test_data);
-
-    // Clean up: received_fd is still owned by OwnedFd, so we need to forget the TcpStream
-    // to avoid double-close
-    std::mem::forget(received_stream);
 }
 
 #[test]
