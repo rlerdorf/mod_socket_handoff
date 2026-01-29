@@ -150,7 +150,8 @@ impl UnixSocketListener {
                 Err(_) => {
                     // At capacity - reject this connection promptly
                     metrics::record_connection_rejected();
-                    tracing::warn!("Connection rejected: at capacity");
+                    // Use debug level to avoid log flooding under sustained overload
+                    tracing::debug!("Connection rejected: at capacity");
                     // Dropping stream closes the connection
                     drop(stream);
                     continue;
@@ -159,8 +160,8 @@ impl UnixSocketListener {
 
             // Connection accepted and we have capacity
             metrics::record_connection_accepted();
+            // register_connection updates the active connections gauge atomically
             let guard = self.shutdown.register_connection();
-            metrics::set_active_connections(self.shutdown.active_connections());
 
             return Some(AcceptedConnection {
                 stream,

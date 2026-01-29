@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
 
+use crate::metrics;
+
 /// Shutdown coordinator for graceful termination.
 #[derive(Clone)]
 pub struct ShutdownCoordinator {
@@ -63,7 +65,9 @@ impl ShutdownCoordinator {
     /// Register a new connection and return a guard that decrements on drop.
     pub fn register_connection(&self) -> ConnectionGuard {
         let id = self.inner.next_conn_id.fetch_add(1, Ordering::Relaxed);
-        self.inner.active_connections.fetch_add(1, Ordering::Relaxed);
+        let new_count = self.inner.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
+        // Update gauge atomically with counter
+        metrics::set_active_connections(new_count);
 
         ConnectionGuard {
             coordinator: self.clone(),
@@ -87,6 +91,8 @@ impl ShutdownCoordinator {
 
     fn unregister_connection(&self, _id: u64) {
         let prev = self.inner.active_connections.fetch_sub(1, Ordering::Relaxed);
+        // Update gauge atomically with counter (prev - 1 is the new count)
+        metrics::set_active_connections(prev - 1);
         if prev == 1 {
             self.inner.drain_notify.notify_waiters();
         }

@@ -7,9 +7,10 @@ use nix::sys::socket::{
     getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType,
     ControlMessageOwned, MsgFlags, SockaddrStorage,
 };
+use nix::unistd::dup;
 use serde::Deserialize;
 use std::io::IoSliceMut;
-use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
@@ -74,33 +75,36 @@ pub async fn receive_handoff(
         ));
     }
 
-    // Get the raw fd for recvmsg
+    // Duplicate the fd so the blocking task owns it independently.
+    // This makes the operation cancellation-safe: if the async task is
+    // cancelled, the duplicated fd in spawn_blocking remains valid.
     let fd = stream.as_raw_fd();
+    let dup_fd = dup(fd).map_err(|e| {
+        HandoffError::ReceiveFailed(format!("Failed to dup fd: {}", e))
+    })?;
+    // SAFETY: dup() returns a valid new fd that we now own
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
 
     // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO set
     // to ensure the blocking call returns even under slow/malicious peers.
-    // We don't wrap this in tokio::time::timeout to avoid a race where the
-    // caller could drop the stream while spawn_blocking still holds the raw fd.
-    tokio::task::spawn_blocking(move || receive_fd_blocking(fd, timeout, buffer_size))
+    tokio::task::spawn_blocking(move || receive_fd_blocking(owned_fd, timeout, buffer_size))
         .await
         .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))?
 }
 
 /// Blocking recvmsg implementation.
 fn receive_fd_blocking(
-    fd: RawFd,
+    owned_fd: OwnedFd,
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
     // Set SO_RCVTIMEO so recvmsg returns even if peer is slow/malicious.
     // This ensures the blocking thread is released and not leaked.
-    // SAFETY: fd is valid for the duration of this function call.
-    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let timeval = nix::sys::time::TimeVal::new(
         timeout.as_secs() as i64,
         timeout.subsec_micros() as i64,
     );
-    setsockopt(&borrowed_fd, ReceiveTimeout, &timeval).map_err(|e| {
+    setsockopt(&owned_fd, ReceiveTimeout, &timeval).map_err(|e| {
         HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e))
     })?;
 
@@ -111,6 +115,7 @@ fn receive_fd_blocking(
 
     // Use MSG_CMSG_CLOEXEC to set FD_CLOEXEC on received fds, preventing
     // them from leaking into any future exec calls.
+    let fd = owned_fd.as_raw_fd();
     let msg = recvmsg::<SockaddrStorage>(
         fd,
         &mut iov,

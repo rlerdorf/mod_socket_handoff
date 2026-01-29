@@ -66,9 +66,7 @@ impl ConnectionHandler {
                 tracing::error!(id = conn_id, panic = %panic_msg, "Connection handler panicked");
             }
         }
-
-        // Update metrics (exclude this connection, which is about to end)
-        metrics::set_active_connections(guard.active_connections().saturating_sub(1));
+        // Note: active connections gauge is updated atomically in ConnectionGuard::drop
     }
 
     async fn handle_inner(
