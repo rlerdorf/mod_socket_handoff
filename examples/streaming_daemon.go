@@ -147,6 +147,13 @@ func main() {
 						connWg.Done()
 						atomic.AddInt64(&activeConns, -1)
 					}()
+					// Check context again inside goroutine to handle race condition
+					select {
+					case <-ctx.Done():
+						c.Close()
+						return
+					default:
+					}
 					safeHandleConnection(ctx, c)
 				}(conn)
 			default:
@@ -168,18 +175,19 @@ func main() {
 	}
 
 	// Wait for active connections to finish (with timeout)
+	// Use polling loop to avoid goroutine leak on timeout
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
-	done := make(chan struct{})
-	go func() {
-		connWg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		log.Println("All connections closed gracefully")
-	case <-time.After(ShutdownTimeout):
-		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
+	deadline := time.Now().Add(ShutdownTimeout)
+	for {
+		if atomic.LoadInt64(&activeConns) == 0 {
+			log.Println("All connections closed gracefully")
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Cleanup
@@ -275,9 +283,10 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("recvmsg failed: %w", err)
 	}
 
-	// Warn if data may have been truncated
+	// Warn if data may have been truncated. Note: receiving exactly MaxHandoffDataSize
+	// bytes does not guarantee truncation; it only indicates that truncation is possible.
 	if n == MaxHandoffDataSize {
-		log.Printf("Warning: handoff data may be truncated (received max %d bytes)", n)
+		log.Printf("Warning: handoff data may be truncated (received exactly max buffer size %d bytes)", n)
 	}
 
 	// Parse control message to extract fd
@@ -411,9 +420,10 @@ func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flush failed: %w", err)
 	}
-	// Reset deadline after successful write for per-write idle timeout
+	// Reset deadline after successful write for per-write idle timeout.
+	// Treat failure as fatal so we don't continue streaming without timeout protection.
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		log.Printf("Warning: could not reset write deadline: %v", err)
+		return fmt.Errorf("set write deadline failed: %w", err)
 	}
 	return nil
 }
