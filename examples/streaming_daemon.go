@@ -289,7 +289,7 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	}
 	defer conn.Close()
 
-	// Set write timeout to prevent blocking on slow/stalled clients
+	// Set initial write timeout
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
 		log.Printf("Warning: could not set write deadline: %v", err)
 	}
@@ -315,10 +315,12 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
+	// Reset deadline after successful header write
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 
 	// Stream the response
 	// TODO: Replace this with your LLM API call
-	return streamDemoResponse(ctx, writer, handoff)
+	return streamDemoResponse(ctx, conn, writer, handoff)
 }
 
 // streamDemoResponse simulates an LLM streaming response.
@@ -328,9 +330,9 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 //	for {
 //	    chunk, err := stream.Recv()
 //	    if err == io.EOF { break }
-//	    sendSSE(writer, chunk.Choices[0].Delta.Content)
+//	    sendSSE(conn, writer, chunk.Choices[0].Delta.Content)
 //	}
-func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff HandoffData) error {
+func streamDemoResponse(ctx context.Context, conn net.Conn, writer *bufio.Writer, handoff HandoffData) error {
 	response := fmt.Sprintf(
 		"Hello! I received your prompt: %q\n\n"+
 			"This response is being streamed from a daemon that received "+
@@ -353,8 +355,8 @@ func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff Hando
 			content = " " + word
 		}
 
-		// Send SSE event
-		if err := sendSSE(writer, content); err != nil {
+		// Send SSE event (resets write deadline after each successful write)
+		if err := sendSSE(conn, writer, content); err != nil {
 			return err
 		}
 
@@ -363,12 +365,16 @@ func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff Hando
 	}
 
 	// Send completion marker
-	fmt.Fprintf(writer, "data: [DONE]\n\n")
+	if _, err := fmt.Fprintf(writer, "data: [DONE]\n\n"); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
 	return writer.Flush()
 }
 
 // sendSSE sends a single SSE event with the given content.
-func sendSSE(writer *bufio.Writer, content string) error {
+// It resets the write deadline after each successful flush to implement
+// a per-write idle timeout (not a total stream timeout).
+func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
 	data, err := json.Marshal(map[string]string{"content": content})
 	if err != nil {
 		return fmt.Errorf("json marshal failed: %w", err)
@@ -376,7 +382,12 @@ func sendSSE(writer *bufio.Writer, content string) error {
 	if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
 		return fmt.Errorf("write failed: %w", err)
 	}
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush failed: %w", err)
+	}
+	// Reset deadline after successful write for per-write idle timeout
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	return nil
 }
 
 func truncate(s string, n int) string {
