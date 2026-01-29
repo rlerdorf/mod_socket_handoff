@@ -87,7 +87,6 @@ func main() {
 			default:
 				log.Printf("Received %v, shutting down...", sig)
 				signal.Stop(sigChan)
-				close(sigChan)
 				cancel()
 				return
 			}
@@ -150,7 +149,9 @@ func main() {
 					// Check context again inside goroutine to handle race condition
 					select {
 					case <-ctx.Done():
-						c.Close()
+						if err := c.Close(); err != nil {
+							log.Printf("Error closing connection during shutdown: %v", err)
+						}
 						return
 					default:
 					}
@@ -175,19 +176,18 @@ func main() {
 	}
 
 	// Wait for active connections to finish (with timeout)
-	// Use polling loop to avoid goroutine leak on timeout
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
-	deadline := time.Now().Add(ShutdownTimeout)
-	for {
-		if atomic.LoadInt64(&activeConns) == 0 {
-			log.Println("All connections closed gracefully")
-			break
-		}
-		if time.Now().After(deadline) {
-			log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		connWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("All connections closed gracefully")
+	case <-time.After(ShutdownTimeout):
+		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
 	}
 
 	// Cleanup
@@ -348,6 +348,14 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
+
+	// Check for context cancellation before starting to stream
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Reset deadline after successful header write
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
 		log.Printf("Warning: could not reset write deadline: %v", err)
