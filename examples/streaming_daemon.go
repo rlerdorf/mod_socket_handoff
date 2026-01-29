@@ -361,12 +361,7 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	default:
 	}
 
-	// Reset deadline after successful header write
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return fmt.Errorf("could not reset write deadline: %w", err)
-	}
-
-	// Stream the response
+	// Stream the response (sendSSE resets write deadline after each successful write)
 	// TODO: Replace this with your LLM API call
 	return streamDemoResponse(ctx, conn, writer, handoff)
 }
