@@ -127,7 +127,14 @@ fn receive_fd_blocking(
         Some(&mut cmsg_buf),
         MsgFlags::MSG_CMSG_CLOEXEC,
     )
-    .map_err(HandoffError::System)?;
+    .map_err(|e| {
+        // Translate SO_RCVTIMEO errors (EAGAIN/EWOULDBLOCK) to Timeout
+        use nix::errno::Errno;
+        if e == Errno::EAGAIN || e == Errno::EWOULDBLOCK {
+            return HandoffError::Timeout;
+        }
+        HandoffError::System(e)
+    })?;
 
     // Check for truncation
     if msg.flags.contains(MsgFlags::MSG_TRUNC) {

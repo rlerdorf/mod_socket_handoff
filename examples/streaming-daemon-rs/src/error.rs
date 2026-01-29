@@ -37,14 +37,8 @@ pub enum DaemonError {
 /// Errors during fd handoff from Apache.
 #[derive(Error, Debug)]
 pub enum HandoffError {
-    #[error("Not a Unix connection")]
-    NotUnixConnection,
-
     #[error("Failed to receive fd: {0}")]
     ReceiveFailed(String),
-
-    #[error("No control message received")]
-    NoControlMessage,
 
     #[error("No file descriptor received")]
     NoFileDescriptor,

@@ -29,8 +29,10 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 
-# Allow socket creation in /var/run
-ReadWritePaths=/var/run
+# Socket directory - creates /run/streaming-daemon-rs/ with correct ownership
+# The daemon should use socket_path=/run/streaming-daemon-rs/daemon.sock
+RuntimeDirectory=streaming-daemon-rs
+RuntimeDirectoryMode=0755
 
 # Resource limits
 LimitNOFILE=200000
