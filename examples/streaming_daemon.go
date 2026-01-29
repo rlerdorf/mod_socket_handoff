@@ -294,6 +294,11 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", MaxHandoffDataSize)
 	}
 
+	// Check MSG_CTRUNC flag to detect if control message (containing fd) was truncated
+	if recvflags&syscall.MSG_CTRUNC != 0 {
+		return -1, nil, fmt.Errorf("control message truncated; fd may be corrupted")
+	}
+
 	// Parse control message to extract fd
 	msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
 	if err != nil {
