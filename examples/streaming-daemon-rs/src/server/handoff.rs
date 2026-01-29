@@ -48,30 +48,21 @@ pub struct HandoffResult {
 /// Receive file descriptor and handoff data from Apache via SCM_RIGHTS.
 ///
 /// This function:
-/// 1. Waits for the Unix socket to be readable (with timeout)
+/// 1. Waits for the Unix socket to be readable
 /// 2. Uses recvmsg to receive both the data and the control message
 /// 3. Extracts the file descriptor from SCM_RIGHTS
 /// 4. Validates the socket type
 /// 5. Parses the JSON handoff data
+///
+/// Timeout is enforced via SO_RCVTIMEO on the socket, not tokio::time::timeout,
+/// to avoid a race where the caller drops the stream while spawn_blocking is
+/// still using the raw fd.
 pub async fn receive_handoff(
     stream: &UnixStream,
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
-    // Apply timeout to the entire handoff receive operation.
-    // We also set SO_RCVTIMEO on the socket so the blocking recvmsg returns
-    // even if the tokio timeout fires (spawn_blocking tasks can't be cancelled).
-    tokio::time::timeout(timeout, receive_handoff_inner(stream, timeout, buffer_size))
-        .await
-        .map_err(|_| HandoffError::Timeout)?
-}
-
-async fn receive_handoff_inner(
-    stream: &UnixStream,
-    timeout: Duration,
-    buffer_size: usize,
-) -> Result<HandoffResult, HandoffError> {
-    // Wait for readable
+    // Wait for readable first (non-blocking check)
     let ready = stream
         .ready(Interest::READABLE)
         .await
@@ -86,14 +77,13 @@ async fn receive_handoff_inner(
     // Get the raw fd for recvmsg
     let fd = stream.as_raw_fd();
 
-    // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO
-    // to ensure the blocking call returns even under slow/malicious peers
-    let result =
-        tokio::task::spawn_blocking(move || receive_fd_blocking(fd, timeout, buffer_size))
-            .await
-            .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))??;
-
-    Ok(result)
+    // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO set
+    // to ensure the blocking call returns even under slow/malicious peers.
+    // We don't wrap this in tokio::time::timeout to avoid a race where the
+    // caller could drop the stream while spawn_blocking still holds the raw fd.
+    tokio::task::spawn_blocking(move || receive_fd_blocking(fd, timeout, buffer_size))
+        .await
+        .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))?
 }
 
 /// Blocking recvmsg implementation.
