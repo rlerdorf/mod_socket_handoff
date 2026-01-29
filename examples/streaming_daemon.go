@@ -189,7 +189,8 @@ func main() {
 
 	<-ctx.Done()
 
-	// Close listener to unblock accept loop; defer above handles panic cases
+	// Close listener to unblock accept loop immediately. The defer above is kept
+	// as a safety net for panics. Calling Close() twice is safe (second returns error).
 	listener.Close()
 
 	// Wait for active connections to finish
@@ -250,6 +251,18 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}
 	defer clientFile.Close()
 
+	// Validate that the received fd is actually a stream socket.
+	// This defends against malicious or buggy senders passing non-socket fds.
+	sockType, sockErr := syscall.GetsockoptInt(clientFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
+	if sockErr != nil {
+		log.Printf("fd %d is not a valid socket: %v", clientFd, sockErr)
+		return
+	}
+	if sockType != syscall.SOCK_STREAM {
+		log.Printf("fd %d has unexpected socket type %d (expected SOCK_STREAM)", clientFd, sockType)
+		return
+	}
+
 	// Panic recovery with error response to client. This runs after we have
 	// the client connection, so we can send a 500 error before closing.
 	defer func() {
@@ -262,7 +275,9 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 				"Connection: close\r\n" +
 				"\r\n" +
 				"Internal server error\n"
-			clientFile.Write([]byte(errorResponse))
+			if _, err := clientFile.Write([]byte(errorResponse)); err != nil {
+				log.Printf("Failed to send error response to client: %v", err)
+			}
 		}
 	}()
 
@@ -378,6 +393,14 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("no file descriptors received")
 	}
 
+	// Close any extra fds if multiple were received (we only use the first one)
+	if len(fds) > 1 {
+		log.Printf("Warning: received %d fds, expected 1; closing extras", len(fds))
+		for _, extraFd := range fds[1:] {
+			syscall.Close(extraFd)
+		}
+	}
+
 	// Copy data before returning buffer to pool
 	data := make([]byte, n)
 	copy(data, buf[:n])
@@ -391,12 +414,12 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
 	// Create net.Conn from file to enable write deadlines.
 	// We must write to this conn (not clientFile) for the deadline to apply.
-	// Note: conn and clientFile share the same underlying fd, so we do NOT
-	// defer conn.Close() here - the caller closes clientFile which closes the fd.
+	// Note: net.FileConn dups the fd, so conn has its own fd that must be closed.
 	conn, err := net.FileConn(clientFile)
 	if err != nil {
 		return fmt.Errorf("failed to create conn from file: %w", err)
 	}
+	defer conn.Close()
 
 	// Set initial write timeout - fail fast if we can't set deadline
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
@@ -476,6 +499,13 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, writer *bufio.Writer
 
 		// Simulate token generation delay
 		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Check context before sending completion marker for responsive shutdown
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Send completion marker
