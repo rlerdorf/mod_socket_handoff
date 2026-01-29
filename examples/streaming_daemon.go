@@ -38,9 +38,10 @@ const (
 	DaemonSocket = "/var/run/streaming-daemon.sock"
 
 	// Timeouts for robustness
-	HandoffTimeout = 5 * time.Second  // Max time to receive fd from Apache
-	WriteTimeout   = 30 * time.Second // Max time for a single write to client
-	MaxConnections = 1000             // Max concurrent connections
+	HandoffTimeout  = 5 * time.Second  // Max time to receive fd from Apache
+	WriteTimeout    = 30 * time.Second // Max time for a single write to client
+	ShutdownTimeout = 35 * time.Second // Graceful shutdown timeout (should exceed WriteTimeout)
+	MaxConnections  = 1000             // Max concurrent connections
 )
 
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
@@ -81,6 +82,7 @@ func main() {
 			default:
 				log.Printf("Received %v, shutting down...", sig)
 				signal.Stop(sigChan)
+				close(sigChan)
 				cancel()
 				return
 			}
@@ -119,6 +121,14 @@ func main() {
 				}
 			}
 
+			// Check if context is cancelled before processing connection
+			select {
+			case <-ctx.Done():
+				conn.Close()
+				return
+			default:
+			}
+
 			// Acquire semaphore (limit concurrent connections)
 			select {
 			case connSemaphore <- struct{}{}:
@@ -137,6 +147,8 @@ func main() {
 				if err := conn.Close(); err != nil {
 					log.Printf("Error closing rejected connection: %v", err)
 				}
+				// Back off slightly to avoid tight accept-reject loops under overload
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 	}()
@@ -159,7 +171,7 @@ func main() {
 	select {
 	case <-done:
 		log.Println("All connections closed gracefully")
-	case <-time.After(10 * time.Second):
+	case <-time.After(ShutdownTimeout):
 		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
 	}
 
@@ -236,9 +248,9 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	}
 	defer file.Close()
 
-	// Set receive timeout on the raw fd using SO_RCVTIMEO
+	// Set receive timeout on the raw fd using SO_RCVTIMEO (Unix-specific)
 	// Note: SetReadDeadline on net.Conn doesn't apply to syscall.Recvmsg
-	// Use NsecToTimeval for cross-platform compatibility (Timeval field types vary)
+	// Use NsecToTimeval for portability across Unix platforms (Timeval field types vary)
 	tv := syscall.NsecToTimeval(HandoffTimeout.Nanoseconds())
 	if err := syscall.SetsockoptTimeval(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
 		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
@@ -316,7 +328,9 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
 	// Reset deadline after successful header write
-	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		log.Printf("Warning: could not reset write deadline: %v", err)
+	}
 
 	// Stream the response
 	// TODO: Replace this with your LLM API call
@@ -386,7 +400,9 @@ func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
 		return fmt.Errorf("flush failed: %w", err)
 	}
 	// Reset deadline after successful write for per-write idle timeout
-	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		log.Printf("Warning: could not reset write deadline: %v", err)
+	}
 	return nil
 }
 
