@@ -4,11 +4,12 @@
 
 use nix::cmsg_space;
 use nix::sys::socket::{
-    getsockopt, recvmsg, sockopt::SockType, ControlMessageOwned, MsgFlags, SockaddrStorage,
+    getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType,
+    ControlMessageOwned, MsgFlags, SockaddrStorage,
 };
 use serde::Deserialize;
 use std::io::IoSliceMut;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
@@ -57,14 +58,17 @@ pub async fn receive_handoff(
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
-    // Apply timeout to the entire handoff receive operation
-    tokio::time::timeout(timeout, receive_handoff_inner(stream, buffer_size))
+    // Apply timeout to the entire handoff receive operation.
+    // We also set SO_RCVTIMEO on the socket so the blocking recvmsg returns
+    // even if the tokio timeout fires (spawn_blocking tasks can't be cancelled).
+    tokio::time::timeout(timeout, receive_handoff_inner(stream, timeout, buffer_size))
         .await
         .map_err(|_| HandoffError::Timeout)?
 }
 
 async fn receive_handoff_inner(
     stream: &UnixStream,
+    timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
     // Wait for readable
@@ -82,24 +86,48 @@ async fn receive_handoff_inner(
     // Get the raw fd for recvmsg
     let fd = stream.as_raw_fd();
 
-    // Perform blocking recvmsg in spawn_blocking
-    // Note: The outer timeout will cancel this if it takes too long
-    let result = tokio::task::spawn_blocking(move || receive_fd_blocking(fd, buffer_size))
-        .await
-        .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))??;
+    // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO
+    // to ensure the blocking call returns even under slow/malicious peers
+    let result =
+        tokio::task::spawn_blocking(move || receive_fd_blocking(fd, timeout, buffer_size))
+            .await
+            .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))??;
 
     Ok(result)
 }
 
 /// Blocking recvmsg implementation.
-fn receive_fd_blocking(fd: RawFd, buffer_size: usize) -> Result<HandoffResult, HandoffError> {
+fn receive_fd_blocking(
+    fd: RawFd,
+    timeout: Duration,
+    buffer_size: usize,
+) -> Result<HandoffResult, HandoffError> {
+    // Set SO_RCVTIMEO so recvmsg returns even if peer is slow/malicious.
+    // This ensures the blocking thread is released and not leaked.
+    // SAFETY: fd is valid for the duration of this function call.
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    let timeval = nix::sys::time::TimeVal::new(
+        timeout.as_secs() as i64,
+        timeout.subsec_micros() as i64,
+    );
+    setsockopt(&borrowed_fd, ReceiveTimeout, &timeval).map_err(|e| {
+        HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e))
+    })?;
+
     let mut data_buf = vec![0u8; buffer_size];
     let mut cmsg_buf = cmsg_space!([RawFd; 1]);
 
     let mut iov = [IoSliceMut::new(&mut data_buf)];
 
-    let msg = recvmsg::<SockaddrStorage>(fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
-        .map_err(HandoffError::System)?;
+    // Use MSG_CMSG_CLOEXEC to set FD_CLOEXEC on received fds, preventing
+    // them from leaking into any future exec calls.
+    let msg = recvmsg::<SockaddrStorage>(
+        fd,
+        &mut iov,
+        Some(&mut cmsg_buf),
+        MsgFlags::MSG_CMSG_CLOEXEC,
+    )
+    .map_err(HandoffError::System)?;
 
     // Check for truncation
     if msg.flags.contains(MsgFlags::MSG_TRUNC) {

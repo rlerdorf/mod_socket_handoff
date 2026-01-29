@@ -90,24 +90,24 @@ pub fn record_handoff_error() {
 }
 
 /// Record backend request.
-pub fn record_backend_request(backend: &str) {
-    counter!("daemon_backend_requests", "backend" => backend.to_string()).increment(1);
+pub fn record_backend_request(backend: &'static str) {
+    counter!("daemon_backend_requests", "backend" => backend).increment(1);
 }
 
 /// Record backend error.
-pub fn record_backend_error(backend: &str) {
-    counter!("daemon_backend_errors", "backend" => backend.to_string()).increment(1);
+pub fn record_backend_error(backend: &'static str) {
+    counter!("daemon_backend_errors", "backend" => backend).increment(1);
 }
 
 /// Record backend request duration.
-pub fn record_backend_duration(backend: &str, duration: std::time::Duration) {
-    histogram!("daemon_backend_duration_seconds", "backend" => backend.to_string())
+pub fn record_backend_duration(backend: &'static str, duration: std::time::Duration) {
+    histogram!("daemon_backend_duration_seconds", "backend" => backend)
         .record(duration.as_secs_f64());
 }
 
 /// Record time to first byte from backend.
-pub fn record_backend_ttfb(backend: &str, duration: std::time::Duration) {
-    histogram!("daemon_backend_ttfb_seconds", "backend" => backend.to_string())
+pub fn record_backend_ttfb(backend: &'static str, duration: std::time::Duration) {
+    histogram!("daemon_backend_ttfb_seconds", "backend" => backend)
         .record(duration.as_secs_f64());
 }
 
