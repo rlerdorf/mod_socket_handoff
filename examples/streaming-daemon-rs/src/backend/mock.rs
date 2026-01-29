@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
-use super::traits::{ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend, VecChunkStream};
+use super::traits::{StreamChunk, StreamRequest, StreamingBackend, VecChunkStream};
 use crate::error::BackendError;
 
 /// Mock backend that simulates LLM streaming.

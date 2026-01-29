@@ -1,8 +1,9 @@
 [Unit]
 Description=Streaming Daemon for Apache Socket Handoff (Rust)
 Documentation=https://github.com/rlerdorf/mod_socket_handoff
-After=network.target apache2.service
-Wants=apache2.service
+After=network.target
+# Start daemon before Apache so the socket is ready for handoff connections
+Before=apache2.service
 
 [Service]
 Type=simple
