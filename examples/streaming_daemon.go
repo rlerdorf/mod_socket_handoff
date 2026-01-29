@@ -25,7 +25,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -33,6 +36,11 @@ import (
 const (
 	// Socket path - must match SocketHandoffAllowedPrefix in Apache config
 	DaemonSocket = "/var/run/streaming-daemon.sock"
+
+	// Timeouts for robustness
+	HandoffTimeout = 5 * time.Second  // Max time to receive fd from Apache
+	WriteTimeout   = 30 * time.Second // Max time for a single write to client
+	MaxConnections = 1000             // Max concurrent connections
 )
 
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
@@ -45,20 +53,37 @@ type HandoffData struct {
 	Timestamp int64  `json:"timestamp,omitempty"`
 }
 
+// Connection tracking for graceful shutdown
+var (
+	activeConns   int64
+	connSemaphore chan struct{}
+	connWg        sync.WaitGroup
+)
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	// Initialize connection limiter
+	connSemaphore = make(chan struct{}, MaxConnections)
 
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	go func() {
-		<-sigChan
-		log.Println("Shutting down...")
-		cancel()
+		for sig := range sigChan {
+			switch sig {
+			case syscall.SIGHUP:
+				log.Printf("Received SIGHUP, active connections: %d", atomic.LoadInt64(&activeConns))
+			default:
+				log.Printf("Received %v, shutting down...", sig)
+				cancel()
+				return
+			}
+		}
 	}()
 
 	// Remove stale socket
@@ -76,7 +101,7 @@ func main() {
 		log.Printf("Warning: Could not chmod socket: %v", err)
 	}
 
-	log.Printf("Streaming daemon listening on %s", DaemonSocket)
+	log.Printf("Streaming daemon listening on %s (max %d connections)", DaemonSocket, MaxConnections)
 
 	// Accept connections
 	go func() {
@@ -88,19 +113,61 @@ func main() {
 					return
 				default:
 					log.Printf("Accept error: %v", err)
+					time.Sleep(100 * time.Millisecond) // Back off on errors
 					continue
 				}
 			}
 
-			go handleConnection(ctx, conn)
+			// Acquire semaphore (limit concurrent connections)
+			select {
+			case connSemaphore <- struct{}{}:
+				connWg.Add(1)
+				atomic.AddInt64(&activeConns, 1)
+				go func(c net.Conn) {
+					defer func() {
+						<-connSemaphore
+						connWg.Done()
+						atomic.AddInt64(&activeConns, -1)
+					}()
+					safeHandleConnection(ctx, c)
+				}(conn)
+			default:
+				log.Printf("Connection limit reached (%d), rejecting", MaxConnections)
+				conn.Close()
+			}
 		}
 	}()
 
 	<-ctx.Done()
 
+	// Wait for active connections to finish (with timeout)
+	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
+	done := make(chan struct{})
+	go func() {
+		connWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("All connections closed gracefully")
+	case <-time.After(10 * time.Second):
+		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
+	}
+
 	// Cleanup
 	os.Remove(DaemonSocket)
 	log.Println("Daemon stopped")
+}
+
+// safeHandleConnection wraps handleConnection with panic recovery
+func safeHandleConnection(ctx context.Context, conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in connection handler: %v\n%s", r, debug.Stack())
+		}
+	}()
+	handleConnection(ctx, conn)
 }
 
 func handleConnection(ctx context.Context, conn net.Conn) {
@@ -112,6 +179,16 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		log.Printf("Failed to receive fd: %v", err)
 		return
 	}
+
+	// Wrap fd in os.File immediately to ensure cleanup on any error path
+	// os.NewFile takes ownership - we must use file.Close(), not syscall.Close()
+	clientFile := os.NewFile(uintptr(clientFd), "client")
+	if clientFile == nil {
+		log.Printf("Failed to create file from fd %d", clientFd)
+		syscall.Close(clientFd) // Fallback close if NewFile fails
+		return
+	}
+	defer clientFile.Close()
 
 	log.Printf("Received handoff: fd=%d, data_len=%d", clientFd, len(data))
 
@@ -126,7 +203,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	log.Printf("  user_id=%d, prompt=%q", handoff.UserID, truncate(handoff.Prompt, 50))
 
 	// Stream response to client
-	if err := streamToClient(ctx, clientFd, handoff); err != nil {
+	if err := streamToClient(ctx, clientFile, handoff); err != nil {
 		log.Printf("Stream error: %v", err)
 	}
 
@@ -139,6 +216,11 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		return -1, nil, fmt.Errorf("not a Unix connection")
+	}
+
+	// Set deadline to prevent blocking forever if Apache doesn't send
+	if err := unixConn.SetReadDeadline(time.Now().Add(HandoffTimeout)); err != nil {
+		return -1, nil, fmt.Errorf("could not set deadline: %w", err)
 	}
 
 	file, err := unixConn.File()
@@ -183,17 +265,8 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 // streamToClient sends an SSE response to the client.
 // Replace the demo response with your LLM API integration.
-func streamToClient(ctx context.Context, clientFd int, handoff HandoffData) error {
-	// Wrap the fd in an os.File for easier I/O.
-	// IMPORTANT: os.NewFile takes ownership of the fd. Use file.Close() to close it,
-	// NOT syscall.Close(). The defer ensures the fd stays valid during streaming.
-	file := os.NewFile(uintptr(clientFd), "client")
-	if file == nil {
-		return fmt.Errorf("could not create file from fd")
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
+func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
+	writer := bufio.NewWriter(clientFile)
 
 	// Send HTTP headers for SSE
 	headers := []string{
@@ -265,7 +338,9 @@ func streamDemoResponse(ctx context.Context, writer *bufio.Writer, handoff Hando
 // sendSSE sends a single SSE event with the given content.
 func sendSSE(writer *bufio.Writer, content string) error {
 	data, _ := json.Marshal(map[string]string{"content": content})
-	fmt.Fprintf(writer, "data: %s\n\n", data)
+	if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
 	return writer.Flush()
 }
 
