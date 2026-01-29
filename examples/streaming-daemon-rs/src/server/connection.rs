@@ -8,7 +8,7 @@ use std::time::Instant;
 use futures::FutureExt;
 use tokio::net::UnixStream;
 
-use crate::backend::StreamingBackend;
+use crate::backend::{ChunkStreamTrait, StreamingBackend};
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
 use crate::metrics::{self, Timer};
@@ -68,7 +68,7 @@ impl ConnectionHandler {
         }
 
         // Update metrics
-        metrics::set_active_connections(guard.coordinator_active_connections());
+        metrics::set_active_connections(guard.active_connections());
     }
 
     async fn handle_inner(
@@ -116,11 +116,10 @@ impl ConnectionHandler {
         let client_fd = handoff.client_fd;
 
         // Create async file from the fd
+        // Use into_raw_fd() to consume the OwnedFd and transfer ownership
         let std_stream = unsafe {
-            use std::os::unix::io::FromRawFd;
-            let raw_fd = client_fd.as_raw_fd();
-            // Prevent OwnedFd from closing - we'll manage it via std_stream
-            std::mem::forget(client_fd);
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            let raw_fd = client_fd.into_raw_fd();
             std::net::TcpStream::from_raw_fd(raw_fd)
         };
 
@@ -239,15 +238,3 @@ pub enum ConnectionError {
     Backend(String),
 }
 
-// Extension trait for ConnectionGuard
-trait ConnectionGuardExt {
-    fn coordinator_active_connections(&self) -> u64;
-}
-
-impl ConnectionGuardExt for ConnectionGuard {
-    fn coordinator_active_connections(&self) -> u64 {
-        // We need to access the coordinator's active count
-        // This is a bit of a hack - we could expose this directly
-        0 // The metrics update happens via the coordinator
-    }
-}

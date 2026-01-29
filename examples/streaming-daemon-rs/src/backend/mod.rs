@@ -6,7 +6,7 @@ mod traits;
 
 pub use mock::MockBackend;
 pub use openai::OpenAIBackend;
-pub use traits::{ChunkStream, StreamChunk, StreamRequest, StreamingBackend};
+pub use traits::{ChunkStream, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend};
 
 use std::sync::Arc;
 
@@ -34,6 +34,7 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 config.openai.api_base.clone(),
                 config.default_model.clone(),
                 config.timeout(),
+                config.openai.pool_max_idle_per_host,
             )?))
         }
         other => Err(BackendError::Config(format!(

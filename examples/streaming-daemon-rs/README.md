@@ -109,7 +109,7 @@ See `config/daemon.toml` for all options:
 ```toml
 [server]
 socket_path = "/var/run/streaming-daemon-rs.sock"
-socket_mode = "0o666"
+socket_mode = "0o660"  # Restrict access to owner/group
 max_connections = 100000
 handoff_timeout_secs = 5
 write_timeout_secs = 30
@@ -215,11 +215,11 @@ curl http://localhost:9090/metrics
 ```
 
 Available metrics:
-- `daemon_connections_active` - Current active connections
+- `daemon_active_connections` - Current active connections
 - `daemon_connections_total` - Total connections handled
-- `daemon_handoffs_received` - Successful fd handoffs
-- `daemon_handoffs_failed` - Failed handoffs
-- `daemon_stream_bytes_sent` - Total bytes streamed
+- `daemon_handoffs_total` - Successful fd handoffs
+- `daemon_handoff_errors` - Failed handoffs
+- `daemon_bytes_sent` - Total bytes streamed
 - `daemon_backend_requests` - Backend API requests
 - `daemon_backend_errors` - Backend errors
 
@@ -307,9 +307,9 @@ streaming-daemon-rs/
 # Check socket permissions
 ls -la /var/run/streaming-daemon-rs.sock
 
-# Ensure www-data can access
+# Ensure www-data (or appropriate service user) can access
 sudo chown www-data:www-data /var/run/streaming-daemon-rs.sock
-sudo chmod 666 /var/run/streaming-daemon-rs.sock
+sudo chmod 660 /var/run/streaming-daemon-rs.sock
 ```
 
 ### Connection Refused

@@ -1,7 +1,7 @@
 # Streaming Daemon Configuration
 #
 # All settings can be overridden with environment variables.
-# Format: DAEMON_SECTION__KEY (e.g., DAEMON_SOCKET_PATH, DAEMON_MAX_CONNECTIONS)
+# Format: DAEMON_<UPPER_SNAKE_KEY> (e.g., DAEMON_SOCKET_PATH, DAEMON_MAX_CONNECTIONS)
 
 [server]
 # Unix socket path for receiving handoffs from Apache
@@ -9,9 +9,9 @@
 socket_path = "/var/run/streaming-daemon-rs.sock"
 
 # Socket file permissions (octal)
-# 0o666 allows any local user to connect
-# For production, consider 0o660 with proper group ownership
-socket_mode = "0o666"
+# 0o660 allows only the owning user and group to connect (recommended)
+# Use 0o666 only in development or single-user environments
+socket_mode = "0o660"
 
 # Maximum concurrent connections
 # Aggressive setting for high-scale production

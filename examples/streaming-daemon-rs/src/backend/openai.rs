@@ -28,10 +28,11 @@ impl OpenAIBackend {
         api_base: String,
         default_model: String,
         timeout: Duration,
+        pool_max_idle_per_host: usize,
     ) -> Result<Self, BackendError> {
         let client = Client::builder()
             .timeout(timeout)
-            .pool_max_idle_per_host(100)
+            .pool_max_idle_per_host(pool_max_idle_per_host)
             .build()
             .map_err(|e| BackendError::Connection(e.to_string()))?;
 

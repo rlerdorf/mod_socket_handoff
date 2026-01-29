@@ -129,6 +129,11 @@ impl ConnectionGuard {
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.coordinator.subscribe()
     }
+
+    /// Get the current active connection count.
+    pub fn active_connections(&self) -> u64 {
+        self.coordinator.active_connections()
+    }
 }
 
 impl Drop for ConnectionGuard {
