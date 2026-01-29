@@ -111,17 +111,8 @@ impl ConnectionHandler {
     ) -> Result<(), ConnectionError> {
         let stream_timer = Instant::now();
 
-        // Convert OwnedFd to tokio TcpStream-like wrapper
-        // We use a raw file wrapper since this is a passed TCP socket
-        let client_fd = handoff.client_fd;
-
-        // Create async file from the fd
-        // Use into_raw_fd() to consume the OwnedFd and transfer ownership
-        let std_stream = unsafe {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            let raw_fd = client_fd.into_raw_fd();
-            std::net::TcpStream::from_raw_fd(raw_fd)
-        };
+        // Convert OwnedFd to std::net::TcpStream using safe ownership transfer (Rust 1.80+)
+        let std_stream = std::net::TcpStream::from(handoff.client_fd);
 
         // Set non-blocking for tokio
         std_stream.set_nonblocking(true).map_err(|e| {
@@ -183,13 +174,7 @@ impl ConnectionHandler {
                                 ttfb_recorded = true;
                             }
 
-                            // Check for done marker first (done chunks have empty content)
-                            if chunk.done {
-                                stream_completed_normally = true;
-                                break;
-                            }
-
-                            // Write chunk (skip empty content)
+                            // Write content first (some backends include content in done chunk)
                             if !chunk.content.is_empty() {
                                 if let Err(e) = writer.send_chunk(&chunk.content).await {
                                     metrics::record_stream_error();
@@ -197,6 +182,12 @@ impl ConnectionHandler {
                                     break;
                                 }
                                 metrics::record_chunk_sent();
+                            }
+
+                            // Then check for done marker
+                            if chunk.done {
+                                stream_completed_normally = true;
+                                break;
                             }
                         }
                         Some(Err(e)) => {

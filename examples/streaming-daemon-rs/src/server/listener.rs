@@ -178,15 +178,37 @@ impl UnixSocketListener {
 
 impl Drop for UnixSocketListener {
     fn drop(&mut self) {
-        // Clean up socket file
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                tracing::warn!(
-                    error = %e,
-                    path = %self.socket_path.display(),
-                    "Failed to remove socket file"
-                );
+        // Clean up socket file safely: re-validate that it's still a Unix socket
+        // to prevent removing an unexpected file if an attacker replaced it.
+        let metadata = match std::fs::symlink_metadata(&self.socket_path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                // If the file is already gone, nothing to do; otherwise log and return.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        error = %e,
+                        path = %self.socket_path.display(),
+                        "Failed to stat socket file during cleanup"
+                    );
+                }
+                return;
             }
+        };
+
+        if !metadata.file_type().is_socket() {
+            tracing::warn!(
+                path = %self.socket_path.display(),
+                "Refusing to remove non-socket path during cleanup"
+            );
+            return;
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.socket_path) {
+            tracing::warn!(
+                error = %e,
+                path = %self.socket_path.display(),
+                "Failed to remove socket file"
+            );
         }
     }
 }
