@@ -179,12 +179,7 @@ func main() {
 
 	<-ctx.Done()
 
-	// Close listener to stop accepting new connections
-	if err := listener.Close(); err != nil {
-		log.Printf("Error closing listener: %v", err)
-	}
-
-	// Wait for active connections to finish (with timeout)
+	// Listener will be closed by defer; wait for active connections to finish
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
 	done := make(chan struct{})
 	go func() {
@@ -296,7 +291,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	// Check MSG_TRUNC flag to detect if data was truncated
 	if recvflags&syscall.MSG_TRUNC != 0 {
-		log.Printf("Warning: handoff data was truncated (exceeded %d byte buffer)", MaxHandoffDataSize)
+		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", MaxHandoffDataSize)
 	}
 
 	// Parse control message to extract fd
