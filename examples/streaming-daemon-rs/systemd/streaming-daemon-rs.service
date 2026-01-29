@@ -18,6 +18,8 @@ Group=www-data
 # Environment
 Environment=RUST_BACKTRACE=1
 Environment=DAEMON_LOG_LEVEL=info
+# Socket path must be inside RuntimeDirectory for ProtectSystem=strict
+Environment=DAEMON_SOCKET_PATH=/run/streaming-daemon-rs/daemon.sock
 
 # Security hardening
 NoNewPrivileges=yes
@@ -30,7 +32,6 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 
 # Socket directory - creates /run/streaming-daemon-rs/ with correct ownership
-# The daemon should use socket_path=/run/streaming-daemon-rs/daemon.sock
 RuntimeDirectory=streaming-daemon-rs
 RuntimeDirectoryMode=0755
 
