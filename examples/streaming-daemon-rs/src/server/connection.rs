@@ -111,8 +111,15 @@ impl ConnectionHandler {
     ) -> Result<(), ConnectionError> {
         let stream_timer = Instant::now();
 
+        // Destructure handoff to avoid partial move issues
+        let HandoffResult {
+            client_fd,
+            data,
+            raw_data_len: _,
+        } = handoff;
+
         // Convert OwnedFd to std::net::TcpStream using safe ownership transfer (Rust 1.80+)
-        let std_stream = std::net::TcpStream::from(handoff.client_fd);
+        let std_stream = std::net::TcpStream::from(client_fd);
 
         // Set non-blocking for tokio
         std_stream.set_nonblocking(true).map_err(|e| {
@@ -132,7 +139,7 @@ impl ConnectionHandler {
         })?;
 
         // Create stream request
-        let request = StreamRequest::from_handoff(&handoff.data, guard.id());
+        let request = StreamRequest::from_handoff(&data, guard.id());
 
         // Get stream from backend
         let mut shutdown_rx = guard.subscribe();
