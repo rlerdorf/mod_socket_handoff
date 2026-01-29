@@ -1,6 +1,6 @@
 //! Unix socket listener for receiving connections from Apache.
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -28,15 +28,30 @@ impl UnixSocketListener {
     ) -> Result<Self> {
         let socket_path = PathBuf::from(&config.socket_path);
 
-        // Remove stale socket if it exists
+        // Remove stale socket if it exists (verify it's actually a socket first)
         if socket_path.exists() {
-            std::fs::remove_file(&socket_path).map_err(|e| {
+            let metadata = std::fs::symlink_metadata(&socket_path).map_err(|e| {
                 DaemonError::Socket(format!(
-                    "Failed to remove stale socket {}: {}",
+                    "Failed to stat {}: {}",
                     socket_path.display(),
                     e
                 ))
             })?;
+
+            if metadata.file_type().is_socket() {
+                std::fs::remove_file(&socket_path).map_err(|e| {
+                    DaemonError::Socket(format!(
+                        "Failed to remove stale socket {}: {}",
+                        socket_path.display(),
+                        e
+                    ))
+                })?;
+            } else {
+                return Err(DaemonError::Socket(format!(
+                    "Path {} exists but is not a socket",
+                    socket_path.display()
+                )));
+            }
         }
 
         // Create parent directory if needed
@@ -87,6 +102,10 @@ impl UnixSocketListener {
     /// Returns None if shutdown has been signaled (or the listener/semaphore
     /// is no longer available). Transient accept errors are logged and
     /// retried with a brief backoff.
+    ///
+    /// Uses accept-first-then-gate pattern: accepts the connection immediately
+    /// to free Apache, then checks capacity. If at capacity, closes the
+    /// connection and records a rejection metric.
     pub async fn accept(&self) -> Option<AcceptedConnection> {
         loop {
             // Check shutdown before accepting
@@ -94,28 +113,7 @@ impl UnixSocketListener {
                 return None;
             }
 
-            // Try to acquire semaphore permit
-            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    // At capacity - wait for a permit or shutdown
-                    let mut shutdown_rx = self.shutdown.subscribe();
-                    tokio::select! {
-                        biased;
-                        _ = shutdown_rx.changed() => {
-                            return None;
-                        }
-                        permit = self.connection_semaphore.clone().acquire_owned() => {
-                            match permit {
-                                Ok(p) => p,
-                                Err(_) => return None, // Semaphore closed
-                            }
-                        }
-                    }
-                }
-            };
-
-            // Accept connection
+            // Accept connection first (to free Apache worker immediately)
             let mut shutdown_rx = self.shutdown.subscribe();
             let accept_result = tokio::select! {
                 biased;
@@ -125,26 +123,40 @@ impl UnixSocketListener {
                 result = self.listener.accept() => result
             };
 
-            match accept_result {
-                Ok((stream, _addr)) => {
-                    metrics::record_connection_accepted();
-                    let guard = self.shutdown.register_connection();
-                    metrics::set_active_connections(self.shutdown.active_connections());
-
-                    return Some(AcceptedConnection {
-                        stream,
-                        _permit: permit,
-                        guard,
-                        config: self.config.clone(),
-                    });
-                }
+            let stream = match accept_result {
+                Ok((stream, _addr)) => stream,
                 Err(e) => {
                     tracing::error!(error = %e, "Accept error");
                     // Brief backoff on error
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 }
-            }
+            };
+
+            // Try to acquire semaphore permit (non-blocking)
+            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    // At capacity - reject this connection promptly
+                    metrics::record_connection_rejected();
+                    tracing::warn!("Connection rejected: at capacity");
+                    // Dropping stream closes the connection
+                    drop(stream);
+                    continue;
+                }
+            };
+
+            // Connection accepted and we have capacity
+            metrics::record_connection_accepted();
+            let guard = self.shutdown.register_connection();
+            metrics::set_active_connections(self.shutdown.active_connections());
+
+            return Some(AcceptedConnection {
+                stream,
+                _permit: permit,
+                guard,
+                config: self.config.clone(),
+            });
         }
     }
 

@@ -67,8 +67,8 @@ impl ConnectionHandler {
             }
         }
 
-        // Update metrics
-        metrics::set_active_connections(guard.active_connections());
+        // Update metrics (exclude this connection, which is about to end)
+        metrics::set_active_connections(guard.active_connections().saturating_sub(1));
     }
 
     async fn handle_inner(
@@ -183,17 +183,20 @@ impl ConnectionHandler {
                                 ttfb_recorded = true;
                             }
 
-                            // Write chunk
-                            if let Err(e) = writer.send_chunk(&chunk.content).await {
-                                metrics::record_stream_error();
-                                tracing::warn!(error = %e, "Client write error");
-                                break;
-                            }
-                            metrics::record_chunk_sent();
-
+                            // Check for done marker first (done chunks have empty content)
                             if chunk.done {
                                 stream_completed_normally = true;
                                 break;
+                            }
+
+                            // Write chunk (skip empty content)
+                            if !chunk.content.is_empty() {
+                                if let Err(e) = writer.send_chunk(&chunk.content).await {
+                                    metrics::record_stream_error();
+                                    tracing::warn!(error = %e, "Client write error");
+                                    break;
+                                }
+                                metrics::record_chunk_sent();
                             }
                         }
                         Some(Err(e)) => {

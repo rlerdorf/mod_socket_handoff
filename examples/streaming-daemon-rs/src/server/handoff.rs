@@ -57,10 +57,20 @@ pub async fn receive_handoff(
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
-    // Wait for readable with timeout
-    let ready = tokio::time::timeout(timeout, stream.ready(Interest::READABLE))
+    // Apply timeout to the entire handoff receive operation
+    tokio::time::timeout(timeout, receive_handoff_inner(stream, buffer_size))
         .await
         .map_err(|_| HandoffError::Timeout)?
+}
+
+async fn receive_handoff_inner(
+    stream: &UnixStream,
+    buffer_size: usize,
+) -> Result<HandoffResult, HandoffError> {
+    // Wait for readable
+    let ready = stream
+        .ready(Interest::READABLE)
+        .await
         .map_err(|e| HandoffError::ReceiveFailed(e.to_string()))?;
 
     if !ready.is_readable() {
@@ -72,7 +82,8 @@ pub async fn receive_handoff(
     // Get the raw fd for recvmsg
     let fd = stream.as_raw_fd();
 
-    // Perform blocking recvmsg in spawn_blocking to avoid blocking the runtime
+    // Perform blocking recvmsg in spawn_blocking
+    // Note: The outer timeout will cancel this if it takes too long
     let result = tokio::task::spawn_blocking(move || receive_fd_blocking(fd, buffer_size))
         .await
         .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))??;

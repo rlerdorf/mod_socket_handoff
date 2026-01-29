@@ -58,7 +58,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             socket_path: "/var/run/streaming-daemon-rs.sock".to_string(),
-            socket_mode: 0o666,
+            socket_mode: 0o660,
             max_connections: 100_000,
             handoff_timeout_secs: 5,
             write_timeout_secs: 30,
