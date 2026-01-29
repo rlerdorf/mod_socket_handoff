@@ -80,6 +80,7 @@ func main() {
 				log.Printf("Received SIGHUP, active connections: %d", atomic.LoadInt64(&activeConns))
 			default:
 				log.Printf("Received %v, shutting down...", sig)
+				signal.Stop(sigChan)
 				cancel()
 				return
 			}
@@ -94,7 +95,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", DaemonSocket, err)
 	}
-	defer listener.Close()
+	// Note: listener is explicitly closed during graceful shutdown, not deferred
 
 	// Set permissions so Apache (www-data) can connect
 	if err := os.Chmod(DaemonSocket, 0666); err != nil {
@@ -133,7 +134,9 @@ func main() {
 				}(conn)
 			default:
 				log.Printf("Connection limit reached (%d), rejecting", MaxConnections)
-				conn.Close()
+				if err := conn.Close(); err != nil {
+					log.Printf("Error closing rejected connection: %v", err)
+				}
 			}
 		}
 	}()
@@ -141,7 +144,9 @@ func main() {
 	<-ctx.Done()
 
 	// Close listener to stop accepting new connections
-	listener.Close()
+	if err := listener.Close(); err != nil {
+		log.Printf("Error closing listener: %v", err)
+	}
 
 	// Wait for active connections to finish (with timeout)
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
@@ -233,10 +238,8 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	// Set receive timeout on the raw fd using SO_RCVTIMEO
 	// Note: SetReadDeadline on net.Conn doesn't apply to syscall.Recvmsg
-	tv := syscall.Timeval{
-		Sec:  int64(HandoffTimeout / time.Second),
-		Usec: int64((HandoffTimeout % time.Second) / time.Microsecond),
-	}
+	// Use NsecToTimeval for cross-platform compatibility (Timeval field types vary)
+	tv := syscall.NsecToTimeval(HandoffTimeout.Nanoseconds())
 	if err := syscall.SetsockoptTimeval(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
 		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
 	}
@@ -278,13 +281,20 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 // streamToClient sends an SSE response to the client.
 // Replace the demo response with your LLM API integration.
 func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
-	// Set write timeout on the client socket
-	if conn, err := net.FileConn(clientFile); err == nil {
-		conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
-		defer conn.Close()
+	// Create net.Conn from file to enable write deadlines
+	// We must write to this conn (not clientFile) for the deadline to apply
+	conn, err := net.FileConn(clientFile)
+	if err != nil {
+		return fmt.Errorf("failed to create conn from file: %w", err)
+	}
+	defer conn.Close()
+
+	// Set write timeout to prevent blocking on slow/stalled clients
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		log.Printf("Warning: could not set write deadline: %v", err)
 	}
 
-	writer := bufio.NewWriter(clientFile)
+	writer := bufio.NewWriter(conn)
 
 	// Send HTTP headers for SSE
 	headers := []string{
