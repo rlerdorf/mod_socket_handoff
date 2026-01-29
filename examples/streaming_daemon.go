@@ -38,10 +38,10 @@ const (
 	DaemonSocket = "/var/run/streaming-daemon.sock"
 
 	// Timeouts for robustness
-	HandoffTimeout  = 5 * time.Second  // Max time to receive fd from Apache
-	WriteTimeout    = 30 * time.Second // Max time for a single write to client
-	ShutdownTimeout = 35 * time.Second // Graceful shutdown timeout (should exceed WriteTimeout)
-	MaxConnections  = 1000             // Max concurrent connections
+	HandoffTimeout  = 5 * time.Second   // Max time to receive fd from Apache
+	WriteTimeout    = 30 * time.Second  // Max time for a single write to client
+	ShutdownTimeout = 2 * time.Minute   // Graceful shutdown timeout; long enough for LLM streams to complete
+	MaxConnections  = 1000              // Max concurrent connections
 
 	// MaxHandoffDataSize is the maximum size of handoff JSON data from Apache.
 	// This should be large enough to hold LLM prompts. Increase if needed.
@@ -278,15 +278,14 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	// Size: 16 bytes for Cmsghdr on 64-bit Linux + 4 bytes for the fd
 	oob := make([]byte, 24)
 
-	n, oobn, _, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
+	n, oobn, recvflags, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
 	if err != nil {
 		return -1, nil, fmt.Errorf("recvmsg failed: %w", err)
 	}
 
-	// Warn if data may have been truncated. Note: receiving exactly MaxHandoffDataSize
-	// bytes does not guarantee truncation; it only indicates that truncation is possible.
-	if n == MaxHandoffDataSize {
-		log.Printf("Warning: handoff data may be truncated (received exactly max buffer size %d bytes)", n)
+	// Check MSG_TRUNC flag to detect if data was truncated
+	if recvflags&syscall.MSG_TRUNC != 0 {
+		log.Printf("Warning: handoff data was truncated (exceeded %d byte buffer)", MaxHandoffDataSize)
 	}
 
 	// Parse control message to extract fd
@@ -322,9 +321,9 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	}
 	defer conn.Close()
 
-	// Set initial write timeout
+	// Set initial write timeout - fail fast if we can't set deadline
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		log.Printf("Warning: could not set write deadline: %v", err)
+		return fmt.Errorf("could not set write deadline: %w", err)
 	}
 
 	writer := bufio.NewWriter(conn)
@@ -358,7 +357,7 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 
 	// Reset deadline after successful header write
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		log.Printf("Warning: could not reset write deadline: %v", err)
+		return fmt.Errorf("could not reset write deadline: %w", err)
 	}
 
 	// Stream the response
