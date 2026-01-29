@@ -84,7 +84,9 @@ impl UnixSocketListener {
 
     /// Accept a new connection from Apache.
     ///
-    /// Returns None if shutdown has been signaled or an error occurs.
+    /// Returns None if shutdown has been signaled (or the listener/semaphore
+    /// is no longer available). Transient accept errors are logged and
+    /// retried with a brief backoff.
     pub async fn accept(&self) -> Option<AcceptedConnection> {
         loop {
             // Check shutdown before accepting

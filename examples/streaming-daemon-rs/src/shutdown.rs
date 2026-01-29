@@ -3,6 +3,7 @@
 //! Uses a watch channel to broadcast shutdown signal and track active connections.
 
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -22,8 +23,8 @@ struct ShutdownInner {
     active_connections: AtomicU64,
     /// Waiters for connection drain.
     drain_notify: tokio::sync::Notify,
-    /// Connection tracking for debugging.
-    connection_ids: Mutex<Vec<u64>>,
+    /// Connection tracking for debugging (HashSet for O(1) removal).
+    connection_ids: Mutex<HashSet<u64>>,
     /// Next connection ID.
     next_conn_id: AtomicU64,
 }
@@ -38,7 +39,7 @@ impl ShutdownCoordinator {
                 shutdown_rx,
                 active_connections: AtomicU64::new(0),
                 drain_notify: tokio::sync::Notify::new(),
-                connection_ids: Mutex::new(Vec::new()),
+                connection_ids: Mutex::new(HashSet::new()),
                 next_conn_id: AtomicU64::new(1),
             }),
         }
@@ -68,7 +69,7 @@ impl ShutdownCoordinator {
     pub fn register_connection(&self) -> ConnectionGuard {
         let id = self.inner.next_conn_id.fetch_add(1, Ordering::Relaxed);
         self.inner.active_connections.fetch_add(1, Ordering::Relaxed);
-        self.inner.connection_ids.lock().push(id);
+        self.inner.connection_ids.lock().insert(id);
 
         ConnectionGuard {
             coordinator: self.clone(),
@@ -88,12 +89,7 @@ impl ShutdownCoordinator {
     }
 
     fn unregister_connection(&self, id: u64) {
-        {
-            let mut ids = self.inner.connection_ids.lock();
-            if let Some(pos) = ids.iter().position(|&x| x == id) {
-                ids.swap_remove(pos);
-            }
-        }
+        self.inner.connection_ids.lock().remove(&id);
 
         let prev = self.inner.active_connections.fetch_sub(1, Ordering::Relaxed);
         if prev == 1 {

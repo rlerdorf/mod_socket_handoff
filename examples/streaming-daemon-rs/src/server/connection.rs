@@ -157,7 +157,9 @@ impl ConnectionHandler {
 
         metrics::record_backend_request(self.backend.name());
 
-        // Stream chunks
+        // Stream chunks - track whether we completed normally
+        let mut stream_completed_normally = false;
+
         loop {
             tokio::select! {
                 biased;
@@ -190,6 +192,7 @@ impl ConnectionHandler {
                             metrics::record_chunk_sent();
 
                             if chunk.done {
+                                stream_completed_normally = true;
                                 break;
                             }
                         }
@@ -201,7 +204,8 @@ impl ConnectionHandler {
                             break;
                         }
                         None => {
-                            // Stream ended
+                            // Stream ended naturally
+                            stream_completed_normally = true;
                             break;
                         }
                     }
@@ -209,8 +213,10 @@ impl ConnectionHandler {
             }
         }
 
-        // Send done marker and close
-        let _ = writer.send_done().await;
+        // Only send done marker on normal completion (not on error or shutdown)
+        if stream_completed_normally {
+            let _ = writer.send_done().await;
+        }
         let _ = writer.shutdown().await;
 
         metrics::record_backend_duration(self.backend.name(), backend_timer.elapsed());
