@@ -136,36 +136,31 @@ fn receive_fd_blocking(
         HandoffError::System(e)
     })?;
 
-    // Check for truncation
+    // Extract file descriptor from control message FIRST, before checking truncation.
+    // This ensures any received fds are properly closed even on error paths.
+    // Note: cmsg_space!([RawFd; 1]) only allocates room for one fd.
+    let mut received_fd: Option<OwnedFd> = None;
+
+    if let Ok(cmsgs) = msg.cmsgs() {
+        for cmsg in cmsgs {
+            if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                if fds.is_empty() {
+                    continue;
+                }
+                // Take the fd (only one can fit in our cmsg buffer)
+                // SAFETY: The fd was received via SCM_RIGHTS and is valid
+                received_fd = Some(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+            }
+        }
+    }
+
+    // Now check for truncation - any received fds are safely wrapped in OwnedFd
+    // and will be closed when dropped on error return
     if msg.flags.contains(MsgFlags::MSG_TRUNC) {
         return Err(HandoffError::DataTruncated);
     }
     if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
         return Err(HandoffError::ControlMessageTruncated);
-    }
-
-    // Extract file descriptor from control message
-    let mut received_fd: Option<OwnedFd> = None;
-
-    for cmsg in msg.cmsgs()? {
-        if let ControlMessageOwned::ScmRights(fds) = cmsg {
-            if fds.is_empty() {
-                continue;
-            }
-            // Take the first fd, close any extras
-            // SAFETY: The fd was received via SCM_RIGHTS and is valid
-            received_fd = Some(unsafe { OwnedFd::from_raw_fd(fds[0]) });
-
-            // Close extra fds if any
-            for &extra_fd in &fds[1..] {
-                tracing::warn!(extra_fd, "Closing unexpected extra fd");
-                // SAFETY: These are valid fds from SCM_RIGHTS
-                unsafe {
-                    let _ = OwnedFd::from_raw_fd(extra_fd);
-                    // OwnedFd will close on drop
-                }
-            }
-        }
     }
 
     let client_fd = received_fd.ok_or(HandoffError::NoFileDescriptor)?;
