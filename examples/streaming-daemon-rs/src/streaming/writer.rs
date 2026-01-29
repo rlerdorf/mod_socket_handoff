@@ -61,8 +61,10 @@ impl SseWriter {
 
     /// Shutdown the writer.
     pub async fn shutdown(&mut self) -> io::Result<()> {
-        // Final flush
-        let _ = self.flush_with_timeout().await;
+        // Final flush - log errors but don't fail shutdown
+        if let Err(e) = self.flush_with_timeout().await {
+            tracing::warn!(error = %e, "Final flush failed during shutdown");
+        }
         // Shutdown write side
         self.writer.shutdown().await
     }
