@@ -43,9 +43,10 @@ const (
 	ShutdownTimeout = 2 * time.Minute   // Graceful shutdown timeout; long enough for LLM streams to complete
 	MaxConnections  = 1000              // Max concurrent connections
 
-	// MaxHandoffDataSize is the maximum size of handoff JSON data from Apache.
+	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
+	// via the Unix socket. The data originates from the X-Handoff-Data HTTP header.
 	// This should be large enough to hold LLM prompts. Increase if needed.
-	// Note: Apache's LimitRequestFieldSize defaults to 8190 bytes per header.
+	// Note: Apache's LimitRequestFieldSize (default 8190) limits individual header size.
 	MaxHandoffDataSize = 65536 // 64KB
 )
 
@@ -104,7 +105,9 @@ func main() {
 	// Ensure listener is closed on exit; also closed explicitly during graceful shutdown
 	defer listener.Close()
 
-	// Set permissions so Apache (www-data) can connect
+	// Set permissions so Apache (www-data) can connect.
+	// SECURITY: 0666 allows any local user to connect. For production,
+	// consider 0660 with proper group ownership, or use directory permissions.
 	if err := os.Chmod(DaemonSocket, 0666); err != nil {
 		log.Printf("Warning: Could not chmod socket: %v", err)
 	}
@@ -225,12 +228,13 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Wrap fd in os.File immediately to ensure cleanup on any error path
-	// os.NewFile takes ownership - we must use file.Close(), not syscall.Close()
+	// Wrap fd in os.File immediately to ensure cleanup on any error path.
+	// os.NewFile takes ownership only on success; if it returns nil (invalid fd),
+	// we must close the fd ourselves with syscall.Close().
 	clientFile := os.NewFile(uintptr(clientFd), "client")
 	if clientFile == nil {
 		log.Printf("Failed to create file from fd %d", clientFd)
-		syscall.Close(clientFd) // Fallback close if NewFile fails
+		syscall.Close(clientFd)
 		return
 	}
 	defer clientFile.Close()
@@ -269,9 +273,10 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	}
 	defer file.Close()
 
-	// Set receive timeout on the raw fd using SO_RCVTIMEO (Unix-specific)
-	// Note: SetReadDeadline on net.Conn doesn't apply to syscall.Recvmsg
-	// Use NsecToTimeval for portability across Unix platforms (Timeval field types vary)
+	// Set receive timeout on the raw fd using SO_RCVTIMEO (Unix-specific).
+	// We use SO_RCVTIMEO instead of conn.SetReadDeadline because we call
+	// syscall.Recvmsg directly on the fd, bypassing Go's net.Conn deadline logic.
+	// Use NsecToTimeval for portability across Unix platforms (Timeval field types vary).
 	tv := syscall.NsecToTimeval(HandoffTimeout.Nanoseconds())
 	if err := syscall.SetsockoptTimeval(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
 		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
@@ -416,7 +421,10 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, writer *bufio.Writer
 	if _, err := fmt.Fprintf(writer, "data: [DONE]\n\n"); err != nil {
 		return fmt.Errorf("write failed: %w", err)
 	}
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush failed: %w", err)
+	}
+	return nil
 }
 
 // sendSSE sends a single SSE event with the given content.
