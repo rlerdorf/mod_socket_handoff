@@ -69,7 +69,9 @@ module AP_MODULE_DECLARE_DATA socket_handoff_module;
 typedef struct {
     int enabled;
     int enabled_set;
-    const char *allowed_socket_prefix;
+    const char *allowed_socket_prefix;      /* Original config value */
+    const char *resolved_prefix;            /* Cached resolved prefix with trailing slash */
+    const char *resolved_prefix_truename;   /* Cached TRUENAME version (symlinks resolved) */
     int connect_timeout_ms;
     int connect_timeout_ms_set;
 } socket_handoff_config;
@@ -81,7 +83,7 @@ static void *create_server_config(apr_pool_t *p, server_rec *s)
     conf->enabled = 1;
     conf->enabled_set = 0;
     conf->allowed_socket_prefix = "/var/run/";
-    conf->connect_timeout_ms = 2000;
+    conf->connect_timeout_ms = 500;
     conf->connect_timeout_ms_set = 0;
     return conf;
 }
@@ -98,6 +100,9 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
     conf->allowed_socket_prefix = add->allowed_socket_prefix
         ? add->allowed_socket_prefix
         : base->allowed_socket_prefix;
+    /* Cached prefixes are computed in post_config, not inherited */
+    conf->resolved_prefix = NULL;
+    conf->resolved_prefix_truename = NULL;
     conf->connect_timeout_ms = add->connect_timeout_ms_set
         ? add->connect_timeout_ms
         : base->connect_timeout_ms;
@@ -192,13 +197,28 @@ static int connect_to_socket(const char *socket_path,
     int sock;
     struct sockaddr_un addr;
     int flags;
-    int setfl_ret;
     struct pollfd pfd;
     int poll_ret;
     int so_error;
     socklen_t so_error_len;
+    int sock_nonblock = 0;
 
+    /*
+     * Use SOCK_NONBLOCK if available (Linux 2.6.27+).
+     * This eliminates one fcntl() call per connection.
+     */
+#ifdef SOCK_NONBLOCK
+    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (sock >= 0) {
+        sock_nonblock = 1;
+    } else if (errno == EINVAL) {
+        /* SOCK_NONBLOCK not supported, fall back */
+        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    }
+#else
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
+#endif
+
     if (sock < 0) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: socket() failed: %s", strerror(errno));
@@ -217,15 +237,16 @@ static int connect_to_socket(const char *socket_path,
 
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-    /* Set non-blocking for connect with timeout */
-    flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_socket_handoff: fcntl(F_GETFL) failed: %s", strerror(errno));
-        /* Continue with blocking connect */
+    /* Set non-blocking for connect with timeout (if not already set) */
+    if (sock_nonblock) {
+        flags = O_NONBLOCK;  /* We know it's non-blocking */
     } else {
-        setfl_ret = fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-        if (setfl_ret < 0) {
+        flags = fcntl(sock, F_GETFL, 0);
+        if (flags < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fcntl(F_GETFL) failed: %s", strerror(errno));
+            /* Continue with blocking connect */
+        } else if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_socket_handoff: fcntl(F_SETFL) failed: %s", strerror(errno));
             /* Continue with blocking connect */
@@ -295,7 +316,17 @@ static int connect_to_socket(const char *socket_path,
     }
 
     /* Restore blocking mode */
-    if (flags >= 0) {
+    if (sock_nonblock) {
+        /* Socket was created with SOCK_NONBLOCK, restore to blocking */
+        int cur_flags = fcntl(sock, F_GETFL, 0);
+        if (cur_flags >= 0) {
+            if (fcntl(sock, F_SETFL, cur_flags & ~O_NONBLOCK) < 0) {
+                ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                    "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
+                    strerror(errno));
+            }
+        }
+    } else if (flags >= 0) {
         if (fcntl(sock, F_SETFL, flags) < 0) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
@@ -339,25 +370,26 @@ static apr_status_t create_dummy_socket(apr_socket_t **dummy_socket,
 /*
  * Validate that the socket path is under the allowed prefix.
  * This prevents PHP from redirecting to arbitrary Unix sockets.
+ *
+ * Uses cached resolved prefixes from post_config when available,
+ * reducing apr_filepath_merge() calls per request.
  */
 static int validate_socket_path(const char *socket_path,
-                                const char *allowed_prefix,
+                                socket_handoff_config *conf,
                                 request_rec *r)
 {
     char *resolved_path = NULL;
-    char *resolved_prefix = NULL;
     char *truename_path = NULL;
-    char *truename_prefix = NULL;
     const char *prefix_with_slash = NULL;
     const char *truename_prefix_with_slash = NULL;
     apr_status_t rv;
 
-    if (!allowed_prefix || allowed_prefix[0] == '\0') {
+    if (!conf->allowed_socket_prefix || conf->allowed_socket_prefix[0] == '\0') {
         /* No prefix configured - allow all (not recommended) */
         return 1;
     }
 
-    /* Canonicalize paths without requiring the socket to exist */
+    /* Canonicalize socket path without requiring it to exist */
     rv = apr_filepath_merge(&resolved_path, NULL, socket_path,
                             APR_FILEPATH_NOTRELATIVE, r->pool);
     if (rv != APR_SUCCESS || !resolved_path) {
@@ -366,18 +398,24 @@ static int validate_socket_path(const char *socket_path,
         return 0;
     }
 
-    rv = apr_filepath_merge(&resolved_prefix, NULL, allowed_prefix,
-                            APR_FILEPATH_NOTRELATIVE, r->pool);
-    if (rv != APR_SUCCESS || !resolved_prefix) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
-            "mod_socket_handoff: Invalid allowed prefix %s", allowed_prefix);
-        return 0;
-    }
-
-    if (resolved_prefix[strlen(resolved_prefix) - 1] == '/') {
-        prefix_with_slash = resolved_prefix;
+    /* Use cached resolved prefix if available, otherwise compute */
+    if (conf->resolved_prefix) {
+        prefix_with_slash = conf->resolved_prefix;
     } else {
-        prefix_with_slash = apr_pstrcat(r->pool, resolved_prefix, "/", NULL);
+        char *resolved_prefix = NULL;
+        rv = apr_filepath_merge(&resolved_prefix, NULL, conf->allowed_socket_prefix,
+                                APR_FILEPATH_NOTRELATIVE, r->pool);
+        if (rv != APR_SUCCESS || !resolved_prefix) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                "mod_socket_handoff: Invalid allowed prefix %s",
+                conf->allowed_socket_prefix);
+            return 0;
+        }
+        if (resolved_prefix[strlen(resolved_prefix) - 1] == '/') {
+            prefix_with_slash = resolved_prefix;
+        } else {
+            prefix_with_slash = apr_pstrcat(r->pool, resolved_prefix, "/", NULL);
+        }
     }
 
     if (strncmp(resolved_path, prefix_with_slash,
@@ -397,19 +435,25 @@ static int validate_socket_path(const char *socket_path,
                             APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
                             r->pool);
     if (rv == APR_SUCCESS && truename_path) {
-        rv = apr_filepath_merge(&truename_prefix, NULL, allowed_prefix,
-                                APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
-                                r->pool);
-        if (rv != APR_SUCCESS || !truename_prefix) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
-                "mod_socket_handoff: Invalid allowed prefix %s", allowed_prefix);
-            return 0;
-        }
-
-        if (truename_prefix[strlen(truename_prefix) - 1] == '/') {
-            truename_prefix_with_slash = truename_prefix;
+        /* Use cached truename prefix if available */
+        if (conf->resolved_prefix_truename) {
+            truename_prefix_with_slash = conf->resolved_prefix_truename;
         } else {
-            truename_prefix_with_slash = apr_pstrcat(r->pool, truename_prefix, "/", NULL);
+            char *truename_prefix = NULL;
+            rv = apr_filepath_merge(&truename_prefix, NULL, conf->allowed_socket_prefix,
+                                    APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                                    r->pool);
+            if (rv != APR_SUCCESS || !truename_prefix) {
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                    "mod_socket_handoff: Invalid allowed prefix %s",
+                    conf->allowed_socket_prefix);
+                return 0;
+            }
+            if (truename_prefix[strlen(truename_prefix) - 1] == '/') {
+                truename_prefix_with_slash = truename_prefix;
+            } else {
+                truename_prefix_with_slash = apr_pstrcat(r->pool, truename_prefix, "/", NULL);
+            }
         }
 
         if (strncmp(truename_path, truename_prefix_with_slash,
@@ -474,7 +518,7 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         "mod_socket_handoff: Handoff requested to %s", socket_path);
 
     /* Validate socket path for security */
-    if (!validate_socket_path(socket_path, conf->allowed_socket_prefix, r)) {
+    if (!validate_socket_path(socket_path, conf, r)) {
         ap_remove_output_filter(f);
         return HTTP_FORBIDDEN;
     }
@@ -651,10 +695,61 @@ static const command_rec socket_handoff_cmds[] = {
         set_connect_timeout,
         NULL,
         RSRC_CONF,
-        "Timeout for connecting to handoff daemon in milliseconds (default: 2000)"
+        "Timeout for connecting to handoff daemon in milliseconds (default: 500)"
     ),
     {NULL}
 };
+
+/*
+ * Post-config hook - resolve allowed prefix once at startup.
+ * This eliminates multiple apr_filepath_merge() calls per request.
+ */
+static int socket_handoff_post_config(apr_pool_t *pconf, apr_pool_t *plog,
+                                       apr_pool_t *ptemp, server_rec *s)
+{
+    server_rec *vhost;
+    socket_handoff_config *conf;
+    apr_status_t rv;
+    char *resolved = NULL;
+    size_t len;
+
+    for (vhost = s; vhost; vhost = vhost->next) {
+        conf = ap_get_module_config(vhost->module_config, &socket_handoff_module);
+
+        if (!conf || !conf->allowed_socket_prefix) {
+            continue;
+        }
+
+        /* Resolve prefix without TRUENAME (for lexical prefix matching) */
+        rv = apr_filepath_merge(&resolved, NULL, conf->allowed_socket_prefix,
+                                APR_FILEPATH_NOTRELATIVE, pconf);
+        if (rv == APR_SUCCESS && resolved) {
+            len = strlen(resolved);
+            if (len > 0 && resolved[len - 1] != '/') {
+                conf->resolved_prefix = apr_pstrcat(pconf, resolved, "/", NULL);
+            } else {
+                conf->resolved_prefix = resolved;
+            }
+        }
+
+        /* Also resolve with TRUENAME if the prefix exists (for symlink checks) */
+        resolved = NULL;
+        rv = apr_filepath_merge(&resolved, NULL, conf->allowed_socket_prefix,
+                                APR_FILEPATH_TRUENAME | APR_FILEPATH_NOTRELATIVE,
+                                pconf);
+        if (rv == APR_SUCCESS && resolved) {
+            len = strlen(resolved);
+            if (len > 0 && resolved[len - 1] != '/') {
+                conf->resolved_prefix_truename = apr_pstrcat(pconf, resolved, "/", NULL);
+            } else {
+                conf->resolved_prefix_truename = resolved;
+            }
+        }
+        /* If TRUENAME fails (prefix doesn't exist), resolved_prefix_truename stays NULL */
+    }
+
+    return OK;
+}
 
 /* Register hooks */
 static void register_hooks(apr_pool_t *p)
@@ -668,6 +763,9 @@ static void register_hooks(apr_pool_t *p)
 
     /* Insert filter late so it runs after other filters */
     ap_hook_insert_filter(socket_handoff_insert_filter, NULL, NULL, APR_HOOK_LAST);
+
+    /* Post-config hook to cache resolved prefix */
+    ap_hook_post_config(socket_handoff_post_config, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 /* Module declaration */
