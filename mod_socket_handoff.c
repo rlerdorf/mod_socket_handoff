@@ -124,6 +124,10 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     } control_un;
     struct cmsghdr *cmsg;
     char dummy = '\0';
+    ssize_t sent;
+    size_t remaining;
+    const char *p;
+    ssize_t n;
 
     memset(&msg, 0, sizeof(msg));
     memset(&control_un, 0, sizeof(control_un));
@@ -149,16 +153,16 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
 
-    ssize_t sent = sendmsg(unix_sock, &msg, 0);
+    sent = sendmsg(unix_sock, &msg, 0);
     if (sent < 0) {
         return -1;
     }
 
     if (data && data_len > 0 && (size_t)sent < data_len) {
-        size_t remaining = data_len - (size_t)sent;
-        const char *p = data + sent;
+        remaining = data_len - (size_t)sent;
+        p = data + sent;
         while (remaining > 0) {
-            ssize_t n = send(unix_sock, p, remaining, 0);
+            n = send(unix_sock, p, remaining, 0);
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
