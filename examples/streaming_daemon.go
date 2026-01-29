@@ -67,6 +67,15 @@ var (
 	connWg        sync.WaitGroup
 )
 
+// handoffBufPool reuses large buffers for receiving handoff data to reduce
+// memory pressure and GC overhead under high connection throughput.
+var handoffBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, MaxHandoffDataSize)
+		return &buf
+	},
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -199,11 +208,14 @@ func main() {
 	log.Println("Daemon stopped")
 }
 
-// safeHandleConnection wraps handleConnection with panic recovery
+// safeHandleConnection wraps handleConnection with panic recovery.
+// This outer recovery catches panics that occur before we have a client connection
+// (e.g., during fd receive). Panics after client connection is established are
+// handled inside handleConnection where we can send an error response.
 func safeHandleConnection(ctx context.Context, conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Panic in connection handler: %v\n%s", r, debug.Stack())
+			log.Printf("Panic in connection handler (pre-client): %v\n%s", r, debug.Stack())
 		}
 	}()
 	handleConnection(ctx, conn)
@@ -233,6 +245,22 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	defer clientFile.Close()
+
+	// Panic recovery with error response to client. This runs after we have
+	// the client connection, so we can send a 500 error before closing.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in connection handler: %v\n%s", r, debug.Stack())
+			// Attempt to send error response to client. This may fail if
+			// headers were already sent, but we try anyway for better UX.
+			errorResponse := "HTTP/1.1 500 Internal Server Error\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"Connection: close\r\n" +
+				"\r\n" +
+				"Internal server error\n"
+			clientFile.Write([]byte(errorResponse))
+		}
+	}()
 
 	log.Printf("Received handoff: fd=%d, data_len=%d", clientFd, len(data))
 
@@ -277,8 +305,9 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
 	}
 
-	// Buffer for handoff data (sized to hold large LLM prompts)
-	buf := make([]byte, MaxHandoffDataSize)
+	// Get buffer from pool to reduce allocations under high throughput
+	bufPtr := handoffBufPool.Get().(*[]byte)
+	buf := *bufPtr
 
 	// Buffer for control message (SCM_RIGHTS)
 	// Size: 16 bytes for Cmsghdr on 64-bit Linux + 4 bytes for the fd
@@ -286,39 +315,51 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	n, oobn, recvflags, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
 	if err != nil {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("recvmsg failed: %w", err)
 	}
 
 	// Check MSG_TRUNC flag to detect if data was truncated
 	if recvflags&syscall.MSG_TRUNC != 0 {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", MaxHandoffDataSize)
 	}
 
 	// Check MSG_CTRUNC flag to detect if control message (containing fd) was truncated
 	if recvflags&syscall.MSG_CTRUNC != 0 {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("control message truncated; fd may be corrupted")
 	}
 
 	// Parse control message to extract fd
 	msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
 	if err != nil {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("parse control message failed: %w", err)
 	}
 
 	if len(msgs) == 0 {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("no control messages received")
 	}
 
 	fds, err := syscall.ParseUnixRights(&msgs[0])
 	if err != nil {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("parse unix rights failed: %w", err)
 	}
 
 	if len(fds) == 0 {
+		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("no file descriptors received")
 	}
 
-	return fds[0], buf[:n], nil
+	// Copy data before returning buffer to pool
+	data := make([]byte, n)
+	copy(data, buf[:n])
+	handoffBufPool.Put(bufPtr)
+
+	return fds[0], data, nil
 }
 
 // streamToClient sends an SSE response to the client.
