@@ -101,7 +101,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", DaemonSocket, err)
 	}
-	// Note: listener is explicitly closed during graceful shutdown, not deferred
+	// Ensure listener is closed on exit; also closed explicitly during graceful shutdown
+	defer listener.Close()
 
 	// Set permissions so Apache (www-data) can connect
 	if err := os.Chmod(DaemonSocket, 0666); err != nil {
@@ -162,8 +163,13 @@ func main() {
 				if err := conn.Close(); err != nil {
 					log.Printf("Error closing rejected connection: %v", err)
 				}
-				// Back off slightly to avoid tight accept-reject loops under overload
-				time.Sleep(10 * time.Millisecond)
+				// Back off slightly to avoid tight accept-reject loops under overload,
+				// but exit promptly if context is cancelled.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
 			}
 		}
 	}()
@@ -417,6 +423,8 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, writer *bufio.Writer
 // It resets the write deadline after each successful flush to implement
 // a per-write idle timeout (not a total stream timeout).
 func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
+	// json.Marshal on map[string]string cannot fail with current types;
+	// keep error check as defensive programming in case payload changes.
 	data, err := json.Marshal(map[string]string{"content": content})
 	if err != nil {
 		return fmt.Errorf("json marshal failed: %w", err)
