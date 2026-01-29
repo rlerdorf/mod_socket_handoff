@@ -111,7 +111,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", DaemonSocket, err)
 	}
-	// Ensure listener is closed on exit; also closed explicitly during graceful shutdown
+	// Ensure listener is closed on exit (backup for panics); also closed explicitly
+	// after ctx.Done() during graceful shutdown to unblock the accept loop.
 	defer listener.Close()
 
 	// Set permissions so Apache (www-data) can connect.
@@ -188,7 +189,10 @@ func main() {
 
 	<-ctx.Done()
 
-	// Listener will be closed by defer; wait for active connections to finish
+	// Close listener to unblock accept loop; defer above handles panic cases
+	listener.Close()
+
+	// Wait for active connections to finish
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
 	done := make(chan struct{})
 	go func() {
@@ -365,13 +369,14 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 // streamToClient sends an SSE response to the client.
 // Replace the demo response with your LLM API integration.
 func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
-	// Create net.Conn from file to enable write deadlines
-	// We must write to this conn (not clientFile) for the deadline to apply
+	// Create net.Conn from file to enable write deadlines.
+	// We must write to this conn (not clientFile) for the deadline to apply.
+	// Note: conn and clientFile share the same underlying fd, so we do NOT
+	// defer conn.Close() here - the caller closes clientFile which closes the fd.
 	conn, err := net.FileConn(clientFile)
 	if err != nil {
 		return fmt.Errorf("failed to create conn from file: %w", err)
 	}
-	defer conn.Close()
 
 	// Set initial write timeout - fail fast if we can't set deadline
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
