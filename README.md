@@ -75,7 +75,7 @@ LoadModule socket_handoff_module modules/mod_socket_handoff.so
 
 SocketHandoffEnabled On
 SocketHandoffAllowedPrefix /var/run/
-SocketHandoffConnectTimeoutMs 2000
+SocketHandoffConnectTimeoutMs 500
 ```
 
 ## Configuration Directives
@@ -106,10 +106,10 @@ Timeout (in milliseconds) when connecting to the handoff daemon Unix socket.
 Valid range: 1-60000 (1ms to 60 seconds).
 
 ```apache
-SocketHandoffConnectTimeoutMs 2000
+SocketHandoffConnectTimeoutMs 500
 ```
 
-Default: `2000`
+Default: `500`
 
 ## PHP Usage
 
@@ -206,6 +206,46 @@ X-Handoff-Data: {"user_id":123,"prompt":"Hello"}
 - Path traversal attacks (`../`) are blocked via `realpath()` check
 - Headers are removed before any response is sent to client
 - Only works for main requests (not subrequests)
+
+## Performance Tuning
+
+For high-traffic deployments handling millions of requests, consider these
+optimizations:
+
+### Connect Timeout
+
+The default timeout (500ms) is generous for localhost Unix socket connections.
+If your daemon is consistently responsive, you can lower this:
+
+```apache
+SocketHandoffConnectTimeoutMs 100
+```
+
+A lower timeout means Apache workers fail fast if the daemon is unresponsive,
+preventing worker starvation.
+
+### Daemon Design
+
+The streaming daemon should:
+
+1. **Accept connections quickly** - Don't do heavy work before accept()
+2. **Handle concurrent connections** - Use goroutines (Go), async I/O, or
+   a process pool to handle multiple handoffs simultaneously
+3. **Keep connections to the daemon** - The module creates a new Unix socket
+   connection for each handoff. For extreme throughput, consider modifying
+   the daemon to use persistent connections or SOCK_DGRAM
+
+### Monitoring
+
+Monitor handoff performance with:
+
+```bash
+# Check Apache error log for timeout messages
+tail -f /var/log/apache2/error.log | grep socket_handoff
+
+# Monitor daemon socket connections
+watch -n1 'ss -x | grep streaming-daemon | wc -l'
+```
 
 ## Limitations
 
