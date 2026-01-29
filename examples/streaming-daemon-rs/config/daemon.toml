@@ -1,0 +1,68 @@
+# Streaming Daemon Configuration
+#
+# All settings can be overridden with environment variables.
+# Format: DAEMON_SECTION__KEY (e.g., DAEMON_SOCKET_PATH, DAEMON_MAX_CONNECTIONS)
+
+[server]
+# Unix socket path for receiving handoffs from Apache
+# Must be under Apache's SocketHandoffAllowedPrefix (default: /var/run/)
+socket_path = "/var/run/streaming-daemon-rs.sock"
+
+# Socket file permissions (octal)
+# 0o666 allows any local user to connect
+# For production, consider 0o660 with proper group ownership
+socket_mode = "0o666"
+
+# Maximum concurrent connections
+# Aggressive setting for high-scale production
+max_connections = 100000
+
+# Timeout for receiving handoff from Apache (seconds)
+handoff_timeout_secs = 5
+
+# Timeout for individual writes to client (seconds)
+# Resets after each successful write, not total stream time
+write_timeout_secs = 30
+
+# Graceful shutdown timeout (seconds)
+# Should be long enough for LLM streams to complete
+shutdown_timeout_secs = 120
+
+# Buffer size for receiving handoff data (bytes)
+# Should accommodate LLM prompts; Apache's LimitRequestFieldSize limits headers
+handoff_buffer_size = 65536
+
+[backend]
+# Backend provider: "mock" or "openai"
+# Use "mock" for testing/demos
+provider = "mock"
+
+# Default model to use (if not specified in handoff data)
+default_model = "gpt-4o"
+
+# API timeout (seconds)
+timeout_secs = 120
+
+[backend.openai]
+# OpenAI API key (can also be set via OPENAI_API_KEY env var)
+# api_key = "sk-..."
+
+# OpenAI API base URL
+api_base = "https://api.openai.com/v1"
+
+# Maximum idle connections per host in the HTTP pool
+pool_max_idle_per_host = 100
+
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = true
+
+# Listen address for metrics server
+listen_addr = "127.0.0.1:9090"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: pretty or json
+format = "pretty"
