@@ -695,31 +695,36 @@ func truncate(s string, n int) string {
 }
 
 // classifyError returns a short label for the error type for metrics.
+// Uses errors.Is/errors.As to handle wrapped errors correctly.
 func classifyError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	if err == context.Canceled {
+	// Use errors.Is for context errors (handles wrapped errors)
+	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
-	if err == context.DeadlineExceeded {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	// Check for common network errors
-	if netErr, ok := err.(net.Error); ok {
-		if netErr.Timeout() {
-			return "timeout"
-		}
-		return "network"
-	}
-	// Check for syscall errors
-	if errno, ok := err.(syscall.Errno); ok {
+	// Check for syscall errors first (more specific)
+	// Use errors.As to unwrap and find syscall.Errno
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
 		switch errno {
 		case syscall.EPIPE, syscall.ECONNRESET:
 			return "client_disconnected"
 		case syscall.ETIMEDOUT:
 			return "timeout"
 		}
+	}
+	// Check for net.Error interface (includes timeouts)
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+		return "network"
 	}
 	return "other"
 }
