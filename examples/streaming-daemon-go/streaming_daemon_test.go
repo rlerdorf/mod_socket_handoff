@@ -168,7 +168,7 @@ func TestScmRightsRoundtrip(t *testing.T) {
 func TestConcurrentFdSends(t *testing.T) {
 	const numConnections = 5
 	var wg sync.WaitGroup
-	errors := make(chan error, numConnections)
+	errCh := make(chan error, numConnections)
 
 	for i := 0; i < numConnections; i++ {
 		wg.Add(1)
@@ -177,7 +177,7 @@ func TestConcurrentFdSends(t *testing.T) {
 
 			sender, receiver, err := createSocketPair()
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 			defer sender.Close()
@@ -186,21 +186,21 @@ func TestConcurrentFdSends(t *testing.T) {
 			// Create TCP connection
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 			defer listener.Close()
 
 			clientConn, err := net.Dial("tcp", listener.Addr().String())
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 			defer clientConn.Close()
 
 			serverConn, err := listener.Accept()
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 			defer serverConn.Close()
@@ -208,13 +208,21 @@ func TestConcurrentFdSends(t *testing.T) {
 			tcpConn := serverConn.(*net.TCPConn)
 			file, err := tcpConn.File()
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 
-			data := []byte(`{"connection_id": ` + string(rune('0'+connID)) + `}`)
+			payload := struct {
+				ConnectionID int `json:"connection_id"`
+			}{ConnectionID: connID}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				errCh <- err
+				file.Close()
+				return
+			}
 			if err := sendFd(sender, int(file.Fd()), data); err != nil {
-				errors <- err
+				errCh <- err
 				file.Close()
 				return
 			}
@@ -222,7 +230,7 @@ func TestConcurrentFdSends(t *testing.T) {
 
 			receivedFd, _, err := recvFd(receiver)
 			if err != nil {
-				errors <- err
+				errCh <- err
 				return
 			}
 			syscall.Close(receivedFd)
@@ -230,9 +238,9 @@ func TestConcurrentFdSends(t *testing.T) {
 	}
 
 	wg.Wait()
-	close(errors)
+	close(errCh)
 
-	for err := range errors {
+	for err := range errCh {
 		t.Errorf("concurrent test error: %v", err)
 	}
 }
