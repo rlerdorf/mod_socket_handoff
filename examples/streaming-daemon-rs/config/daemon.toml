@@ -5,8 +5,10 @@
 
 [server]
 # Unix socket path for receiving handoffs from Apache
-# Must be under Apache's SocketHandoffAllowedPrefix (default: /var/run/)
-socket_path = "/var/run/streaming-daemon-rs.sock"
+# Must be under Apache's SocketHandoffAllowedPrefix
+# Note: When using the systemd service, this is overridden by DAEMON_SOCKET_PATH
+# environment variable to use RuntimeDirectory (/run/streaming-daemon-rs/)
+socket_path = "/run/streaming-daemon-rs/daemon.sock"
 
 # Socket file permissions (octal)
 # 0o660 allows only the owning user and group to connect (recommended)
