@@ -25,20 +25,58 @@ impl UnixSocketListener {
     pub async fn bind(config: &ServerConfig, shutdown: ShutdownCoordinator) -> Result<Self> {
         let socket_path = PathBuf::from(&config.socket_path);
 
-        // Remove stale socket if it exists (verify it's actually a socket first)
+        // Handle existing socket file
         if socket_path.exists() {
             let metadata = std::fs::symlink_metadata(&socket_path).map_err(|e| {
                 DaemonError::Socket(format!("Failed to stat {}: {}", socket_path.display(), e))
             })?;
 
             if metadata.file_type().is_socket() {
-                std::fs::remove_file(&socket_path).map_err(|e| {
-                    DaemonError::Socket(format!(
-                        "Failed to remove stale socket {}: {}",
-                        socket_path.display(),
-                        e
-                    ))
-                })?;
+                // Probe the socket to see if another daemon is listening.
+                // This prevents stealing the socket from a running instance.
+                match std::os::unix::net::UnixStream::connect(&socket_path) {
+                    Ok(_) => {
+                        // Connection succeeded - another daemon is running
+                        return Err(DaemonError::Socket(format!(
+                            "Socket {} is already in use by another process",
+                            socket_path.display()
+                        )));
+                    }
+                    Err(e) => {
+                        // Connection failed - check if it's a stale socket
+                        use std::io::ErrorKind;
+                        match e.kind() {
+                            // ECONNREFUSED: socket exists but no one is listening (stale)
+                            // ENOENT: socket file was removed between stat and connect (race, ok to proceed)
+                            ErrorKind::ConnectionRefused | ErrorKind::NotFound => {
+                                tracing::info!(
+                                    socket_path = %socket_path.display(),
+                                    "Removing stale socket file"
+                                );
+                                // Ignore NotFound - the socket may have been removed by
+                                // another process between our check and this removal.
+                                // Our goal is to ensure it's gone, which it is.
+                                if let Err(e) = std::fs::remove_file(&socket_path) {
+                                    if e.kind() != ErrorKind::NotFound {
+                                        return Err(DaemonError::Socket(format!(
+                                            "Failed to remove stale socket {}: {}",
+                                            socket_path.display(),
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+                            // Other errors (permission denied, etc.) - don't assume we can take over
+                            _ => {
+                                return Err(DaemonError::Socket(format!(
+                                    "Cannot determine if socket {} is in use: {}",
+                                    socket_path.display(),
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                }
             } else {
                 return Err(DaemonError::Socket(format!(
                     "Path {} exists but is not a socket",
