@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -170,20 +171,34 @@ func main() {
 	}()
 
 	// Handle existing socket file
-	if _, err := os.Stat(DaemonSocket); err == nil {
-		// Socket file exists - probe to see if another daemon is listening
+	if info, err := os.Lstat(DaemonSocket); err == nil {
+		// Path exists - verify it's a socket before doing anything
+		if info.Mode().Type() != os.ModeSocket {
+			log.Fatalf("Path %s exists but is not a socket", DaemonSocket)
+		}
+
+		// Probe to see if another daemon is listening
 		probeConn, probeErr := net.DialTimeout("unix", DaemonSocket, time.Second)
 		if probeErr == nil {
 			// Connection succeeded - another daemon is running
 			probeConn.Close()
 			log.Fatalf("Socket %s is already in use by another process", DaemonSocket)
 		}
-		// Connection failed - socket is stale, safe to remove.
-		// Ignore NotFound errors (race with another process removing it).
-		if err := os.Remove(DaemonSocket); err != nil && !os.IsNotExist(err) {
-			log.Fatalf("Failed to remove stale socket %s: %v", DaemonSocket, err)
+
+		// Check if the error indicates a stale socket (no listener) vs other errors
+		// Only ECONNREFUSED means "socket exists but no one is listening"
+		// Permission denied, etc. means we can't determine if it's in use
+		if isConnectionRefused(probeErr) {
+			// Socket is stale - safe to remove
+			// Ignore NotFound errors (race with another process removing it)
+			if err := os.Remove(DaemonSocket); err != nil && !os.IsNotExist(err) {
+				log.Fatalf("Failed to remove stale socket %s: %v", DaemonSocket, err)
+			}
+			log.Printf("Removed stale socket file %s", DaemonSocket)
+		} else {
+			// Other error (permission denied, etc.) - can't determine if socket is in use
+			log.Fatalf("Cannot determine if socket %s is in use: %v", DaemonSocket, probeErr)
 		}
-		log.Printf("Removed stale socket file %s", DaemonSocket)
 	}
 
 	// Create Unix socket listener
@@ -697,4 +712,28 @@ func classifyError(err error) string {
 		}
 	}
 	return "other"
+}
+
+// isConnectionRefused checks if the error is ECONNREFUSED, indicating
+// a socket exists but no process is listening (stale socket).
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Unwrap to find the underlying syscall error
+	// net.OpError -> os.SyscallError -> syscall.Errno
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		var syscallErr *os.SyscallError
+		if errors.As(opErr.Err, &syscallErr) {
+			if errno, ok := syscallErr.Err.(syscall.Errno); ok {
+				return errno == syscall.ECONNREFUSED
+			}
+		}
+		// Also check if Err is directly a syscall.Errno
+		if errno, ok := opErr.Err.(syscall.Errno); ok {
+			return errno == syscall.ECONNREFUSED
+		}
+	}
+	return false
 }
