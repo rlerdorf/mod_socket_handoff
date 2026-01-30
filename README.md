@@ -144,7 +144,8 @@ The daemon must:
 
 See `examples/` for implementations in:
 - **fdrecv** (`fdrecv.c`) - Minimal C daemon that execs any handler with fd as stdin/stdout
-- Go (`streaming_daemon.go`) - Multi-threaded, production-ready
+- Go (`streaming-daemon-go/`) - Multi-threaded, production-ready
+- Rust (`streaming-daemon-rs/`) - Async/await with Tokio, production-ready, Prometheus metrics
 - PHP (`streaming_daemon.php`) - Uses `socket_cmsg_space()` for SCM_RIGHTS
 - Python (`test_daemon.py`) - Simple single-threaded test daemon
 
@@ -181,6 +182,223 @@ curl "http://localhost/api/stream?prompt=Hello+World"
 # |  _  |  __/ | | (_) |   \ V  V / (_) | |  | | (_| |
 # |_| |_|\___|_|_|\___/     \_/\_/ \___/|_|  |_|\__,_|
 ```
+
+## Frontend Integration
+
+This section explains how to build a complete frontend that triggers the handoff
+from PHP and streams the response into your UI with JavaScript.
+
+### PHP: Triggering the Handoff
+
+Your PHP endpoint authenticates the user, prepares the request data, and sets
+the handoff headers. The module intercepts these headers and passes the client
+connection to the daemon.
+
+```php
+<?php
+// api/stream.php
+
+declare(strict_types=1);
+
+// 1. Authenticate the request
+session_start();
+if (!isset($_SESSION['user_id'])) {
+    http_response_code(401);
+    header('Content-Type: application/json');
+    exit(json_encode(['error' => 'Unauthorized']));
+}
+
+// 2. Validate input
+$prompt = trim($_POST['prompt'] ?? '');
+if ($prompt === '') {
+    http_response_code(400);
+    header('Content-Type: application/json');
+    exit(json_encode(['error' => 'Prompt required']));
+}
+
+// 3. Prepare handoff data (this is sent to the daemon)
+$handoff_data = json_encode([
+    'user_id' => $_SESSION['user_id'],
+    'prompt' => $prompt,
+    'model' => $_POST['model'] ?? 'gpt-4o',
+    'request_id' => uniqid('req_', true),
+]);
+
+// 4. Set handoff headers
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $handoff_data);
+
+// 5. Exit - mod_socket_handoff takes over
+// The Apache worker is freed immediately. The daemon now owns
+// the connection and will stream the response directly to the client.
+exit;
+```
+
+### JavaScript: Consuming the SSE Stream
+
+The daemon responds with Server-Sent Events (SSE). Use the `EventSource` API
+or `fetch()` with a reader to consume the stream.
+
+#### Using EventSource (GET requests)
+
+The simplest approach for GET requests:
+
+```javascript
+function streamResponse(prompt) {
+    const output = document.getElementById('output');
+    output.textContent = '';
+
+    // EventSource only supports GET, so pass prompt in query string
+    const url = `/api/stream.php?prompt=${encodeURIComponent(prompt)}`;
+    const source = new EventSource(url);
+
+    source.onmessage = (event) => {
+        // Each message contains a chunk of the response
+        output.textContent += event.data;
+    };
+
+    source.addEventListener('done', () => {
+        // Custom event sent by daemon when stream is complete
+        source.close();
+    });
+
+    source.onerror = (event) => {
+        source.close();
+        if (output.textContent === '') {
+            output.textContent = 'Connection error. Please try again.';
+        }
+    };
+}
+```
+
+#### Using fetch() (POST requests)
+
+For POST requests with a body, use `fetch()` with a stream reader:
+
+```javascript
+async function streamResponse(prompt) {
+    const output = document.getElementById('output');
+    output.textContent = '';
+
+    const response = await fetch('/api/stream.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `prompt=${encodeURIComponent(prompt)}`,
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        output.textContent = error.error || 'Request failed';
+        return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Parse SSE format: "data: content\n\n"
+        const text = decoder.decode(value);
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') break;
+                output.textContent += data;
+            }
+        }
+    }
+}
+```
+
+### Complete HTML Example
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Streaming Demo</title>
+    <style>
+        #output {
+            white-space: pre-wrap;
+            font-family: monospace;
+            background: #f5f5f5;
+            padding: 1rem;
+            min-height: 100px;
+        }
+    </style>
+</head>
+<body>
+    <form id="chat-form">
+        <input type="text" id="prompt" placeholder="Enter your prompt" required>
+        <button type="submit">Send</button>
+    </form>
+    <div id="output"></div>
+
+    <script>
+    document.getElementById('chat-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const prompt = document.getElementById('prompt').value;
+        const output = document.getElementById('output');
+        output.textContent = '';
+
+        try {
+            const response = await fetch('/api/stream.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `prompt=${encodeURIComponent(prompt)}`,
+            });
+
+            if (!response.ok) throw new Error('Request failed');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const text = decoder.decode(value);
+                for (const line of text.split('\n')) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if (data !== '[DONE]') {
+                            output.textContent += data;
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            output.textContent = 'Error: ' + err.message;
+        }
+    });
+    </script>
+</body>
+</html>
+```
+
+### SSE Format
+
+The daemon sends responses in SSE format. Each chunk is prefixed with `data: `
+and terminated with two newlines:
+
+```
+data: Hello
+data: , how
+data:  can
+data:  I help?
+data: [DONE]
+
+```
+
+Common conventions:
+- `data: [DONE]` signals the stream is complete
+- `event: error` can be used for error messages
+- Empty `data:` lines are typically ignored by clients
 
 ## Headers
 
