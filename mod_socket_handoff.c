@@ -264,13 +264,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
 
     /* Wait for socket to be ready for writing */
     {
-        int remaining = remaining_timeout_ms(deadline);
-        if (remaining <= 0) {
+        int remaining_ms = remaining_timeout_ms(deadline);
+        if (remaining_ms <= 0) {
             errno = ETIMEDOUT;
             return -1;
         }
         if (wait_for_write(unix_sock,
-                           remaining < timeout_ms ? remaining : timeout_ms) <= 0) {
+                           remaining_ms < timeout_ms ? remaining_ms : timeout_ms) <= 0) {
             return -1;
         }
     }
@@ -498,14 +498,13 @@ static int connect_with_retry(const char *socket_path,
     struct timespec ts;
 
     for (attempt = 0; attempt <= max_retries; attempt++) {
-        int remaining = remaining_timeout_ms(deadline);
+        int remaining_ms = remaining_timeout_ms(deadline);
         int attempt_timeout;
-        if (remaining <= 0) {
-            returned_errno = ETIMEDOUT;
+        if (remaining_ms <= 0) {
             errno = ETIMEDOUT;
             break;
         }
-        attempt_timeout = remaining < connect_timeout_ms ? remaining : connect_timeout_ms;
+        attempt_timeout = remaining_ms < connect_timeout_ms ? remaining_ms : connect_timeout_ms;
         sock = connect_to_socket(socket_path, attempt_timeout,
                                  r, &returned_errno);
         if (sock >= 0) {
@@ -525,14 +524,13 @@ static int connect_with_retry(const char *socket_path,
         /* Exponential backoff: 10ms, 20ms, 40ms, ... */
         delay_ms = RETRY_BASE_DELAY_MS * (1 << attempt);
         {
-            int remaining = remaining_timeout_ms(deadline);
-            if (remaining <= 0) {
-                returned_errno = ETIMEDOUT;
+            int backoff_remaining = remaining_timeout_ms(deadline);
+            if (backoff_remaining <= 0) {
                 errno = ETIMEDOUT;
                 break;
             }
-            if (delay_ms > remaining) {
-                delay_ms = remaining;
+            if (delay_ms > backoff_remaining) {
+                delay_ms = backoff_remaining;
             }
         }
 
