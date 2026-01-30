@@ -163,10 +163,13 @@ static apr_time_t compute_handoff_deadline(const socket_handoff_config *conf)
 {
     apr_int64_t backoff_ms = 0;
     apr_int64_t total_ms;
+    int safe_retries;
 
     if (conf->max_retries > 0) {
+        /* Cap shift to avoid overflow (30 gives ~10 billion ms, plenty) */
+        safe_retries = conf->max_retries > 30 ? 30 : conf->max_retries;
         backoff_ms = (apr_int64_t)RETRY_BASE_DELAY_MS
-            * ((1LL << conf->max_retries) - 1);
+            * ((1LL << safe_retries) - 1);
     }
 
     total_ms = (apr_int64_t)conf->connect_timeout_ms
@@ -175,6 +178,9 @@ static apr_time_t compute_handoff_deadline(const socket_handoff_config *conf)
 
     if (total_ms < 1) {
         total_ms = 1;
+    }
+    if (total_ms > APR_INT32_MAX) {
+        total_ms = APR_INT32_MAX;
     }
 
     return apr_time_now() + apr_time_from_msec((apr_int32_t)total_ms);
@@ -522,7 +528,10 @@ static int connect_with_retry(const char *socket_path,
         }
 
         /* Exponential backoff: 10ms, 20ms, 40ms, ... */
-        delay_ms = RETRY_BASE_DELAY_MS * (1 << attempt);
+        {
+            int safe_attempt = attempt > 20 ? 20 : attempt;
+            delay_ms = RETRY_BASE_DELAY_MS * (1 << safe_attempt);
+        }
         {
             int backoff_remaining = remaining_timeout_ms(deadline);
             if (backoff_remaining <= 0) {
