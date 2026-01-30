@@ -107,8 +107,7 @@ pub fn record_backend_duration(backend: &'static str, duration: std::time::Durat
 
 /// Record time to first byte from backend.
 pub fn record_backend_ttfb(backend: &'static str, duration: std::time::Duration) {
-    histogram!("daemon_backend_ttfb_seconds", "backend" => backend)
-        .record(duration.as_secs_f64());
+    histogram!("daemon_backend_ttfb_seconds", "backend" => backend).record(duration.as_secs_f64());
 }
 
 /// Record bytes sent to client.

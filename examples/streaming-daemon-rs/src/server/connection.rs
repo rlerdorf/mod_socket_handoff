@@ -8,7 +8,7 @@ use std::time::Instant;
 use futures::FutureExt;
 use tokio::net::UnixStream;
 
-use crate::backend::{ChunkStreamTrait, StreamingBackend};
+use crate::backend::StreamingBackend;
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
 use crate::metrics::{self, Timer};
@@ -34,11 +34,7 @@ impl ConnectionHandler {
     /// 1. Receive the fd and data via SCM_RIGHTS
     /// 2. Stream response to the client
     /// 3. Close the client connection
-    pub async fn handle(
-        &self,
-        stream: UnixStream,
-        guard: ConnectionGuard,
-    ) {
+    pub async fn handle(&self, stream: UnixStream, guard: ConnectionGuard) {
         let conn_id = guard.id();
         let span = tracing::info_span!("connection", id = conn_id);
         let _enter = span.enter();
@@ -120,9 +116,9 @@ impl ConnectionHandler {
         let std_stream = std::net::TcpStream::from(client_fd);
 
         // Set non-blocking for tokio
-        std_stream.set_nonblocking(true).map_err(|e| {
-            ConnectionError::Stream(format!("Failed to set non-blocking: {}", e))
-        })?;
+        std_stream
+            .set_nonblocking(true)
+            .map_err(|e| ConnectionError::Stream(format!("Failed to set non-blocking: {}", e)))?;
 
         let tcp_stream = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
             ConnectionError::Stream(format!("Failed to create tokio stream: {}", e))
@@ -132,9 +128,10 @@ impl ConnectionHandler {
         let mut writer = SseWriter::new(tcp_stream, self.config.write_timeout());
 
         // Send HTTP headers
-        writer.send_headers().await.map_err(|e| {
-            ConnectionError::Stream(format!("Failed to send headers: {}", e))
-        })?;
+        writer
+            .send_headers()
+            .await
+            .map_err(|e| ConnectionError::Stream(format!("Failed to send headers: {}", e)))?;
 
         // Create stream request
         let request = StreamRequest::from_handoff(&data, guard.id());
@@ -242,4 +239,3 @@ pub enum ConnectionError {
     #[error("Backend error: {0}")]
     Backend(String),
 }
-

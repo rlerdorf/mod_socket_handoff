@@ -138,11 +138,8 @@ async fn main() -> anyhow::Result<()> {
         "Waiting for connections to drain"
     );
 
-    let drain_result = tokio::time::timeout(
-        config.server.shutdown_timeout(),
-        shutdown.wait_for_drain(),
-    )
-    .await;
+    let drain_result =
+        tokio::time::timeout(config.server.shutdown_timeout(), shutdown.wait_for_drain()).await;
 
     match drain_result {
         Ok(()) => {
@@ -162,8 +159,8 @@ async fn main() -> anyhow::Result<()> {
 
 /// Initialize logging with tracing.
 fn init_logging(config: &streaming_daemon_rs::config::LoggingConfig) -> anyhow::Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&config.level))?;
+    let filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.level))?;
 
     match config.format.as_str() {
         "json" => {

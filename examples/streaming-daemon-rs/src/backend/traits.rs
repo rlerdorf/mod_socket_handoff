@@ -102,9 +102,14 @@ pub type ChunkStream = Box<dyn ChunkStreamTrait>;
 /// Trait for chunk streams.
 pub trait ChunkStreamTrait: Send {
     /// Get the next chunk.
+    #[allow(clippy::type_complexity)]
     fn next(
         &mut self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>>;
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
+        >,
+    >;
 }
 
 /// Simple vector-based chunk stream for testing.
@@ -125,8 +130,11 @@ impl VecChunkStream {
 impl ChunkStreamTrait for VecChunkStream {
     fn next(
         &mut self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
+        >,
+    > {
         let delay = self.delay;
         let chunk = self.chunks.next();
 

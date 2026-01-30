@@ -65,7 +65,11 @@ impl ShutdownCoordinator {
     /// Register a new connection and return a guard that decrements on drop.
     pub fn register_connection(&self) -> ConnectionGuard {
         let id = self.inner.next_conn_id.fetch_add(1, Ordering::Relaxed);
-        let new_count = self.inner.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
+        let new_count = self
+            .inner
+            .active_connections
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         // Update gauge atomically with counter
         metrics::set_active_connections(new_count);
 
@@ -114,7 +118,9 @@ impl ShutdownCoordinator {
             }
             Err(_) => {
                 // Counter was already at 0; log error and ensure metrics are correct
-                tracing::error!("unregister_connection called with active_connections already at 0");
+                tracing::error!(
+                    "unregister_connection called with active_connections already at 0"
+                );
                 metrics::set_active_connections(0);
             }
         }

@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main, streaming-daemon-rs]
+  pull_request:
+
+jobs:
+  # Apache module compilation on Ubuntu
+  module-compile:
+    name: Apache Module Compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Apache development headers
+        run: sudo apt-get update && sudo apt-get install -y apache2-dev
+
+      - name: Compile module
+        run: make test-compile
+
+      - name: Verify module exists
+        run: test -f .libs/mod_socket_handoff.so
+
+  # Static analysis with cppcheck
+  static-analysis:
+    name: Static Analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,style --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=variableScope \
+            --suppress=constVariablePointer \
+            mod_socket_handoff.c
+
+  # Rust daemon tests
+  rust-daemon:
+    name: Rust Daemon
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/streaming-daemon-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+  # Go daemon tests
+  go-daemon:
+    name: Go Daemon
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/streaming-daemon-go
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build daemon
+        run: go build -o streaming-daemon .
+
+      - name: Run tests
+        run: go test -race -v .
+
+  # C daemon (fdrecv) compile verification
+  c-daemon:
+    name: C Daemon (fdrecv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile fdrecv
+        run: gcc -Wall -Wextra -o fdrecv examples/fdrecv.c
+
+      - name: Verify executable
+        run: (./fdrecv 2>&1 || true) | grep -q "Usage:"

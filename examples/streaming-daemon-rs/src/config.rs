@@ -7,24 +7,13 @@ use std::time::Duration;
 use crate::error::DaemonError;
 
 /// Main configuration structure.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
     pub backend: BackendConfig,
     pub metrics: MetricsConfig,
     pub logging: LoggingConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            backend: BackendConfig::default(),
-            metrics: MetricsConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
 }
 
 /// Server configuration.

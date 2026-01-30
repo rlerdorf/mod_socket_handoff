@@ -72,7 +72,10 @@ impl StreamingBackend for MockBackend {
         // Add done marker
         chunks.push(StreamChunk::done());
 
-        Ok(Box::new(VecChunkStream::new(chunks, Some(self.token_delay))))
+        Ok(Box::new(VecChunkStream::new(
+            chunks,
+            Some(self.token_delay),
+        )))
     }
 
     async fn health_check(&self) -> Result<(), BackendError> {

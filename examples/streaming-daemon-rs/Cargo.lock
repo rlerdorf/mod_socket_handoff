@@ -1518,8 +1518,6 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "nix",
- "parking_lot",
- "pin-project-lite",
  "reqwest",
  "reqwest-eventsource",
  "serde",
