@@ -185,9 +185,9 @@ func main() {
 			log.Fatalf("Socket %s is already in use by another process", DaemonSocket)
 		}
 
-		// Check if the error indicates a stale socket (no listener) vs other errors
-		// Only ECONNREFUSED means "socket exists but no one is listening"
-		// Permission denied, etc. means we can't determine if it's in use
+		// Check if the error indicates a stale socket or benign race condition
+		// ECONNREFUSED = socket exists but no listener (stale)
+		// ENOENT = socket removed between Lstat and Dial (race, safe to proceed)
 		if isConnectionRefused(probeErr) {
 			// Socket is stale - safe to remove
 			// Ignore NotFound errors (race with another process removing it)
@@ -195,6 +195,9 @@ func main() {
 				log.Fatalf("Failed to remove stale socket %s: %v", DaemonSocket, err)
 			}
 			log.Printf("Removed stale socket file %s", DaemonSocket)
+		} else if isNotExist(probeErr) {
+			// Socket was removed between Lstat and Dial - safe to proceed
+			log.Printf("Socket file %s was removed (race), proceeding", DaemonSocket)
 		} else {
 			// Other error (permission denied, etc.) - can't determine if socket is in use
 			log.Fatalf("Cannot determine if socket %s is in use: %v", DaemonSocket, probeErr)
@@ -717,6 +720,17 @@ func classifyError(err error) string {
 // isConnectionRefused checks if the error is ECONNREFUSED, indicating
 // a socket exists but no process is listening (stale socket).
 func isConnectionRefused(err error) bool {
+	return hasSyscallErrno(err, syscall.ECONNREFUSED)
+}
+
+// isNotExist checks if the error is ENOENT, indicating the socket
+// file doesn't exist (removed between check and dial).
+func isNotExist(err error) bool {
+	return hasSyscallErrno(err, syscall.ENOENT)
+}
+
+// hasSyscallErrno checks if the error wraps a specific syscall.Errno.
+func hasSyscallErrno(err error, target syscall.Errno) bool {
 	if err == nil {
 		return false
 	}
@@ -727,12 +741,12 @@ func isConnectionRefused(err error) bool {
 		var syscallErr *os.SyscallError
 		if errors.As(opErr.Err, &syscallErr) {
 			if errno, ok := syscallErr.Err.(syscall.Errno); ok {
-				return errno == syscall.ECONNREFUSED
+				return errno == target
 			}
 		}
 		// Also check if Err is directly a syscall.Errno
 		if errno, ok := opErr.Err.(syscall.Errno); ok {
-			return errno == syscall.ECONNREFUSED
+			return errno == target
 		}
 	}
 	return false
