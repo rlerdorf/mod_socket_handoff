@@ -8,7 +8,6 @@ use nix::sys::socket::{
     getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType,
     ControlMessageOwned, MsgFlags, SockaddrStorage,
 };
-use nix::unistd::dup;
 use serde::Deserialize;
 use std::io::IoSliceMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -49,18 +48,19 @@ pub struct HandoffResult {
 
 /// Receive file descriptor and handoff data from Apache via SCM_RIGHTS.
 ///
+/// This function takes ownership of the UnixStream because:
+/// 1. We need to clear O_NONBLOCK for SO_RCVTIMEO to work
+/// 2. dup() shares the file description, so clearing flags would affect tokio
+/// 3. Taking ownership lets us safely convert to a blocking fd
+///
 /// This function:
 /// 1. Waits for the Unix socket to be readable
 /// 2. Uses recvmsg to receive both the data and the control message
 /// 3. Extracts the file descriptor from SCM_RIGHTS
 /// 4. Validates the socket type
 /// 5. Parses the JSON handoff data
-///
-/// Timeout is enforced via SO_RCVTIMEO on the socket, not tokio::time::timeout,
-/// to avoid a race where the caller drops the stream while spawn_blocking is
-/// still using the raw fd.
 pub async fn receive_handoff(
-    stream: &UnixStream,
+    stream: UnixStream,
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
@@ -76,15 +76,12 @@ pub async fn receive_handoff(
         ));
     }
 
-    // Duplicate the fd so the blocking task owns it independently.
-    // This makes the operation cancellation-safe: if the async task is
-    // cancelled, the duplicated fd in spawn_blocking remains valid.
-    let fd = stream.as_raw_fd();
-    let dup_fd = dup(fd).map_err(|e| {
-        HandoffError::ReceiveFailed(format!("Failed to dup fd: {}", e))
+    // Convert tokio UnixStream to OwnedFd by going through std UnixStream.
+    // This transfers ownership cleanly without sharing file descriptions.
+    let std_stream = stream.into_std().map_err(|e| {
+        HandoffError::ReceiveFailed(format!("Failed to convert to std stream: {}", e))
     })?;
-    // SAFETY: dup() returns a valid new fd that we now own
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+    let owned_fd = OwnedFd::from(std_stream);
 
     // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO set
     // to ensure the blocking call returns even under slow/malicious peers.

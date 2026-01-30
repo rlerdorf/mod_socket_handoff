@@ -74,10 +74,10 @@ impl ConnectionHandler {
         stream: UnixStream,
         guard: &ConnectionGuard,
     ) -> Result<(), ConnectionError> {
-        // Receive handoff from Apache
+        // Receive handoff from Apache (takes ownership of stream)
         let handoff_timer = Timer::new();
         let handoff = receive_handoff(
-            &stream,
+            stream,
             self.config.handoff_timeout(),
             self.config.handoff_buffer_size,
         )

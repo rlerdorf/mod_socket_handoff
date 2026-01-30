@@ -90,11 +90,33 @@ impl ShutdownCoordinator {
     }
 
     fn unregister_connection(&self, _id: u64) {
-        let prev = self.inner.active_connections.fetch_sub(1, Ordering::Relaxed);
-        // Update gauge atomically with counter (prev - 1 is the new count)
-        metrics::set_active_connections(prev - 1);
-        if prev == 1 {
-            self.inner.drain_notify.notify_waiters();
+        // Use fetch_update to guard against underflow
+        let result = self.inner.active_connections.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |curr| {
+                if curr == 0 {
+                    None // Don't decrement if already at 0
+                } else {
+                    Some(curr - 1)
+                }
+            },
+        );
+
+        match result {
+            Ok(prev) => {
+                // prev > 0 here, so prev - 1 will not underflow
+                let new_count = prev - 1;
+                metrics::set_active_connections(new_count);
+                if new_count == 0 {
+                    self.inner.drain_notify.notify_waiters();
+                }
+            }
+            Err(_) => {
+                // Counter was already at 0; log error and ensure metrics are correct
+                tracing::error!("unregister_connection called with active_connections already at 0");
+                metrics::set_active_connections(0);
+            }
         }
     }
 }
