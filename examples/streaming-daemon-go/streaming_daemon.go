@@ -58,12 +58,19 @@ const (
 
 	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
 	DefaultMetricsAddr = "127.0.0.1:9090"
+
+	// DefaultSocketMode is the default permission mode for the Unix socket.
+	// 0660 restricts access to owner and group only. Apache (www-data) must be
+	// in the same group as the daemon, or run the daemon as www-data.
+	DefaultSocketMode = 0660
 )
 
 // Command-line flags
 var (
 	metricsAddr = flag.String("metrics-addr", DefaultMetricsAddr,
 		"Address for Prometheus metrics server (empty to disable)")
+	socketMode = flag.Uint("socket-mode", DefaultSocketMode,
+		"Permission mode for Unix socket (e.g., 0660)")
 )
 
 // Prometheus metrics
@@ -213,10 +220,10 @@ func main() {
 	// after ctx.Done() during graceful shutdown to unblock the accept loop.
 	defer listener.Close()
 
-	// Set permissions so Apache (www-data) can connect.
-	// SECURITY: 0666 allows any local user to connect. For production,
-	// consider 0660 with proper group ownership, or use directory permissions.
-	if err := os.Chmod(DaemonSocket, 0666); err != nil {
+	// Set socket permissions. Default is 0660 (owner + group only).
+	// Apache (www-data) must be in the daemon's group to connect.
+	// Use -socket-mode=0666 only for testing, never in production.
+	if err := os.Chmod(DaemonSocket, os.FileMode(*socketMode)); err != nil {
 		log.Printf("Warning: Could not chmod socket: %v", err)
 	}
 

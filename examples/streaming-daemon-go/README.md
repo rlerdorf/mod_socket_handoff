@@ -62,6 +62,7 @@ sudo ./streaming-daemon -metrics-addr=""
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-metrics-addr` | `127.0.0.1:9090` | Address for Prometheus metrics server (empty to disable) |
+| `-socket-mode` | `0660` | Permission mode for Unix socket |
 
 ### Signals
 
@@ -266,12 +267,21 @@ sudo journalctl -u streaming-daemon -f
 
 ### Permission Denied on Socket
 
+The daemon uses mode 0660 by default (owner + group access only). Apache must
+be able to connect to the socket:
+
 ```bash
 # Check socket permissions
 ls -la /var/run/streaming-daemon.sock
 
-# The daemon sets 0666 by default. For production, consider
-# running as www-data or using group permissions.
+# Option 1: Run daemon as www-data (same user as Apache)
+sudo -u www-data ./streaming-daemon
+
+# Option 2: Add www-data to daemon's group
+sudo usermod -aG streaming-daemon www-data
+
+# Option 3: For testing only (NOT for production)
+./streaming-daemon -socket-mode=0666
 ```
 
 ### Connection Refused
