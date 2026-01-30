@@ -40,17 +40,23 @@ pub struct StreamRequest {
 
 impl StreamRequest {
     /// Create a stream request from handoff data.
+    /// Converts Box<str> fields to String for API use.
     pub fn from_handoff(data: &HandoffData, conn_id: u64) -> Self {
         Self {
-            prompt: data.prompt.clone().unwrap_or_default(),
-            model: data.model.clone(),
+            prompt: data
+                .prompt
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            model: data.model.as_ref().map(|s| s.to_string()),
             max_tokens: data.max_tokens,
             temperature: data.temperature,
-            system: data.system.clone(),
+            system: data.system.as_ref().map(|s| s.to_string()),
             user_id: data.user_id,
             request_id: data
                 .request_id
-                .clone()
+                .as_ref()
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("conn-{}", conn_id)),
         }
     }

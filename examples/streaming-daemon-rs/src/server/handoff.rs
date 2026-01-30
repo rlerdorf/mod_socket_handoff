@@ -18,22 +18,24 @@ use tokio::net::UnixStream;
 use crate::error::HandoffError;
 
 /// Data passed from PHP via X-Handoff-Data header.
+/// Uses `Box<str>` instead of `String` for immutable string fields
+/// to save 8 bytes per field (no capacity needed since we never grow them).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HandoffData {
     #[serde(default)]
     pub user_id: Option<i64>,
     #[serde(default)]
-    pub prompt: Option<String>,
+    pub prompt: Option<Box<str>>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<Box<str>>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
-    pub system: Option<String>,
+    pub system: Option<Box<str>>,
     #[serde(default)]
-    pub request_id: Option<String>,
+    pub request_id: Option<Box<str>>,
 }
 
 /// Result of receiving a handoff from Apache.
@@ -223,7 +225,7 @@ mod tests {
         let data = parse_handoff_data(json.as_bytes()).unwrap();
 
         assert_eq!(data.user_id, Some(123));
-        assert_eq!(data.prompt, Some("Hello world".to_string()));
+        assert_eq!(data.prompt.as_deref(), Some("Hello world"));
         assert_eq!(data.model, None);
     }
 
