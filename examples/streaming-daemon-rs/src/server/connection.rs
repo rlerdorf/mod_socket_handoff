@@ -8,7 +8,7 @@ use std::time::Instant;
 use futures::FutureExt;
 use tokio::net::UnixStream;
 
-use crate::backend::StreamingBackend;
+use crate::backend::{ChunkStreamTrait, StreamingBackend};
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
 use crate::metrics::{self, Timer};
