@@ -287,10 +287,8 @@ static int connect_to_socket(const char *socket_path,
 
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-    /* Set non-blocking for connect with timeout (if not already set) */
-    if (sock_nonblock) {
-        flags = O_NONBLOCK;  /* We know it's non-blocking */
-    } else {
+    /* Set non-blocking for connect with timeout (if not already set via SOCK_NONBLOCK) */
+    if (!sock_nonblock) {
         flags = fcntl(sock, F_GETFL, 0);
         if (flags < 0) {
             *returned_errno = errno;
