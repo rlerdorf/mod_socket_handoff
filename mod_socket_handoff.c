@@ -59,6 +59,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
+#include <time.h>
 
 #define HANDOFF_HEADER "X-Socket-Handoff"
 #define HANDOFF_DATA_HEADER "X-Handoff-Data"
@@ -74,7 +75,15 @@ typedef struct {
     const char *resolved_prefix_truename;   /* Cached TRUENAME version (symlinks resolved) */
     int connect_timeout_ms;
     int connect_timeout_ms_set;
+    int send_timeout_ms;
+    int send_timeout_ms_set;
+    int max_retries;
+    int max_retries_set;
 } socket_handoff_config;
+
+/* Retry configuration defaults */
+#define DEFAULT_MAX_RETRIES 3
+#define RETRY_BASE_DELAY_MS 10  /* Base delay: 10ms, 20ms, 40ms */
 
 /* Create per-server config */
 static void *create_server_config(apr_pool_t *p, server_rec *s)
@@ -85,6 +94,10 @@ static void *create_server_config(apr_pool_t *p, server_rec *s)
     conf->allowed_socket_prefix = "/var/run/";
     conf->connect_timeout_ms = 500;
     conf->connect_timeout_ms_set = 0;
+    conf->send_timeout_ms = 500;
+    conf->send_timeout_ms_set = 0;
+    conf->max_retries = DEFAULT_MAX_RETRIES;
+    conf->max_retries_set = 0;
     return conf;
 }
 
@@ -108,6 +121,16 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
         : base->connect_timeout_ms;
     conf->connect_timeout_ms_set = add->connect_timeout_ms_set
         || base->connect_timeout_ms_set;
+    conf->send_timeout_ms = add->send_timeout_ms_set
+        ? add->send_timeout_ms
+        : base->send_timeout_ms;
+    conf->send_timeout_ms_set = add->send_timeout_ms_set
+        || base->send_timeout_ms_set;
+    conf->max_retries = add->max_retries_set
+        ? add->max_retries
+        : base->max_retries;
+    conf->max_retries_set = add->max_retries_set
+        || base->max_retries_set;
 
     return conf;
 }
@@ -117,6 +140,9 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
  *
  * This is the core mechanism for passing the client connection
  * to the external daemon. The fd is sent as ancillary data.
+ *
+ * The socket should have SO_SNDTIMEO set. If send would block
+ * (EAGAIN/EWOULDBLOCK), we treat it as a timeout error.
  */
 static int send_fd_with_data(int unix_sock, int fd_to_send,
                              const char *data, size_t data_len)
@@ -160,6 +186,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
 
     sent = sendmsg(unix_sock, &msg, 0);
     if (sent < 0) {
+        /*
+         * EAGAIN/EWOULDBLOCK on a socket with SO_SNDTIMEO means the
+         * timeout expired while waiting for buffer space. Treat as timeout.
+         */
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            errno = ETIMEDOUT;
+        }
         return -1;
     }
 
@@ -171,6 +204,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
+                }
+                /*
+                 * EAGAIN/EWOULDBLOCK means SO_SNDTIMEO fired.
+                 * Treat as timeout error.
+                 */
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    errno = ETIMEDOUT;
                 }
                 return -1;
             }
@@ -189,10 +229,15 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
 
 /*
  * Connect to Unix domain socket with timeout
+ *
+ * Returns connected socket with SO_SNDTIMEO set, or -1 on error.
+ * The returned_errno parameter is set to the error code for retry decisions.
  */
 static int connect_to_socket(const char *socket_path,
-                             int timeout_ms,
-                             request_rec *r)
+                             int connect_timeout_ms,
+                             int send_timeout_ms,
+                             request_rec *r,
+                             int *returned_errno)
 {
     int sock;
     struct sockaddr_un addr;
@@ -202,6 +247,9 @@ static int connect_to_socket(const char *socket_path,
     int so_error;
     socklen_t so_error_len;
     int sock_nonblock = 0;
+    struct timeval tv;
+
+    *returned_errno = 0;
 
     /*
      * Use SOCK_NONBLOCK if available (Linux 2.6.27+).
@@ -220,6 +268,7 @@ static int connect_to_socket(const char *socket_path,
 #endif
 
     if (sock < 0) {
+        *returned_errno = errno;
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: socket() failed: %s", strerror(errno));
         return -1;
@@ -232,6 +281,7 @@ static int connect_to_socket(const char *socket_path,
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Socket path too long: %s", socket_path);
         close(sock);
+        *returned_errno = ENAMETOOLONG;
         return -1;
     }
 
@@ -243,19 +293,24 @@ static int connect_to_socket(const char *socket_path,
     } else {
         flags = fcntl(sock, F_GETFL, 0);
         if (flags < 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            *returned_errno = errno;
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: fcntl(F_GETFL) failed: %s", strerror(errno));
-            /* Continue with blocking connect */
-        } else if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            close(sock);
+            return -1;
+        }
+        if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+            *returned_errno = errno;
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: fcntl(F_SETFL) failed: %s", strerror(errno));
-            /* Continue with blocking connect */
-            flags = -1;
+            close(sock);
+            return -1;
         }
     }
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         if (errno != EINPROGRESS) {
+            *returned_errno = errno;
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: connect() to %s failed: %s",
                 socket_path, strerror(errno));
@@ -268,17 +323,19 @@ static int connect_to_socket(const char *socket_path,
         pfd.events = POLLOUT;
         pfd.revents = 0;
         do {
-            poll_ret = poll(&pfd, 1, timeout_ms);
+            poll_ret = poll(&pfd, 1, connect_timeout_ms);
         } while (poll_ret < 0 && errno == EINTR);
 
         if (poll_ret == 0) {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: connect() to %s timed out after %d ms",
-                socket_path, timeout_ms);
+                socket_path, connect_timeout_ms);
             close(sock);
+            *returned_errno = ETIMEDOUT;
             return -1;
         }
         if (poll_ret < 0) {
+            *returned_errno = errno;
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: poll() for connect() to %s failed: %s",
                 socket_path, strerror(errno));
@@ -292,6 +349,7 @@ static int connect_to_socket(const char *socket_path,
                 "mod_socket_handoff: poll() on connect() to %s indicated error",
                 socket_path);
             close(sock);
+            *returned_errno = ECONNREFUSED;
             return -1;
         }
 
@@ -300,6 +358,7 @@ static int connect_to_socket(const char *socket_path,
         so_error_len = sizeof(so_error);
         if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
                        &so_error, &so_error_len) < 0) {
+            *returned_errno = errno;
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: getsockopt(SO_ERROR) failed: %s",
                 strerror(errno));
@@ -307,6 +366,7 @@ static int connect_to_socket(const char *socket_path,
             return -1;
         }
         if (so_error != 0) {
+            *returned_errno = so_error;
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "mod_socket_handoff: connect() to %s failed: %s",
                 socket_path, strerror(so_error));
@@ -315,27 +375,83 @@ static int connect_to_socket(const char *socket_path,
         }
     }
 
-    /* Restore blocking mode */
-    if (sock_nonblock) {
-        /* Socket was created with SOCK_NONBLOCK, restore to blocking */
-        int cur_flags = fcntl(sock, F_GETFL, 0);
-        if (cur_flags >= 0) {
-            if (fcntl(sock, F_SETFL, cur_flags & ~O_NONBLOCK) < 0) {
-                ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                    "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
-                    strerror(errno));
-            }
-        }
-    } else if (flags >= 0) {
-        if (fcntl(sock, F_SETFL, flags) < 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "mod_socket_handoff: fcntl(F_SETFL) restore failed: %s",
-                strerror(errno));
-            /* Non-fatal, continue with non-blocking socket */
-        }
+    /*
+     * Set SO_SNDTIMEO to prevent blocking sends.
+     * This is critical for production: if daemon socket buffer is full,
+     * sendmsg() would block indefinitely without this timeout.
+     */
+    tv.tv_sec = send_timeout_ms / 1000;
+    tv.tv_usec = (send_timeout_ms % 1000) * 1000;
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+            "mod_socket_handoff: setsockopt(SO_SNDTIMEO) failed: %s",
+            strerror(errno));
+        /* Continue anyway - timeout just won't work, but we still have EAGAIN handling */
     }
 
+    /* Keep socket non-blocking - SO_SNDTIMEO handles send timeouts */
+
     return sock;
+}
+
+/*
+ * Check if an error is transient and worth retrying.
+ * ENOENT: daemon socket file doesn't exist yet (daemon starting)
+ * ECONNREFUSED: daemon not listening (daemon restarting)
+ */
+static int is_transient_error(int err)
+{
+    return (err == ENOENT || err == ECONNREFUSED);
+}
+
+/*
+ * Connect to daemon with retry for transient errors.
+ * Uses exponential backoff: 10ms, 20ms, 40ms, etc.
+ */
+static int connect_with_retry(const char *socket_path,
+                              int connect_timeout_ms,
+                              int send_timeout_ms,
+                              int max_retries,
+                              request_rec *r)
+{
+    int sock;
+    int returned_errno = 0;
+    int attempt;
+    int delay_ms;
+    struct timespec ts;
+
+    for (attempt = 0; attempt <= max_retries; attempt++) {
+        sock = connect_to_socket(socket_path, connect_timeout_ms, send_timeout_ms,
+                                 r, &returned_errno);
+        if (sock >= 0) {
+            if (attempt > 0) {
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
+                    "mod_socket_handoff: connect() to %s succeeded on attempt %d",
+                    socket_path, attempt + 1);
+            }
+            return sock;
+        }
+
+        /* Don't retry on final attempt or non-transient errors */
+        if (attempt >= max_retries || !is_transient_error(returned_errno)) {
+            break;
+        }
+
+        /* Exponential backoff: 10ms, 20ms, 40ms, ... */
+        delay_ms = RETRY_BASE_DELAY_MS * (1 << attempt);
+
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+            "mod_socket_handoff: connect() to %s failed (%s), "
+            "retrying in %d ms (attempt %d/%d)",
+            socket_path, strerror(returned_errno),
+            delay_ms, attempt + 1, max_retries);
+
+        ts.tv_sec = delay_ms / 1000;
+        ts.tv_nsec = (delay_ms % 1000) * 1000000L;
+        nanosleep(&ts, NULL);
+    }
+
+    return -1;
 }
 
 /*
@@ -564,8 +680,12 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* Connect to the streaming daemon */
-    daemon_sock = connect_to_socket(socket_path, conf->connect_timeout_ms, r);
+    /* Connect to the streaming daemon with retry for transient errors */
+    daemon_sock = connect_with_retry(socket_path,
+                                     conf->connect_timeout_ms,
+                                     conf->send_timeout_ms,
+                                     conf->max_retries,
+                                     r);
     if (daemon_sock < 0) {
         return HTTP_SERVICE_UNAVAILABLE;
     }
@@ -674,6 +794,61 @@ static const char *set_connect_timeout(cmd_parms *cmd, void *dummy,
     return NULL;
 }
 
+static const char *set_send_timeout(cmd_parms *cmd, void *dummy,
+                                    const char *arg)
+{
+    socket_handoff_config *conf = ap_get_module_config(
+        cmd->server->module_config, &socket_handoff_module);
+    char *endptr;
+    long timeout;
+
+    errno = 0;
+    timeout = strtol(arg, &endptr, 10);
+
+    /* Check for conversion errors */
+    if (endptr == arg || *endptr != '\0') {
+        return "SocketHandoffSendTimeoutMs must be a valid integer";
+    }
+    if (errno == ERANGE || timeout < 1 || timeout > MAX_CONNECT_TIMEOUT_MS) {
+        return apr_psprintf(cmd->pool,
+            "SocketHandoffSendTimeoutMs must be between 1 and %d",
+            MAX_CONNECT_TIMEOUT_MS);
+    }
+
+    conf->send_timeout_ms = (int)timeout;
+    conf->send_timeout_ms_set = 1;
+    return NULL;
+}
+
+/* Maximum retries: 10 */
+#define MAX_RETRIES_LIMIT 10
+
+static const char *set_max_retries(cmd_parms *cmd, void *dummy,
+                                   const char *arg)
+{
+    socket_handoff_config *conf = ap_get_module_config(
+        cmd->server->module_config, &socket_handoff_module);
+    char *endptr;
+    long retries;
+
+    errno = 0;
+    retries = strtol(arg, &endptr, 10);
+
+    /* Check for conversion errors */
+    if (endptr == arg || *endptr != '\0') {
+        return "SocketHandoffMaxRetries must be a valid integer";
+    }
+    if (errno == ERANGE || retries < 0 || retries > MAX_RETRIES_LIMIT) {
+        return apr_psprintf(cmd->pool,
+            "SocketHandoffMaxRetries must be between 0 and %d",
+            MAX_RETRIES_LIMIT);
+    }
+
+    conf->max_retries = (int)retries;
+    conf->max_retries_set = 1;
+    return NULL;
+}
+
 /* Configuration directives */
 static const command_rec socket_handoff_cmds[] = {
     AP_INIT_FLAG(
@@ -696,6 +871,20 @@ static const command_rec socket_handoff_cmds[] = {
         NULL,
         RSRC_CONF,
         "Timeout for connecting to handoff daemon in milliseconds (default: 500)"
+    ),
+    AP_INIT_TAKE1(
+        "SocketHandoffSendTimeoutMs",
+        set_send_timeout,
+        NULL,
+        RSRC_CONF,
+        "Timeout for sending fd to handoff daemon in milliseconds (default: 500)"
+    ),
+    AP_INIT_TAKE1(
+        "SocketHandoffMaxRetries",
+        set_max_retries,
+        NULL,
+        RSRC_CONF,
+        "Max retries for transient connect errors like ENOENT/ECONNREFUSED (default: 3)"
     ),
     {NULL}
 };
