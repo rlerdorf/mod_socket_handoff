@@ -99,23 +99,18 @@ fn receive_fd_blocking(
     // Clear O_NONBLOCK on the duplicated fd so SO_RCVTIMEO works correctly.
     // The original tokio UnixStream has O_NONBLOCK set, which we inherit via dup().
     let fd = owned_fd.as_raw_fd();
-    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|e| {
-        HandoffError::ReceiveFailed(format!("Failed to get fd flags: {}", e))
-    })?;
+    let flags = fcntl(fd, FcntlArg::F_GETFL)
+        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to get fd flags: {}", e)))?;
     let new_flags = OFlag::from_bits_truncate(flags) & !OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(new_flags)).map_err(|e| {
-        HandoffError::ReceiveFailed(format!("Failed to clear O_NONBLOCK: {}", e))
-    })?;
+    fcntl(fd, FcntlArg::F_SETFL(new_flags))
+        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to clear O_NONBLOCK: {}", e)))?;
 
     // Set SO_RCVTIMEO so recvmsg returns even if peer is slow/malicious.
     // This ensures the blocking thread is released and not leaked.
-    let timeval = nix::sys::time::TimeVal::new(
-        timeout.as_secs() as i64,
-        timeout.subsec_micros() as i64,
-    );
-    setsockopt(&owned_fd, ReceiveTimeout, &timeval).map_err(|e| {
-        HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e))
-    })?;
+    let timeval =
+        nix::sys::time::TimeVal::new(timeout.as_secs() as i64, timeout.subsec_micros() as i64);
+    setsockopt(&owned_fd, ReceiveTimeout, &timeval)
+        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e)))?;
 
     let mut data_buf = vec![0u8; buffer_size];
     let mut cmsg_buf = cmsg_space!([RawFd; 1]);

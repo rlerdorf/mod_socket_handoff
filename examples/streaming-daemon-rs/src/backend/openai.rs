@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::time::Duration;
 
-use super::traits::{ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend};
+use super::traits::{
+    ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend,
+};
 use crate::error::BackendError;
 
 /// OpenAI streaming backend.
@@ -51,10 +53,7 @@ impl StreamingBackend for OpenAIBackend {
         "openai"
     }
 
-    async fn stream(
-        &self,
-        request: StreamRequest,
-    ) -> Result<super::ChunkStream, BackendError> {
+    async fn stream(&self, request: StreamRequest) -> Result<super::ChunkStream, BackendError> {
         let model = request.model.unwrap_or_else(|| self.default_model.clone());
 
         let mut messages = Vec::new();
@@ -125,8 +124,11 @@ struct OpenAIChunkStream {
 impl ChunkStreamTrait for OpenAIChunkStream {
     fn next(
         &mut self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
+        >,
+    > {
         Box::pin(async move {
             loop {
                 match self.es.next().await {

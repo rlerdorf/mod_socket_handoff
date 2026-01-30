@@ -30,6 +30,7 @@ X-Accel-Buffering: no\r\n\
 \r\n";
 
 /// HTTP 500 error response.
+#[allow(dead_code)]
 pub const ERROR_500_RESPONSE: &str = "\
 HTTP/1.1 500 Internal Server Error\r\n\
 Content-Type: text/plain\r\n\

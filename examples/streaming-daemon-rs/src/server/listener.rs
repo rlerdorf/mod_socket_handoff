@@ -22,20 +22,13 @@ pub struct UnixSocketListener {
 
 impl UnixSocketListener {
     /// Create and bind a new Unix socket listener.
-    pub async fn bind(
-        config: &ServerConfig,
-        shutdown: ShutdownCoordinator,
-    ) -> Result<Self> {
+    pub async fn bind(config: &ServerConfig, shutdown: ShutdownCoordinator) -> Result<Self> {
         let socket_path = PathBuf::from(&config.socket_path);
 
         // Remove stale socket if it exists (verify it's actually a socket first)
         if socket_path.exists() {
             let metadata = std::fs::symlink_metadata(&socket_path).map_err(|e| {
-                DaemonError::Socket(format!(
-                    "Failed to stat {}: {}",
-                    socket_path.display(),
-                    e
-                ))
+                DaemonError::Socket(format!("Failed to stat {}: {}", socket_path.display(), e))
             })?;
 
             if metadata.file_type().is_socket() {
