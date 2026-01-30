@@ -1,0 +1,55 @@
+[Unit]
+Description=Streaming Daemon for Apache Socket Handoff (Rust)
+Documentation=https://github.com/rlerdorf/mod_socket_handoff
+After=network.target
+# Start daemon before Apache so the socket is ready for handoff connections
+Before=apache2.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/streaming-daemon-rs /etc/streaming-daemon-rs/daemon.toml
+Restart=on-failure
+RestartSec=5
+
+# User/Group - run as www-data for socket permissions
+User=www-data
+Group=www-data
+
+# Environment
+Environment=RUST_BACKTRACE=1
+Environment=DAEMON_LOG_LEVEL=info
+# Socket path must be inside RuntimeDirectory for ProtectSystem=strict
+Environment=DAEMON_SOCKET_PATH=/run/streaming-daemon-rs/daemon.sock
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Socket directory - creates /run/streaming-daemon-rs/ with correct ownership
+RuntimeDirectory=streaming-daemon-rs
+RuntimeDirectoryMode=0755
+
+# Resource limits
+LimitNOFILE=200000
+LimitNPROC=65535
+
+# Memory limits (adjust based on expected load)
+MemoryMax=2G
+MemoryHigh=1G
+
+# OOM handling
+OOMScoreAdjust=-100
+
+# Graceful shutdown
+TimeoutStopSec=180
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
