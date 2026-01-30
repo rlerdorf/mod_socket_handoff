@@ -53,13 +53,18 @@ impl UnixSocketListener {
                                     socket_path = %socket_path.display(),
                                     "Removing stale socket file"
                                 );
-                                std::fs::remove_file(&socket_path).map_err(|e| {
-                                    DaemonError::Socket(format!(
-                                        "Failed to remove stale socket {}: {}",
-                                        socket_path.display(),
-                                        e
-                                    ))
-                                })?;
+                                // Ignore NotFound - the socket may have been removed by
+                                // another process between our check and this removal.
+                                // Our goal is to ensure it's gone, which it is.
+                                if let Err(e) = std::fs::remove_file(&socket_path) {
+                                    if e.kind() != ErrorKind::NotFound {
+                                        return Err(DaemonError::Socket(format!(
+                                            "Failed to remove stale socket {}: {}",
+                                            socket_path.display(),
+                                            e
+                                        )));
+                                    }
+                                }
                             }
                             // Other errors (permission denied, etc.) - don't assume we can take over
                             _ => {
