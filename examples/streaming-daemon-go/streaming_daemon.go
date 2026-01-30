@@ -20,9 +20,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -31,6 +33,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
@@ -48,6 +54,65 @@ const (
 	// This should be large enough to hold LLM prompts. Increase if needed.
 	// Note: Apache's LimitRequestFieldSize (default 8190) limits individual header size.
 	MaxHandoffDataSize = 65536 // 64KB
+
+	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
+	DefaultMetricsAddr = "127.0.0.1:9090"
+)
+
+// Command-line flags
+var (
+	metricsAddr = flag.String("metrics-addr", DefaultMetricsAddr,
+		"Address for Prometheus metrics server (empty to disable)")
+)
+
+// Prometheus metrics
+var (
+	metricActiveConnections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "daemon_active_connections",
+		Help: "Number of currently active client connections",
+	})
+
+	metricConnectionsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "daemon_connections_total",
+		Help: "Total number of connections accepted",
+	})
+
+	metricConnectionsRejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "daemon_connections_rejected_total",
+		Help: "Total number of connections rejected due to capacity limits",
+	})
+
+	metricHandoffsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "daemon_handoffs_total",
+		Help: "Total number of successful fd handoffs received",
+	})
+
+	metricHandoffErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "daemon_handoff_errors_total",
+		Help: "Total number of handoff receive errors",
+	}, []string{"reason"})
+
+	metricStreamErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "daemon_stream_errors_total",
+		Help: "Total number of stream errors",
+	}, []string{"reason"})
+
+	metricBytesSent = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "daemon_bytes_sent_total",
+		Help: "Total bytes sent to clients",
+	})
+
+	metricHandoffDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "daemon_handoff_duration_seconds",
+		Help:    "Time spent receiving fd handoff from Apache",
+		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15), // 0.1ms to ~1.6s
+	})
+
+	metricStreamDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "daemon_stream_duration_seconds",
+		Help:    "Total time spent streaming response to client",
+		Buckets: prometheus.ExponentialBuckets(0.01, 2, 15), // 10ms to ~163s
+	})
 )
 
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
@@ -78,6 +143,7 @@ var handoffBufPool = sync.Pool{
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	flag.Parse()
 
 	// Initialize connection limiter
 	connSemaphore = make(chan struct{}, MaxConnections)
@@ -103,8 +169,22 @@ func main() {
 		}
 	}()
 
-	// Remove stale socket
-	os.Remove(DaemonSocket)
+	// Handle existing socket file
+	if _, err := os.Stat(DaemonSocket); err == nil {
+		// Socket file exists - probe to see if another daemon is listening
+		probeConn, probeErr := net.DialTimeout("unix", DaemonSocket, time.Second)
+		if probeErr == nil {
+			// Connection succeeded - another daemon is running
+			probeConn.Close()
+			log.Fatalf("Socket %s is already in use by another process", DaemonSocket)
+		}
+		// Connection failed - socket is stale, safe to remove.
+		// Ignore NotFound errors (race with another process removing it).
+		if err := os.Remove(DaemonSocket); err != nil && !os.IsNotExist(err) {
+			log.Fatalf("Failed to remove stale socket %s: %v", DaemonSocket, err)
+		}
+		log.Printf("Removed stale socket file %s", DaemonSocket)
+	}
 
 	// Create Unix socket listener
 	listener, err := net.Listen("unix", DaemonSocket)
@@ -123,6 +203,23 @@ func main() {
 	}
 
 	log.Printf("Streaming daemon listening on %s (max %d connections)", DaemonSocket, MaxConnections)
+
+	// Start Prometheus metrics server
+	if *metricsAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			server := &http.Server{
+				Addr:              *metricsAddr,
+				Handler:           mux,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			log.Printf("Metrics server listening on %s", *metricsAddr)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("Metrics server error: %v", err)
+			}
+		}()
+	}
 
 	// Accept connections
 	go func() {
@@ -154,11 +251,14 @@ func main() {
 			case connSemaphore <- struct{}{}:
 				connWg.Add(1)
 				atomic.AddInt64(&activeConns, 1)
+				metricConnectionsTotal.Inc()
+				metricActiveConnections.Inc()
 				go func(c net.Conn) {
 					defer func() {
 						<-connSemaphore
 						connWg.Done()
 						atomic.AddInt64(&activeConns, -1)
+						metricActiveConnections.Dec()
 					}()
 					// Check context again inside goroutine to handle race condition
 					select {
@@ -172,6 +272,7 @@ func main() {
 					safeHandleConnection(ctx, c)
 				}(conn)
 			default:
+				metricConnectionsRejected.Inc()
 				log.Printf("Connection limit reached (%d), rejecting", MaxConnections)
 				if err := conn.Close(); err != nil {
 					log.Printf("Error closing rejected connection: %v", err)
@@ -234,11 +335,16 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}()
 
 	// Receive file descriptor and handoff data from Apache
+	handoffStart := time.Now()
 	clientFd, data, err := receiveFd(conn)
+	handoffDuration := time.Since(handoffStart).Seconds()
 	if err != nil {
+		metricHandoffErrors.WithLabelValues(classifyError(err)).Inc()
 		log.Printf("Failed to receive fd: %v", err)
 		return
 	}
+	metricHandoffDuration.Observe(handoffDuration)
+	metricHandoffsTotal.Inc()
 
 	// Wrap fd in os.File immediately to ensure cleanup on any error path.
 	// os.NewFile takes ownership only on success; if it returns nil (invalid fd),
@@ -294,9 +400,12 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	log.Printf("  user_id=%d, prompt=%q", handoff.UserID, truncate(handoff.Prompt, 50))
 
 	// Stream response to client
+	streamStart := time.Now()
 	if err := streamToClient(ctx, clientFile, handoff); err != nil {
+		metricStreamErrors.WithLabelValues(classifyError(err)).Inc()
 		log.Printf("Stream error: %v", err)
 	}
+	metricStreamDuration.Observe(time.Since(streamStart).Seconds())
 
 	log.Printf("  Connection closed")
 }
@@ -329,8 +438,9 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	buf := *bufPtr
 
 	// Buffer for control message (SCM_RIGHTS)
-	// Size: 16 bytes for Cmsghdr on 64-bit Linux + 4 bytes for the fd
-	oob := make([]byte, 24)
+	// Use CmsgSpace for portable size calculation across architectures.
+	// The argument is the payload size (one int32 fd = 4 bytes).
+	oob := make([]byte, syscall.CmsgSpace(4))
 
 	n, oobn, recvflags, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
 	if err != nil {
@@ -437,17 +547,23 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 		"Connection: close",
 		"X-Accel-Buffering: no", // Disable buffering in nginx/proxies
 	}
+	var headerBytes int
 	for _, h := range headers {
-		if _, err := fmt.Fprintf(writer, "%s\r\n", h); err != nil {
+		n, err := fmt.Fprintf(writer, "%s\r\n", h)
+		if err != nil {
 			return fmt.Errorf("failed to write header: %w", err)
 		}
+		headerBytes += n
 	}
-	if _, err := fmt.Fprintf(writer, "\r\n"); err != nil {
+	n, err := fmt.Fprintf(writer, "\r\n")
+	if err != nil {
 		return fmt.Errorf("failed to write header terminator: %w", err)
 	}
+	headerBytes += n
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to send headers: %w", err)
 	}
+	metricBytesSent.Add(float64(headerBytes))
 
 	// Check for context cancellation before starting to stream
 	select {
@@ -529,12 +645,15 @@ func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
 	if err != nil {
 		return fmt.Errorf("json marshal failed: %w", err)
 	}
-	if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
+	msg := fmt.Sprintf("data: %s\n\n", data)
+	n, err := writer.WriteString(msg)
+	if err != nil {
 		return fmt.Errorf("write failed: %w", err)
 	}
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flush failed: %w", err)
 	}
+	metricBytesSent.Add(float64(n))
 	// Reset deadline after successful write for per-write idle timeout.
 	// Treat failure as fatal so we don't continue streaming without timeout protection.
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
@@ -548,4 +667,34 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// classifyError returns a short label for the error type for metrics.
+func classifyError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if err == context.Canceled {
+		return "canceled"
+	}
+	if err == context.DeadlineExceeded {
+		return "timeout"
+	}
+	// Check for common network errors
+	if netErr, ok := err.(net.Error); ok {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+		return "network"
+	}
+	// Check for syscall errors
+	if errno, ok := err.(syscall.Errno); ok {
+		switch errno {
+		case syscall.EPIPE, syscall.ECONNRESET:
+			return "client_disconnected"
+		case syscall.ETIMEDOUT:
+			return "timeout"
+		}
+	}
+	return "other"
 }
