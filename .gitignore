@@ -19,6 +19,7 @@
 .vscode/
 
 # Go build artifacts
+examples/streaming-daemon
 examples/streaming-daemon-go/streaming-daemon
 
 # C build artifacts
