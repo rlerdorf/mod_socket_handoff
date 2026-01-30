@@ -64,10 +64,12 @@ pub async fn receive_handoff(
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
-    // Wait for readable first (non-blocking check)
-    let ready = stream
-        .ready(Interest::READABLE)
+    // Wait for readable with timeout. Without this, a peer that connects but
+    // never sends data would hang forever, consuming capacity and blocking
+    // shutdown drain.
+    let ready = tokio::time::timeout(timeout, stream.ready(Interest::READABLE))
         .await
+        .map_err(|_| HandoffError::Timeout)?
         .map_err(|e| HandoffError::ReceiveFailed(e.to_string()))?;
 
     if !ready.is_readable() {
