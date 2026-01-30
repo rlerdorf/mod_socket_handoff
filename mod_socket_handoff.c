@@ -59,6 +59,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 
 #define HANDOFF_HEADER "X-Socket-Handoff"
@@ -136,16 +137,48 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
 }
 
 /*
+ * Wait for socket to be ready for writing with timeout.
+ * Returns 1 if ready, 0 on timeout, -1 on error.
+ */
+static int wait_for_write(int sock, int timeout_ms)
+{
+    struct pollfd pfd;
+    int ret;
+
+    pfd.fd = sock;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+
+    do {
+        ret = poll(&pfd, 1, timeout_ms);
+    } while (ret < 0 && errno == EINTR);
+
+    if (ret == 0) {
+        errno = ETIMEDOUT;
+        return 0;
+    }
+    if (ret < 0) {
+        return -1;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        errno = EPIPE;
+        return -1;
+    }
+
+    return 1;
+}
+
+/*
  * Send file descriptor over Unix socket using SCM_RIGHTS
  *
  * This is the core mechanism for passing the client connection
  * to the external daemon. The fd is sent as ancillary data.
  *
- * The socket should have SO_SNDTIMEO set. If send would block
- * (EAGAIN/EWOULDBLOCK), we treat it as a timeout error.
+ * Uses poll() to enforce send timeout on non-blocking socket.
  */
 static int send_fd_with_data(int unix_sock, int fd_to_send,
-                             const char *data, size_t data_len)
+                             const char *data, size_t data_len,
+                             int timeout_ms)
 {
     struct msghdr msg;
     struct iovec iov;
@@ -184,13 +217,15 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
 
+    /* Wait for socket to be ready for writing */
+    if (wait_for_write(unix_sock, timeout_ms) <= 0) {
+        return -1;
+    }
+
     sent = sendmsg(unix_sock, &msg, 0);
     if (sent < 0) {
-        /*
-         * EAGAIN/EWOULDBLOCK on a socket with SO_SNDTIMEO means the
-         * timeout expired while waiting for buffer space. Treat as timeout.
-         */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Socket not ready despite poll - treat as transient, but fail */
             errno = ETIMEDOUT;
         }
         return -1;
@@ -200,15 +235,16 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         remaining = data_len - (size_t)sent;
         p = data + sent;
         while (remaining > 0) {
+            /* Wait for socket to be ready before each send */
+            if (wait_for_write(unix_sock, timeout_ms) <= 0) {
+                return -1;
+            }
+
             n = send(unix_sock, p, remaining, 0);
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
                 }
-                /*
-                 * EAGAIN/EWOULDBLOCK means SO_SNDTIMEO fired.
-                 * Treat as timeout error.
-                 */
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     errno = ETIMEDOUT;
                 }
@@ -230,12 +266,11 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
 /*
  * Connect to Unix domain socket with timeout
  *
- * Returns connected socket with SO_SNDTIMEO set, or -1 on error.
+ * Returns connected non-blocking socket, or -1 on error.
  * The returned_errno parameter is set to the error code for retry decisions.
  */
 static int connect_to_socket(const char *socket_path,
                              int connect_timeout_ms,
-                             int send_timeout_ms,
                              request_rec *r,
                              int *returned_errno)
 {
@@ -247,7 +282,6 @@ static int connect_to_socket(const char *socket_path,
     int so_error;
     socklen_t so_error_len;
     int sock_nonblock = 0;
-    struct timeval tv;
 
     *returned_errno = 0;
 
@@ -373,21 +407,7 @@ static int connect_to_socket(const char *socket_path,
         }
     }
 
-    /*
-     * Set SO_SNDTIMEO to prevent blocking sends.
-     * This is critical for production: if daemon socket buffer is full,
-     * sendmsg() would block indefinitely without this timeout.
-     */
-    tv.tv_sec = send_timeout_ms / 1000;
-    tv.tv_usec = (send_timeout_ms % 1000) * 1000;
-    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-            "mod_socket_handoff: setsockopt(SO_SNDTIMEO) failed: %s",
-            strerror(errno));
-        /* Continue anyway - timeout just won't work, but we still have EAGAIN handling */
-    }
-
-    /* Keep socket non-blocking - SO_SNDTIMEO handles send timeouts */
+    /* Socket stays non-blocking; send timeout is enforced via poll() in send_fd_with_data() */
 
     return sock;
 }
@@ -408,7 +428,6 @@ static int is_transient_error(int err)
  */
 static int connect_with_retry(const char *socket_path,
                               int connect_timeout_ms,
-                              int send_timeout_ms,
                               int max_retries,
                               request_rec *r)
 {
@@ -419,7 +438,7 @@ static int connect_with_retry(const char *socket_path,
     struct timespec ts;
 
     for (attempt = 0; attempt <= max_retries; attempt++) {
-        sock = connect_to_socket(socket_path, connect_timeout_ms, send_timeout_ms,
+        sock = connect_to_socket(socket_path, connect_timeout_ms,
                                  r, &returned_errno);
         if (sock >= 0) {
             if (attempt > 0) {
@@ -681,7 +700,6 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     /* Connect to the streaming daemon with retry for transient errors */
     daemon_sock = connect_with_retry(socket_path,
                                      conf->connect_timeout_ms,
-                                     conf->send_timeout_ms,
                                      conf->max_retries,
                                      r);
     if (daemon_sock < 0) {
@@ -691,7 +709,8 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     /* Pass the client fd to the daemon via SCM_RIGHTS */
     if (send_fd_with_data(daemon_sock, client_fd,
                           handoff_data,
-                          handoff_data ? strlen(handoff_data) : 0) < 0) {
+                          handoff_data ? strlen(handoff_data) : 0,
+                          conf->send_timeout_ms) < 0) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Failed to send fd: %s", strerror(errno));
         close(daemon_sock);
@@ -875,7 +894,7 @@ static const command_rec socket_handoff_cmds[] = {
         set_send_timeout,
         NULL,
         RSRC_CONF,
-        "Timeout for sending fd to handoff daemon in milliseconds (default: 500)"
+        "Timeout in ms for sending fd to daemon; uses poll() on non-blocking socket (default: 500)"
     ),
     AP_INIT_TAKE1(
         "SocketHandoffMaxRetries",

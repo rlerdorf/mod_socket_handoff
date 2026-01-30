@@ -98,7 +98,7 @@ SocketHandoffMaxRetries 3                # Retries for transient errors (default
   Uses non-blocking connect with poll(). Range: 1-60000ms.
 
 - **SocketHandoffSendTimeoutMs** - Timeout for sending the fd to daemon via sendmsg().
-  Uses SO_SNDTIMEO to prevent blocking when daemon socket buffer is full.
+  Uses poll() to wait for socket buffer space before sending on the non-blocking socket.
   Critical for production to prevent worker starvation. Range: 1-60000ms.
 
 ### Retry Directive
@@ -209,7 +209,10 @@ sudo systemctl reload apache2
 
 ### Socket permission denied
 **Cause**: Apache (www-data) can't connect to daemon socket.
-**Fix**: `chmod 666 /var/run/streaming-daemon.sock`
+**Fix**: Set proper ownership and permissions on the socket. For example:
+- `chown www-data:www-data /var/run/streaming-daemon.sock` (if daemon runs as www-data)
+- Or add Apache user to daemon's group and use `chmod 660`
+- Avoid `chmod 666` as it allows any local user to connect, bypassing authentication
 
 ### Module not loading after reboot
 **Fix**: Run `sudo a2enmod socket_handoff` and reload Apache.
@@ -243,10 +246,10 @@ The module includes several optimizations for high-traffic deployments:
    For localhost Unix sockets, 500ms is generous. Lower timeouts prevent worker
    starvation when the daemon is slow.
 
-4. **SO_SNDTIMEO for send timeout** - The daemon socket has SO_SNDTIMEO set to
-   prevent sendmsg() from blocking indefinitely if the daemon's socket buffer is
-   full. This is critical for production - without it, a slow daemon can block
-   Apache workers indefinitely.
+4. **poll()-based send timeout** - Before sending, poll() is used to wait for
+   socket buffer space with the configured timeout. This prevents sendmsg() from
+   blocking indefinitely if the daemon's socket buffer is full. Critical for
+   production - without it, a slow daemon can block Apache workers indefinitely.
 
 5. **Retry with exponential backoff** - Transient errors (ENOENT, ECONNREFUSED)
    are retried with exponential backoff (10ms, 20ms, 40ms). This handles daemon
