@@ -50,6 +50,7 @@
 #include "apr_buckets.h"
 #include "apr_network_io.h"
 #include "apr_file_info.h"
+#include "apr_time.h"
 #include "util_filter.h"
 
 #include <sys/socket.h>
@@ -60,6 +61,7 @@
 #include <poll.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <time.h>
 
 #define HANDOFF_HEADER "X-Socket-Handoff"
@@ -137,6 +139,54 @@ static void *merge_server_config(apr_pool_t *p, void *base_conf, void *new_conf)
 }
 
 /*
+ * Remaining time until deadline in milliseconds (0 if expired).
+ */
+static int remaining_timeout_ms(apr_time_t deadline)
+{
+    apr_time_t now = apr_time_now();
+    apr_time_t diff;
+
+    if (now >= deadline) {
+        return 0;
+    }
+    diff = deadline - now; /* microseconds */
+    if (diff / 1000 > INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)(diff / 1000);
+}
+
+/*
+ * Compute an overall deadline for connect + send, including max backoff.
+ */
+static apr_time_t compute_handoff_deadline(const socket_handoff_config *conf)
+{
+    apr_int64_t backoff_ms = 0;
+    apr_int64_t total_ms;
+    int safe_retries;
+
+    if (conf->max_retries > 0) {
+        /* Cap shift to avoid overflow (30 gives ~10 billion ms, plenty) */
+        safe_retries = conf->max_retries > 30 ? 30 : conf->max_retries;
+        backoff_ms = (apr_int64_t)RETRY_BASE_DELAY_MS
+            * ((1LL << safe_retries) - 1);
+    }
+
+    total_ms = (apr_int64_t)conf->connect_timeout_ms
+        + (apr_int64_t)conf->send_timeout_ms
+        + backoff_ms;
+
+    if (total_ms < 1) {
+        total_ms = 1;
+    }
+    if (total_ms > APR_INT32_MAX) {
+        total_ms = APR_INT32_MAX;
+    }
+
+    return apr_time_now() + apr_time_from_msec((apr_int32_t)total_ms);
+}
+
+/*
  * Wait for socket to be ready for writing with timeout.
  * Returns 1 if ready, 0 on timeout, -1 on error.
  */
@@ -178,7 +228,8 @@ static int wait_for_write(int sock, int timeout_ms)
  */
 static int send_fd_with_data(int unix_sock, int fd_to_send,
                              const char *data, size_t data_len,
-                             int timeout_ms)
+                             int timeout_ms,
+                             apr_time_t deadline)
 {
     struct msghdr msg;
     struct iovec iov;
@@ -218,8 +269,16 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
 
     /* Wait for socket to be ready for writing */
-    if (wait_for_write(unix_sock, timeout_ms) <= 0) {
-        return -1;
+    {
+        int remaining_ms = remaining_timeout_ms(deadline);
+        if (remaining_ms <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (wait_for_write(unix_sock,
+                           remaining_ms < timeout_ms ? remaining_ms : timeout_ms) <= 0) {
+            return -1;
+        }
     }
 
     sent = sendmsg(unix_sock, &msg, 0);
@@ -236,7 +295,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         p = data + sent;
         while (remaining > 0) {
             /* Wait for socket to be ready before each send */
-            if (wait_for_write(unix_sock, timeout_ms) <= 0) {
+            int remaining_ms = remaining_timeout_ms(deadline);
+            if (remaining_ms <= 0) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if (wait_for_write(unix_sock,
+                               remaining_ms < timeout_ms ? remaining_ms : timeout_ms) <= 0) {
                 return -1;
             }
 
@@ -429,7 +494,8 @@ static int is_transient_error(int err)
 static int connect_with_retry(const char *socket_path,
                               int connect_timeout_ms,
                               int max_retries,
-                              request_rec *r)
+                              request_rec *r,
+                              apr_time_t deadline)
 {
     int sock;
     int returned_errno = 0;
@@ -438,7 +504,14 @@ static int connect_with_retry(const char *socket_path,
     struct timespec ts;
 
     for (attempt = 0; attempt <= max_retries; attempt++) {
-        sock = connect_to_socket(socket_path, connect_timeout_ms,
+        int remaining_ms = remaining_timeout_ms(deadline);
+        int attempt_timeout;
+        if (remaining_ms <= 0) {
+            errno = ETIMEDOUT;
+            break;
+        }
+        attempt_timeout = remaining_ms < connect_timeout_ms ? remaining_ms : connect_timeout_ms;
+        sock = connect_to_socket(socket_path, attempt_timeout,
                                  r, &returned_errno);
         if (sock >= 0) {
             if (attempt > 0) {
@@ -455,7 +528,20 @@ static int connect_with_retry(const char *socket_path,
         }
 
         /* Exponential backoff: 10ms, 20ms, 40ms, ... */
-        delay_ms = RETRY_BASE_DELAY_MS * (1 << attempt);
+        {
+            int safe_attempt = attempt > 20 ? 20 : attempt;
+            delay_ms = RETRY_BASE_DELAY_MS * (1 << safe_attempt);
+        }
+        {
+            int backoff_remaining = remaining_timeout_ms(deadline);
+            if (backoff_remaining <= 0) {
+                errno = ETIMEDOUT;
+                break;
+            }
+            if (delay_ms > backoff_remaining) {
+                delay_ms = backoff_remaining;
+            }
+        }
 
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
             "mod_socket_handoff: connect() to %s failed (%s), "
@@ -621,7 +707,9 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     apr_os_sock_t client_fd;
     apr_socket_t *client_socket;
     apr_socket_t *dummy_socket = NULL;
-    int daemon_sock;
+    int daemon_sock = -1;
+    apr_status_t status = APR_SUCCESS;
+    apr_time_t deadline = 0;
     apr_bucket *e;
     apr_bucket *next;
 
@@ -652,8 +740,8 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
 
     /* Validate socket path for security */
     if (!validate_socket_path(socket_path, conf, r)) {
-        ap_remove_output_filter(f);
-        return HTTP_FORBIDDEN;
+        status = HTTP_FORBIDDEN;
+        goto cleanup;
     }
 
     /* Get optional data header */
@@ -664,8 +752,8 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
 
     /* Create a dummy socket upfront; if this fails, don't hand off */
     if (create_dummy_socket(&dummy_socket, r->pool, r) != APR_SUCCESS) {
-        ap_remove_output_filter(f);
-        return HTTP_INTERNAL_SERVER_ERROR;
+        status = HTTP_INTERNAL_SERVER_ERROR;
+        goto cleanup;
     }
 
     /* Remove our headers so client never sees them */
@@ -687,38 +775,45 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     if (!client_socket) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Could not get client socket");
-        return HTTP_INTERNAL_SERVER_ERROR;
+        status = HTTP_INTERNAL_SERVER_ERROR;
+        goto cleanup;
     }
 
     /* Extract the OS-level file descriptor */
     if (apr_os_sock_get(&client_fd, client_socket) != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Could not get client fd");
-        return HTTP_INTERNAL_SERVER_ERROR;
+        status = HTTP_INTERNAL_SERVER_ERROR;
+        goto cleanup;
     }
 
     /* Connect to the streaming daemon with retry for transient errors */
+    deadline = compute_handoff_deadline(conf);
     daemon_sock = connect_with_retry(socket_path,
                                      conf->connect_timeout_ms,
                                      conf->max_retries,
-                                     r);
+                                     r,
+                                     deadline);
     if (daemon_sock < 0) {
-        return HTTP_SERVICE_UNAVAILABLE;
+        status = HTTP_SERVICE_UNAVAILABLE;
+        goto cleanup;
     }
 
     /* Pass the client fd to the daemon via SCM_RIGHTS */
     if (send_fd_with_data(daemon_sock, client_fd,
                           handoff_data,
                           handoff_data ? strlen(handoff_data) : 0,
-                          conf->send_timeout_ms) < 0) {
+                          conf->send_timeout_ms,
+                          deadline) < 0) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Failed to send fd: %s", strerror(errno));
-        close(daemon_sock);
-        return HTTP_INTERNAL_SERVER_ERROR;
+        status = HTTP_INTERNAL_SERVER_ERROR;
+        goto cleanup;
     }
 
     /* Done with daemon socket */
     close(daemon_sock);
+    daemon_sock = -1;
 
     /*
      * Swap in a dummy socket so Apache doesn't close the real one.
@@ -743,9 +838,15 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         socket_path,
         (unsigned long)(handoff_data ? strlen(handoff_data) : 0));
 
+    status = APR_SUCCESS;
+
+cleanup:
+    if (daemon_sock >= 0) {
+        close(daemon_sock);
+    }
     ap_remove_output_filter(f);
 
-    return APR_SUCCESS;
+    return status;
 }
 
 /*
