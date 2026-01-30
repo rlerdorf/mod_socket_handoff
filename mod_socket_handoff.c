@@ -700,7 +700,7 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     apr_os_sock_t client_fd;
     apr_socket_t *client_socket;
     apr_socket_t *dummy_socket = NULL;
-    int daemon_sock;
+    int daemon_sock = -1;
     apr_status_t status = APR_SUCCESS;
     apr_time_t deadline = 0;
     apr_bucket *e;
@@ -782,7 +782,6 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
 
     /* Connect to the streaming daemon with retry for transient errors */
     deadline = compute_handoff_deadline(conf);
-    daemon_sock = -1;
     daemon_sock = connect_with_retry(socket_path,
                                      conf->connect_timeout_ms,
                                      conf->max_retries,
