@@ -152,9 +152,13 @@ Ensure `mod_socket_handoff` is enabled and configured:
 ```apache
 # /etc/apache2/mods-enabled/socket_handoff.conf
 SocketHandoffEnabled On
-SocketHandoffAllowedPrefix /var/run/
+SocketHandoffAllowedPrefix /run/
 SocketHandoffConnectTimeoutMs 500
 ```
+
+Note: The systemd service uses `RuntimeDirectory` which creates the socket under
+`/run/`. While `/var/run` is typically a symlink to `/run` on modern Linux systems,
+using `/run/` explicitly is more consistent with systemd conventions.
 
 ## PHP Integration
 
@@ -179,8 +183,8 @@ $data = json_encode([
     'request_id' => uniqid('req_', true),
 ]);
 
-// 3. Set handoff headers
-header('X-Socket-Handoff: /var/run/streaming-daemon-rs.sock');
+// 3. Set handoff headers (path must match systemd service socket path)
+header('X-Socket-Handoff: /run/streaming-daemon-rs/daemon.sock');
 header('X-Handoff-Data: ' . $data);
 
 // 4. Exit - mod_socket_handoff takes over
