@@ -3,6 +3,7 @@
 //! Receives client socket fd from Apache via Unix domain socket.
 
 use nix::cmsg_space;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
     getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType,
     ControlMessageOwned, MsgFlags, SockaddrStorage,
@@ -98,6 +99,17 @@ fn receive_fd_blocking(
     timeout: Duration,
     buffer_size: usize,
 ) -> Result<HandoffResult, HandoffError> {
+    // Clear O_NONBLOCK on the duplicated fd so SO_RCVTIMEO works correctly.
+    // The original tokio UnixStream has O_NONBLOCK set, which we inherit via dup().
+    let fd = owned_fd.as_raw_fd();
+    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|e| {
+        HandoffError::ReceiveFailed(format!("Failed to get fd flags: {}", e))
+    })?;
+    let new_flags = OFlag::from_bits_truncate(flags) & !OFlag::O_NONBLOCK;
+    fcntl(fd, FcntlArg::F_SETFL(new_flags)).map_err(|e| {
+        HandoffError::ReceiveFailed(format!("Failed to clear O_NONBLOCK: {}", e))
+    })?;
+
     // Set SO_RCVTIMEO so recvmsg returns even if peer is slow/malicious.
     // This ensures the blocking thread is released and not leaked.
     let timeval = nix::sys::time::TimeVal::new(

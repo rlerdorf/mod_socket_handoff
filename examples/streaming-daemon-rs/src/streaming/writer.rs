@@ -65,8 +65,10 @@ impl SseWriter {
         if let Err(e) = self.flush_with_timeout().await {
             tracing::warn!(error = %e, "Final flush failed during shutdown");
         }
-        // Shutdown write side
-        self.writer.shutdown().await
+        // Shutdown write side with timeout to avoid hanging on slow/broken clients
+        tokio::time::timeout(self.write_timeout, self.writer.shutdown())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Shutdown timeout"))?
     }
 
     /// Get total bytes written.
