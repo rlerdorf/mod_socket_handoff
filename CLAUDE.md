@@ -49,7 +49,7 @@ Client <--TCP--> Apache Worker <--Unix Socket--> Streaming Daemon
 
 ## Key Functions in mod_socket_handoff.c
 
-### `socket_handoff_output_filter()` (line 596)
+### `socket_handoff_output_filter()` (line 613)
 The main output filter. Runs after PHP generates response:
 1. Checks for `X-Socket-Handoff` header
 2. Validates socket path against allowed prefix
@@ -58,9 +58,9 @@ The main output filter. Runs after PHP generates response:
 5. Swaps to dummy socket
 6. Marks connection as aborted
 
-### `send_fd_with_data()` (line 147)
+### `send_fd_with_data()` (line 179)
 Sends file descriptor over Unix socket using `sendmsg()` with `SCM_RIGHTS`.
-Handles EAGAIN/EWOULDBLOCK from SO_SNDTIMEO as timeout errors:
+Uses poll() to enforce send timeout; handles EAGAIN/EWOULDBLOCK as timeout errors:
 ```c
 cmsg->cmsg_level = SOL_SOCKET;
 cmsg->cmsg_type = SCM_RIGHTS;
@@ -68,18 +68,18 @@ cmsg->cmsg_len = CMSG_LEN(sizeof(int));
 memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
 ```
 
-### `connect_to_socket()` (line 236)
-Connects to Unix socket with non-blocking connect and poll() timeout.
-Sets SO_SNDTIMEO on the socket to prevent blocking sends.
+### `connect_to_socket()` (line 266)
+Connects to Unix socket using non-blocking connect with poll() timeout.
+Returns a non-blocking socket ready for sending.
 
-### `connect_with_retry()` (line 411)
+### `connect_with_retry()` (line 429)
 Wraps connect_to_socket() with retry logic for transient errors (ENOENT, ECONNREFUSED).
 Uses exponential backoff: 10ms, 20ms, 40ms, etc.
 
-### `create_dummy_socket()` (line 465)
+### `create_dummy_socket()` (line 482)
 The trick from mod_proxy_fdpass - creates a dummy socket and swaps it into the connection config so Apache closes the dummy instead of the real client socket.
 
-### `validate_socket_path()` (line 493)
+### `validate_socket_path()` (line 510)
 Security check using `realpath()` to prevent path traversal attacks.
 
 ## Configuration Directives
@@ -256,7 +256,8 @@ The module includes several optimizations for high-traffic deployments:
    restarts gracefully without failing all in-flight requests.
 
 6. **Non-blocking throughout** - The socket stays non-blocking after connect.
-   Combined with SO_SNDTIMEO, this ensures no syscall can block indefinitely.
+   Combined with the poll()-based connect and send timeouts, this bounds how long
+   any operation can block the worker to the configured timeout.
 
 ## Security Considerations
 
