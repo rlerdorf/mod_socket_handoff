@@ -208,10 +208,10 @@ fn increase_fd_limit() {
         let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
         if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) == 0 {
             let mut rlim = rlim.assume_init();
-            if (rlim.rlim_cur as u64) < DESIRED_LIMIT {
-                rlim.rlim_cur = DESIRED_LIMIT as libc::rlim_t;
-                if (rlim.rlim_max as u64) < DESIRED_LIMIT {
-                    rlim.rlim_max = DESIRED_LIMIT as libc::rlim_t;
+            if rlim.rlim_cur < DESIRED_LIMIT {
+                rlim.rlim_cur = DESIRED_LIMIT;
+                if rlim.rlim_max < DESIRED_LIMIT {
+                    rlim.rlim_max = DESIRED_LIMIT;
                 }
                 if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
                     eprintln!("Increased fd limit to {}", DESIRED_LIMIT);
