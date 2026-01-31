@@ -157,17 +157,29 @@ $stats = new Stats();
  * Receive a file descriptor and data via SCM_RIGHTS.
  * This is blocking but we run it in a non-blocking context.
  */
+// Maximum handoff data size - matches Go daemon's MaxHandoffDataSize
+const MAX_HANDOFF_DATA_SIZE = 65536;  // 64KB
+
 function receiveFd(\Socket $socket): array
 {
     $message = [
         'name' => [],
-        'buffer_size' => 4096,  // Handoff data is typically < 1KB
+        'buffer_size' => MAX_HANDOFF_DATA_SIZE,
         'controllen' => socket_cmsg_space(SOL_SOCKET, SCM_RIGHTS, 1),
     ];
 
     $bytes = socket_recvmsg($socket, $message, 0);
     if ($bytes === false) {
         throw new RuntimeException('socket_recvmsg failed: ' . socket_strerror(socket_last_error($socket)));
+    }
+
+    // Check for truncation - if data exceeded buffer, JSON would be corrupt
+    $flags = $message['flags'] ?? 0;
+    if ($flags & MSG_TRUNC) {
+        throw new RuntimeException('Handoff data truncated (exceeded ' . MAX_HANDOFF_DATA_SIZE . ' byte buffer)');
+    }
+    if ($flags & MSG_CTRUNC) {
+        throw new RuntimeException('Control message truncated; fd may be corrupted');
     }
 
     // Extract the file descriptor from control message
