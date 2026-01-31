@@ -120,18 +120,25 @@ def recv_fd_blocking(conn: socket.socket) -> Tuple[int, bytes]:
     # Receive with ancillary data
     msg, ancdata, flags, addr = conn.recvmsg(len(data_buf), _CMSG_SIZE)
 
-    # Check for truncation - if data exceeded buffer, JSON would be corrupt
-    if flags & socket.MSG_TRUNC:
-        raise RuntimeError(f"Handoff data truncated (exceeded {len(data_buf)} byte buffer)")
-    if flags & socket.MSG_CTRUNC:
-        raise RuntimeError("Control message truncated; fd may be corrupted")
-
-    # Extract fd from ancillary data
+    # Extract fd from ancillary data FIRST, before checking truncation flags.
+    # After recvmsg succeeds, any SCM_RIGHTS fds have been transferred to our
+    # process and must be closed to avoid leaks.
     fd = -1
     for cmsg_level, cmsg_type, cmsg_data in ancdata:
         if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
             fd = struct.unpack("i", cmsg_data[: struct.calcsize("i")])[0]
             break
+
+    # Check for truncation - if data exceeded buffer, JSON would be corrupt.
+    # Close the fd first to prevent leaks.
+    if flags & socket.MSG_TRUNC:
+        if fd >= 0:
+            os.close(fd)
+        raise RuntimeError(f"Handoff data truncated (exceeded {len(data_buf)} byte buffer)")
+    if flags & socket.MSG_CTRUNC:
+        if fd >= 0:
+            os.close(fd)
+        raise RuntimeError("Control message truncated; fd may be corrupted")
 
     if fd < 0:
         raise RuntimeError("No file descriptor received")
