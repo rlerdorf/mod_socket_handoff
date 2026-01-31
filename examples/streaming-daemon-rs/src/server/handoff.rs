@@ -87,10 +87,11 @@ pub async fn receive_handoff(
     })?;
     let owned_fd = OwnedFd::from(std_stream);
 
-    // Since we already confirmed the socket is readable, recvmsg should return immediately.
-    // Run it inline to avoid spawn_blocking overhead at high concurrency.
-    // SO_RCVTIMEO is still set as a safety net for edge cases.
-    receive_fd_blocking(owned_fd, timeout, buffer_size)
+    // Use block_in_place to run blocking recvmsg without spawn_blocking overhead.
+    // This temporarily converts this worker into a blocking thread, avoiding the
+    // scheduling latency of spawn_blocking while still allowing tokio to spawn
+    // replacement workers if needed. SO_RCVTIMEO bounds the blocking duration.
+    tokio::task::block_in_place(|| receive_fd_blocking(owned_fd, timeout, buffer_size))
 }
 
 /// Blocking recvmsg implementation.

@@ -68,7 +68,7 @@ impl StreamingBackend for MockBackend {
             "[DONE-CONTENT]",
         ];
 
-        // Only allocate for dynamic messages (3 strings per connection)
+        // Only allocate for dynamic messages (2 strings per connection)
         let prompt_preview = if request.prompt.len() > 50 {
             format!("{}...", &request.prompt[..50])
         } else {

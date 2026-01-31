@@ -47,11 +47,10 @@ type Stats struct {
 	BytesReceived        int64
 
 	// Error categorization (atomic)
-	connectErrors  int64
-	sendErrors     int64
-	receiveErrors  int64
-	timeoutErrors  int64
-	daemonRejected int64
+	connectErrors int64
+	sendErrors    int64
+	receiveErrors int64
+	timeoutErrors int64
 
 	// Latency tracking with sharded collection to reduce contention
 	latencyShards []*latencyShard
@@ -340,11 +339,10 @@ func printResults(stats *Stats, outputFile string) {
 		"connections_failed":    stats.ConnectionsFailed,
 		"bytes_received":        stats.BytesReceived,
 		"errors": map[string]int64{
-			"connect":  stats.connectErrors,
-			"send":     stats.sendErrors,
-			"receive":  stats.receiveErrors,
-			"timeout":  stats.timeoutErrors,
-			"rejected": stats.daemonRejected,
+			"connect": stats.connectErrors,
+			"send":    stats.sendErrors,
+			"receive": stats.receiveErrors,
+			"timeout": stats.timeoutErrors,
 		},
 		"handoff_latency_ms": map[string]float64{
 			"p50": float64(percentile(handoff, 0.50)) / float64(time.Millisecond),

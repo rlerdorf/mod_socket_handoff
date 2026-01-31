@@ -9,7 +9,6 @@ pub use openai::OpenAIBackend;
 pub use traits::{ChunkStream, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend};
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::config::BackendConfig;
 use crate::error::BackendError;
@@ -18,15 +17,8 @@ use crate::error::BackendError;
 pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend>, BackendError> {
     match config.provider.as_str() {
         "mock" => {
-            // Check for custom token delay via environment variable
-            // DAEMON_TOKEN_DELAY_MS (default: 50ms, use 5625 for ~100s streams with 18 messages)
-            let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(50);
-            Ok(Arc::new(MockBackend::with_delay(Duration::from_millis(
-                delay_ms,
-            ))))
+            // MockBackend::new() reads DAEMON_TOKEN_DELAY_MS env var
+            Ok(Arc::new(MockBackend::new()))
         }
         "openai" => {
             let api_key = config
