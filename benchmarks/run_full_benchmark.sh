@@ -44,6 +44,12 @@ CONNECTIONS=(100 1000 10000 50000 100000)
 # Calculate max connections based on system fd limits
 # Each connection needs ~3 fds, leave 1000 for system overhead
 HARD_FD_LIMIT=$(ulimit -Hn)
+
+# Handle "unlimited" or non-numeric values
+if [ "$HARD_FD_LIMIT" = "unlimited" ] || ! [[ "$HARD_FD_LIMIT" =~ ^[0-9]+$ ]]; then
+    HARD_FD_LIMIT=1048576
+fi
+
 MAX_CONNECTIONS=$(( (HARD_FD_LIMIT - 1000) / 3 ))
 if [ "$MAX_CONNECTIONS" -lt 150000 ]; then
     MAX_CONNECTIONS=150000
@@ -258,7 +264,7 @@ test_daemon "php" \
 
 # Test Python (using uvloop + 500 thread workers for high concurrency)
 test_daemon "python" \
-    "python3 /home/rlerdorf/mod_socket_handoff/examples/streaming_daemon_async.py -s $SOCKET -m 0o666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
+    "python3 /home/rlerdorf/mod_socket_handoff/examples/streaming_daemon_async.py -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
     "streaming_daemon_async"
 
 # Test Go (disable metrics to avoid port conflicts between test runs)

@@ -244,8 +244,7 @@ Options:
     "connect": 0,
     "send": 0,
     "receive": 0,
-    "timeout": 0,
-    "rejected": 0
+    "timeout": 0
   },
   "handoff_latency_ms": {
     "p50": 0.020,
@@ -280,7 +279,6 @@ Options:
 - `send`: Failed to send fd via SCM_RIGHTS
 - `receive`: Error reading response
 - `timeout`: Stream read timeout
-- `rejected`: Connection rejected by daemon (at capacity)
 
 ## Benchmark Results (Reference)
 

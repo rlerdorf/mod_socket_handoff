@@ -336,8 +336,9 @@ async def main_async(args: argparse.Namespace) -> None:
     # Handle shutdown signals
     loop = asyncio.get_event_loop()
 
-    # Set our executor as the default so all run_in_executor(None, ...) calls use it
-    # This is critical: without this, writes use the tiny default executor (~8 workers)
+    # Set our executor as the default for any future run_in_executor(None, ...) calls.
+    # Current run_in_executor calls pass executor explicitly, so this is mainly for
+    # consistency and future-proofing.
     loop.set_default_executor(executor)
     shutdown_event = asyncio.Event()
 

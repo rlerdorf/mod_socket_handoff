@@ -191,6 +191,24 @@ function receiveFd(\Socket $socket): array
 }
 
 /**
+ * Write all data to stream, handling partial writes.
+ * Returns bytes written or false on error.
+ */
+function writeAll($stream, string $data): int|false
+{
+    $total = strlen($data);
+    $written = 0;
+    while ($written < $total) {
+        $result = @fwrite($stream, substr($data, $written));
+        if ($result === false || $result === 0) {
+            return false;
+        }
+        $written += $result;
+    }
+    return $written;
+}
+
+/**
  * Stream an SSE response to the client using async I/O.
  */
 function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats $stats): void
@@ -223,7 +241,7 @@ function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats 
         stream_set_write_buffer($stream, 0);
 
         // Send HTTP response headers (use pre-defined constant)
-        $written = @fwrite($stream, SSE_HEADERS);
+        $written = writeAll($stream, SSE_HEADERS);
         if ($written === false) {
             throw new RuntimeException("Failed to write headers");
         }
@@ -248,7 +266,7 @@ function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats 
             $data = json_encode(['content' => $line, 'index' => $index]);
             $sseMsg = "data: {$data}\n\n";
 
-            $written = @fwrite($stream, $sseMsg);
+            $written = writeAll($stream, $sseMsg);
             if ($written === false) {
                 throw new RuntimeException("Write failed");
             }
@@ -263,7 +281,7 @@ function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats 
             $data = json_encode(['content' => $line, 'index' => $index]);
             $sseMsg = "data: {$data}\n\n";
 
-            $written = @fwrite($stream, $sseMsg);
+            $written = writeAll($stream, $sseMsg);
             if ($written === false) {
                 break;
             }
