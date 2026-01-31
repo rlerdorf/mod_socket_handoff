@@ -24,7 +24,9 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(50);
-            Ok(Arc::new(MockBackend::with_delay(Duration::from_millis(delay_ms))))
+            Ok(Arc::new(MockBackend::with_delay(Duration::from_millis(
+                delay_ms,
+            ))))
         }
         "openai" => {
             let api_key = config

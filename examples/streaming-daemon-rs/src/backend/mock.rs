@@ -75,13 +75,19 @@ impl StreamingBackend for MockBackend {
             request.prompt.clone()
         };
 
-        let user_id = request.user_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into());
+        let user_id = request
+            .user_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".into());
 
         // Pre-allocate with exact capacity: 2 dynamic + 16 static + 1 done = 19
         let mut chunks = Vec::with_capacity(19);
 
         // Dynamic messages (allocate)
-        chunks.push(StreamChunk::content(format!("Hello from Rust daemon! Prompt: {}", prompt_preview)));
+        chunks.push(StreamChunk::content(format!(
+            "Hello from Rust daemon! Prompt: {}",
+            prompt_preview
+        )));
         chunks.push(StreamChunk::content(format!("User ID: {}", user_id)));
 
         // Static messages (no allocation for the &str, only StreamChunk wrapper)
