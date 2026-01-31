@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,10 +25,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // Register pprof handlers for profiling
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -45,10 +44,13 @@ const (
 	DaemonSocket = "/var/run/streaming-daemon.sock"
 
 	// Timeouts for robustness
-	HandoffTimeout  = 5 * time.Second   // Max time to receive fd from Apache
-	WriteTimeout    = 30 * time.Second  // Max time for a single write to client
-	ShutdownTimeout = 2 * time.Minute   // Graceful shutdown timeout; long enough for LLM streams to complete
-	MaxConnections  = 1000              // Max concurrent connections
+	HandoffTimeout  = 5 * time.Second  // Max time to receive fd from Apache
+	WriteTimeout    = 30 * time.Second // Max time for a single write to client
+	ShutdownTimeout = 2 * time.Minute  // Graceful shutdown timeout; long enough for LLM streams to complete
+
+	// DefaultMaxConnections is the default maximum concurrent connections.
+	// Can be overridden with -max-connections flag for benchmarking.
+	DefaultMaxConnections = 1000
 
 	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
 	// via the Unix socket. The data originates from the X-Handoff-Data HTTP header.
@@ -71,13 +73,78 @@ var (
 		"Address for Prometheus metrics server (empty to disable)")
 	socketMode = flag.Uint("socket-mode", DefaultSocketMode,
 		"Permission mode for Unix socket (e.g., 0660)")
+	maxConnections = flag.Int("max-connections", DefaultMaxConnections,
+		"Maximum concurrent connections (for benchmarking)")
+	pprofAddr = flag.String("pprof-addr", "",
+		"Address for pprof server (empty to disable, e.g., localhost:6060)")
+	messageDelay = flag.Duration("message-delay", 50*time.Millisecond,
+		"Delay between SSE messages (for benchmarking, e.g., 3333ms for 30s streams)")
+	benchmarkMode = flag.Bool("benchmark", false,
+		"Enable benchmark mode: skip Prometheus updates, print summary on shutdown")
 )
+
+// Benchmark stats (only updated in benchmark mode)
+type BenchmarkStats struct {
+	mu             sync.Mutex
+	peakStreams    int64
+	activeStreams  int64
+	totalStarted   int64
+	totalCompleted int64
+	totalFailed    int64
+	totalBytes     int64
+}
+
+var benchStats BenchmarkStats
+
+func (b *BenchmarkStats) streamStart() {
+	b.mu.Lock()
+	b.activeStreams++
+	if b.activeStreams > b.peakStreams {
+		b.peakStreams = b.activeStreams
+	}
+	b.totalStarted++
+	b.mu.Unlock()
+}
+
+func (b *BenchmarkStats) streamEnd(success bool, bytes int64) {
+	b.mu.Lock()
+	b.activeStreams--
+	if success {
+		b.totalCompleted++
+	} else {
+		b.totalFailed++
+	}
+	b.totalBytes += bytes
+	b.mu.Unlock()
+}
+
+func (b *BenchmarkStats) print() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	fmt.Println("\n=== Benchmark Summary ===")
+	fmt.Printf("Peak concurrent streams: %d\n", b.peakStreams)
+	fmt.Printf("Total started: %d\n", b.totalStarted)
+	fmt.Printf("Total completed: %d\n", b.totalCompleted)
+	fmt.Printf("Total failed: %d\n", b.totalFailed)
+	fmt.Printf("Total bytes sent: %d\n", b.totalBytes)
+	fmt.Println("=========================")
+}
 
 // Prometheus metrics
 var (
 	metricActiveConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "daemon_active_connections",
-		Help: "Number of currently active client connections",
+		Help: "Number of currently active Apache handoff connections",
+	})
+
+	metricActiveStreams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "daemon_active_streams",
+		Help: "Number of currently active client streaming connections",
+	})
+
+	metricPeakStreams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "daemon_peak_streams",
+		Help: "Peak number of concurrent streaming connections seen",
 	})
 
 	metricConnectionsTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -135,9 +202,12 @@ type HandoffData struct {
 
 // Connection tracking for graceful shutdown
 var (
-	activeConns   int64
-	connSemaphore chan struct{}
-	connWg        sync.WaitGroup
+	activeConns    int64
+	activeStreams  int64
+	peakStreams    int64
+	connSemaphore  chan struct{}
+	connWg         sync.WaitGroup
+	peakStreamsMux sync.Mutex
 )
 
 // handoffBufPool reuses large buffers for receiving handoff data to reduce
@@ -153,8 +223,30 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 
+	// Increase file descriptor limit to handle many concurrent connections.
+	// Each connection needs ~3 fds (client socket, apache conn, internal).
+	// We request 2x max-connections plus some headroom.
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		log.Printf("Warning: could not get fd limit: %v", err)
+	} else {
+		desiredLimit := uint64(*maxConnections*3 + 1000)
+		if rLimit.Cur < desiredLimit {
+			rLimit.Cur = desiredLimit
+			if rLimit.Max < desiredLimit {
+				rLimit.Max = desiredLimit
+			}
+			if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+				log.Printf("Warning: could not set fd limit to %d: %v (current: %d)",
+					desiredLimit, err, rLimit.Cur)
+			} else {
+				log.Printf("Increased fd limit to %d", desiredLimit)
+			}
+		}
+	}
+
 	// Initialize connection limiter
-	connSemaphore = make(chan struct{}, MaxConnections)
+	connSemaphore = make(chan struct{}, *maxConnections)
 
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
@@ -227,7 +319,7 @@ func main() {
 		log.Printf("Warning: Could not chmod socket: %v", err)
 	}
 
-	log.Printf("Streaming daemon listening on %s (max %d connections)", DaemonSocket, MaxConnections)
+	log.Printf("Streaming daemon listening on %s (max %d connections)", DaemonSocket, *maxConnections)
 
 	// Start Prometheus metrics server
 	if *metricsAddr != "" {
@@ -242,6 +334,17 @@ func main() {
 			log.Printf("Metrics server listening on %s", *metricsAddr)
 			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("Metrics server error: %v", err)
+			}
+		}()
+	}
+
+	// Start pprof server for profiling (heap, goroutine, GC analysis)
+	if *pprofAddr != "" {
+		go func() {
+			log.Printf("pprof server listening on %s", *pprofAddr)
+			// Uses default mux which has pprof handlers registered via import
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil && err != http.ErrServerClosed {
+				log.Printf("pprof server error: %v", err)
 			}
 		}()
 	}
@@ -276,14 +379,18 @@ func main() {
 			case connSemaphore <- struct{}{}:
 				connWg.Add(1)
 				atomic.AddInt64(&activeConns, 1)
-				metricConnectionsTotal.Inc()
-				metricActiveConnections.Inc()
+				if !*benchmarkMode {
+					metricConnectionsTotal.Inc()
+					metricActiveConnections.Inc()
+				}
 				go func(c net.Conn) {
 					defer func() {
 						<-connSemaphore
 						connWg.Done()
 						atomic.AddInt64(&activeConns, -1)
-						metricActiveConnections.Dec()
+						if !*benchmarkMode {
+							metricActiveConnections.Dec()
+						}
 					}()
 					// Check context again inside goroutine to handle race condition
 					select {
@@ -297,8 +404,10 @@ func main() {
 					safeHandleConnection(ctx, c)
 				}(conn)
 			default:
-				metricConnectionsRejected.Inc()
-				log.Printf("Connection limit reached (%d), rejecting", MaxConnections)
+				if !*benchmarkMode {
+					metricConnectionsRejected.Inc()
+				}
+				log.Printf("Connection limit reached (%d), rejecting", *maxConnections)
 				if err := conn.Close(); err != nil {
 					log.Printf("Error closing rejected connection: %v", err)
 				}
@@ -334,6 +443,11 @@ func main() {
 		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
 	}
 
+	// Print benchmark summary if in benchmark mode
+	if *benchmarkMode {
+		benchStats.print()
+	}
+
 	// Cleanup
 	os.Remove(DaemonSocket)
 	log.Println("Daemon stopped")
@@ -364,12 +478,16 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	clientFd, data, err := receiveFd(conn)
 	handoffDuration := time.Since(handoffStart).Seconds()
 	if err != nil {
-		metricHandoffErrors.WithLabelValues(classifyError(err)).Inc()
+		if !*benchmarkMode {
+			metricHandoffErrors.WithLabelValues(classifyError(err)).Inc()
+		}
 		log.Printf("Failed to receive fd: %v", err)
 		return
 	}
-	metricHandoffDuration.Observe(handoffDuration)
-	metricHandoffsTotal.Inc()
+	if !*benchmarkMode {
+		metricHandoffDuration.Observe(handoffDuration)
+		metricHandoffsTotal.Inc()
+	}
 
 	// Wrap fd in os.File immediately to ensure cleanup on any error path.
 	// os.NewFile takes ownership only on success; if it returns nil (invalid fd),
@@ -412,8 +530,6 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
-	log.Printf("Received handoff: fd=%d, data_len=%d", clientFd, len(data))
-
 	// Parse handoff data
 	var handoff HandoffData
 	if len(data) > 0 {
@@ -422,17 +538,37 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}
 
-	log.Printf("  user_id=%d, prompt=%q", handoff.UserID, truncate(handoff.Prompt, 50))
-
 	// Stream response to client
+	if *benchmarkMode {
+		benchStats.streamStart()
+	} else {
+		current := atomic.AddInt64(&activeStreams, 1)
+		metricActiveStreams.Set(float64(current))
+		peakStreamsMux.Lock()
+		if current > peakStreams {
+			peakStreams = current
+			metricPeakStreams.Set(float64(current))
+		}
+		peakStreamsMux.Unlock()
+	}
+
 	streamStart := time.Now()
-	if err := streamToClient(ctx, clientFile, handoff); err != nil {
-		metricStreamErrors.WithLabelValues(classifyError(err)).Inc()
+	bytesSent, err := streamToClientWithBytes(ctx, clientFile, handoff)
+	success := err == nil
+	if err != nil {
+		if !*benchmarkMode {
+			metricStreamErrors.WithLabelValues(classifyError(err)).Inc()
+		}
 		log.Printf("Stream error: %v", err)
 	}
-	metricStreamDuration.Observe(time.Since(streamStart).Seconds())
 
-	log.Printf("  Connection closed")
+	if *benchmarkMode {
+		benchStats.streamEnd(success, bytesSent)
+	} else {
+		current := atomic.AddInt64(&activeStreams, -1)
+		metricActiveStreams.Set(float64(current))
+		metricStreamDuration.Observe(time.Since(streamStart).Seconds())
+	}
 }
 
 // receiveFd receives a file descriptor and data from the Unix socket connection.
@@ -443,19 +579,9 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("not a Unix connection")
 	}
 
-	file, err := unixConn.File()
-	if err != nil {
-		return -1, nil, fmt.Errorf("could not get file: %w", err)
-	}
-	defer file.Close()
-
-	// Set receive timeout on the raw fd using SO_RCVTIMEO (Unix-specific).
-	// We use SO_RCVTIMEO instead of conn.SetReadDeadline because we call
-	// syscall.Recvmsg directly on the fd, bypassing Go's net.Conn deadline logic.
-	// Use NsecToTimeval for portability across Unix platforms (Timeval field types vary).
-	tv := syscall.NsecToTimeval(HandoffTimeout.Nanoseconds())
-	if err := syscall.SetsockoptTimeval(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
-		return -1, nil, fmt.Errorf("could not set receive timeout: %w", err)
+	// Set read deadline for timeout
+	if err := unixConn.SetReadDeadline(time.Now().Add(HandoffTimeout)); err != nil {
+		return -1, nil, fmt.Errorf("could not set read deadline: %w", err)
 	}
 
 	// Get buffer from pool to reduce allocations under high throughput
@@ -463,14 +589,20 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	buf := *bufPtr
 
 	// Buffer for control message (SCM_RIGHTS)
-	// Use CmsgSpace for portable size calculation across architectures.
-	// The argument is the payload size (one int32 fd = 4 bytes).
-	oob := make([]byte, syscall.CmsgSpace(4))
+	// Use 256 bytes to handle any edge cases with ancillary data.
+	oob := make([]byte, 256)
 
-	n, oobn, recvflags, _, err := syscall.Recvmsg(int(file.Fd()), buf, oob, 0)
+	// Use ReadMsgUnix instead of File() + syscall.Recvmsg to avoid
+	// the issues with File() disconnecting the Go runtime's poller.
+	n, oobn, recvflags, _, err := unixConn.ReadMsgUnix(buf, oob)
 	if err != nil {
 		handoffBufPool.Put(bufPtr)
-		return -1, nil, fmt.Errorf("recvmsg failed: %w", err)
+		return -1, nil, fmt.Errorf("ReadMsgUnix failed: %w", err)
+	}
+
+	// Debug: log if control message was truncated
+	if recvflags&syscall.MSG_CTRUNC != 0 {
+		log.Printf("DEBUG: MSG_CTRUNC set, oobn=%d, n=%d, recvflags=0x%x", oobn, n, recvflags)
 	}
 
 	// Parse control message to extract fd (do this early so we can close on error).
@@ -545,61 +677,62 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	return fds[0], data, nil
 }
 
+// streamToClientWithBytes sends an SSE response and returns bytes sent.
+func streamToClientWithBytes(ctx context.Context, clientFile *os.File, handoff HandoffData) (int64, error) {
+	bytes, err := streamToClient(ctx, clientFile, handoff)
+	return bytes, err
+}
+
 // streamToClient sends an SSE response to the client.
 // Replace the demo response with your LLM API integration.
-func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) error {
+func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffData) (int64, error) {
+	var totalBytes int64
+
 	// Create net.Conn from file to enable write deadlines.
 	// We must write to this conn (not clientFile) for the deadline to apply.
 	// Note: net.FileConn dups the fd, so conn has its own fd that must be closed.
 	conn, err := net.FileConn(clientFile)
 	if err != nil {
-		return fmt.Errorf("failed to create conn from file: %w", err)
+		return 0, fmt.Errorf("failed to create conn from file: %w", err)
 	}
 	defer conn.Close()
 
 	// Set initial write timeout - fail fast if we can't set deadline
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return fmt.Errorf("could not set write deadline: %w", err)
+		return 0, fmt.Errorf("could not set write deadline: %w", err)
 	}
 
-	writer := bufio.NewWriter(conn)
+	// Write directly to conn without buffering for lowest latency SSE streaming.
+	// Each write goes straight to the kernel, minimizing TTFB.
 
 	// Send HTTP headers for SSE
-	headers := []string{
-		"HTTP/1.1 200 OK",
-		"Content-Type: text/event-stream",
-		"Cache-Control: no-cache",
-		"Connection: close",
-		"X-Accel-Buffering: no", // Disable buffering in nginx/proxies
-	}
-	var headerBytes int
-	for _, h := range headers {
-		n, err := fmt.Fprintf(writer, "%s\r\n", h)
-		if err != nil {
-			return fmt.Errorf("failed to write header: %w", err)
-		}
-		headerBytes += n
-	}
-	n, err := fmt.Fprintf(writer, "\r\n")
+	headers := "HTTP/1.1 200 OK\r\n" +
+		"Content-Type: text/event-stream\r\n" +
+		"Cache-Control: no-cache\r\n" +
+		"Connection: close\r\n" +
+		"X-Accel-Buffering: no\r\n" + // Disable buffering in nginx/proxies
+		"\r\n"
+	headerBytes, err := conn.Write([]byte(headers))
 	if err != nil {
-		return fmt.Errorf("failed to write header terminator: %w", err)
+		return totalBytes, fmt.Errorf("failed to write headers: %w", err)
 	}
-	headerBytes += n
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed to send headers: %w", err)
+	totalBytes += int64(headerBytes)
+	if !*benchmarkMode {
+		metricBytesSent.Add(float64(headerBytes))
 	}
-	metricBytesSent.Add(float64(headerBytes))
 
 	// Check for context cancellation before starting to stream
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return totalBytes, ctx.Err()
 	default:
 	}
 
 	// Stream the response (sendSSE resets write deadline after each successful write)
 	// TODO: Replace this with your LLM API call
-	return streamDemoResponse(ctx, conn, writer, handoff)
+	bodyBytes, err := streamDemoResponse(ctx, conn, handoff)
+	totalBytes += bodyBytes
+	return totalBytes, err
 }
 
 // streamDemoResponse simulates an LLM streaming response.
@@ -609,82 +742,96 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 //	for {
 //	    chunk, err := stream.Recv()
 //	    if err == io.EOF { break }
-//	    sendSSE(conn, writer, chunk.Choices[0].Delta.Content)
+//	    sendSSE(conn, chunk.Choices[0].Delta.Content)
 //	}
-func streamDemoResponse(ctx context.Context, conn net.Conn, writer *bufio.Writer, handoff HandoffData) error {
-	response := fmt.Sprintf(
-		"Hello! I received your prompt: %q\n\n"+
-			"This response is being streamed from a daemon that received "+
-			"the client socket via SCM_RIGHTS. The Apache worker has been freed.\n\n"+
-			"Replace this demo with your LLM API integration.",
-		truncate(handoff.Prompt, 100))
+func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
+	var totalBytes int64
 
-	// Stream word by word to simulate LLM token generation
-	words := strings.Fields(response)
-	for i, word := range words {
+	// Fixed messages for consistent benchmarking (18 messages × delay)
+	messages := []string{
+		fmt.Sprintf("Hello from Go daemon! Prompt: %s", truncate(handoff.Prompt, 50)),
+		fmt.Sprintf("User ID: %d", handoff.UserID),
+		"This daemon uses goroutines for concurrent handling.",
+		"Each connection runs as a lightweight goroutine.",
+		"Expected capacity: 50,000+ concurrent connections.",
+		"Memory per connection: ~6-10 KB.",
+		"The Apache worker was freed immediately after handoff.",
+		"Replace this demo with your LLM API integration.",
+		"Goroutines are multiplexed onto OS threads by the Go runtime.",
+		"The Go scheduler handles thousands of goroutines efficiently.",
+		"Non-blocking I/O is built into Go's net package.",
+		"This is similar to Erlang's lightweight processes.",
+		"This is message 13 of 18.",
+		"This is message 14 of 18.",
+		"This is message 15 of 18.",
+		"This is message 16 of 18.",
+		"This is message 17 of 18.",
+		"[DONE-CONTENT]",
+	}
+
+	for i, msg := range messages {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return totalBytes, ctx.Err()
 		default:
 		}
 
-		// Add space before word (except first)
-		content := word
-		if i > 0 {
-			content = " " + word
-		}
-
 		// Send SSE event (resets write deadline after each successful write)
-		if err := sendSSE(conn, writer, content); err != nil {
-			return err
+		n, err := sendSSE(conn, msg)
+		totalBytes += int64(n)
+		if err != nil {
+			return totalBytes, err
 		}
 
-		// Simulate token generation delay
-		time.Sleep(50 * time.Millisecond)
+		// Simulate token generation delay (configurable via -message-delay flag)
+		if i < len(messages)-1 {
+			time.Sleep(*messageDelay)
+		}
 	}
 
 	// Check context before sending completion marker for responsive shutdown
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return totalBytes, ctx.Err()
 	default:
 	}
 
 	// Send completion marker
-	if _, err := fmt.Fprintf(writer, "data: [DONE]\n\n"); err != nil {
-		return fmt.Errorf("write failed: %w", err)
+	doneMsg := []byte("data: [DONE]\n\n")
+	n, err := conn.Write(doneMsg)
+	totalBytes += int64(n)
+	if err != nil {
+		return totalBytes, fmt.Errorf("write failed: %w", err)
 	}
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("flush failed: %w", err)
-	}
-	return nil
+	return totalBytes, nil
 }
 
 // sendSSE sends a single SSE event with the given content.
-// It resets the write deadline after each successful flush to implement
+// Writes directly to conn without buffering for lowest latency.
+// It resets the write deadline after each successful write to implement
 // a per-write idle timeout (not a total stream timeout).
-func sendSSE(conn net.Conn, writer *bufio.Writer, content string) error {
+// Returns bytes written and any error.
+func sendSSE(conn net.Conn, content string) (int, error) {
 	// json.Marshal on map[string]string cannot fail with current types;
 	// keep error check as defensive programming in case payload changes.
 	data, err := json.Marshal(map[string]string{"content": content})
 	if err != nil {
-		return fmt.Errorf("json marshal failed: %w", err)
+		return 0, fmt.Errorf("json marshal failed: %w", err)
 	}
 	msg := fmt.Sprintf("data: %s\n\n", data)
-	n, err := writer.WriteString(msg)
+	n, err := conn.Write([]byte(msg))
 	if err != nil {
-		return fmt.Errorf("write failed: %w", err)
+		return n, fmt.Errorf("write failed: %w", err)
 	}
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("flush failed: %w", err)
+	if !*benchmarkMode {
+		metricBytesSent.Add(float64(n))
 	}
-	metricBytesSent.Add(float64(n))
 	// Reset deadline after successful write for per-write idle timeout.
 	// Treat failure as fatal so we don't continue streaming without timeout protection.
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return fmt.Errorf("set write deadline failed: %w", err)
+		return n, fmt.Errorf("set write deadline failed: %w", err)
 	}
-	return nil
+	return n, nil
 }
 
 func truncate(s string, n int) string {

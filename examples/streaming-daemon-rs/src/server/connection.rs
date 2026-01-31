@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use crate::backend::StreamingBackend;
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
-use crate::metrics::{self, Timer};
+use crate::metrics::{self, bench_stream_end, bench_stream_start, Timer};
 use crate::server::handoff::{receive_handoff, HandoffResult};
 use crate::shutdown::ConnectionGuard;
 use crate::streaming::{SseWriter, StreamRequest};
@@ -104,6 +104,9 @@ impl ConnectionHandler {
         guard: &ConnectionGuard,
     ) -> Result<(), ConnectionError> {
         let stream_timer = Instant::now();
+
+        // Track benchmark stats
+        bench_stream_start();
 
         // Destructure handoff to avoid partial move issues
         let HandoffResult {
@@ -214,6 +217,9 @@ impl ConnectionHandler {
             let _ = writer.send_done().await;
         }
         let _ = writer.shutdown().await;
+
+        // Record benchmark stats
+        bench_stream_end(stream_completed_normally, writer.bytes_written());
 
         metrics::record_backend_duration(self.backend.name(), backend_timer.elapsed());
         metrics::record_stream_duration(stream_timer.elapsed());

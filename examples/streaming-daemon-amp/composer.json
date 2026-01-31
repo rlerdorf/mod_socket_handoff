@@ -1,0 +1,8 @@
+{
+    "name": "example/streaming-daemon-amp",
+    "require": {
+        "amphp/amp": "^3.0",
+        "amphp/socket": "^2.0",
+        "amphp/byte-stream": "^2.0"
+    }
+}

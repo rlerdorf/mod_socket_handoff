@@ -21,10 +21,23 @@
 # Go build artifacts
 examples/streaming-daemon
 examples/streaming-daemon-go/streaming-daemon
+benchmarks/load-generator/load-generator
 
 # C build artifacts
 examples/fdrecv
 
+# Rust build artifacts
+examples/streaming-daemon-rs/target/
+
 # Python bytecode
 *.pyc
 __pycache__/
+
+# PHP dependencies
+examples/streaming-daemon-amp/vendor/
+examples/streaming-daemon-amp/composer.lock
+
+# Benchmark results (generated)
+benchmarks/results/
+benchmarks/results-*/
+benchmarks/BENCHMARK_REPORT.md

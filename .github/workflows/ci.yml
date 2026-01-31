@@ -97,3 +97,61 @@ jobs:
 
       - name: Verify executable
         run: (./fdrecv 2>&1 || true) | grep -q "Usage:"
+
+  # PHP AMPHP daemon syntax check
+  php-daemon:
+    name: PHP Daemon (AMPHP)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/streaming-daemon-amp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sockets, pcntl
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Syntax check
+        run: php -l streaming_daemon.php
+
+  # Python asyncio daemon syntax check
+  python-daemon:
+    name: Python Daemon (asyncio)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check
+        run: python3 -m py_compile examples/streaming_daemon_async.py
+
+      - name: Basic import check
+        run: python3 -c "import ast; ast.parse(open('examples/streaming_daemon_async.py').read())"
+
+  # Benchmark load generator build
+  benchmark-tools:
+    name: Benchmark Load Generator
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: benchmarks/load-generator
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build load generator
+        run: go build -o load-generator .

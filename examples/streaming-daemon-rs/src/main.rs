@@ -20,13 +20,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use nix::libc;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use streaming_daemon_rs::{
     backend::create_backend,
     config::Config,
-    metrics::{init_metrics, start_metrics_server},
+    metrics::{init_metrics, print_benchmark_summary, set_benchmark_mode, start_metrics_server},
     server::{ConnectionHandler, UnixSocketListener},
     shutdown::ShutdownCoordinator,
 };
@@ -51,11 +52,25 @@ struct Args {
     /// Enable debug logging.
     #[arg(short, long)]
     debug: bool,
+
+    /// Enable benchmark mode: skip Prometheus updates, print summary on shutdown.
+    #[arg(long)]
+    benchmark: bool,
 }
 
-#[tokio::main]
+// Configure tokio runtime with larger blocking thread pool for high concurrency
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Set benchmark mode if requested
+    if args.benchmark {
+        set_benchmark_mode(true);
+        eprintln!("Benchmark mode enabled: skipping Prometheus updates");
+    }
+
+    // Increase file descriptor limit to handle many concurrent connections
+    increase_fd_limit();
 
     // Load configuration
     let mut config = Config::load(args.config.as_ref())?;
@@ -153,6 +168,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Print benchmark summary if in benchmark mode
+    print_benchmark_summary();
+
     tracing::info!("Daemon stopped");
     Ok(())
 }
@@ -178,6 +196,31 @@ fn init_logging(config: &streaming_daemon_rs::config::LoggingConfig) -> anyhow::
     }
 
     Ok(())
+}
+
+/// Increase the file descriptor limit to handle many concurrent connections.
+fn increase_fd_limit() {
+    use std::mem::MaybeUninit;
+
+    const DESIRED_LIMIT: u64 = 100_000;
+
+    unsafe {
+        let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) == 0 {
+            let mut rlim = rlim.assume_init();
+            if rlim.rlim_cur < DESIRED_LIMIT {
+                rlim.rlim_cur = DESIRED_LIMIT;
+                if rlim.rlim_max < DESIRED_LIMIT {
+                    rlim.rlim_max = DESIRED_LIMIT;
+                }
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+                    eprintln!("Increased fd limit to {}", DESIRED_LIMIT);
+                } else {
+                    eprintln!("Warning: could not increase fd limit");
+                }
+            }
+        }
+    }
 }
 
 /// Handle Unix signals.

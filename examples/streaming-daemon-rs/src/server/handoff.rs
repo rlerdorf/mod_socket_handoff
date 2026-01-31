@@ -87,11 +87,11 @@ pub async fn receive_handoff(
     })?;
     let owned_fd = OwnedFd::from(std_stream);
 
-    // Perform blocking recvmsg in spawn_blocking with SO_RCVTIMEO set
-    // to ensure the blocking call returns even under slow/malicious peers.
-    tokio::task::spawn_blocking(move || receive_fd_blocking(owned_fd, timeout, buffer_size))
-        .await
-        .map_err(|e| HandoffError::ReceiveFailed(format!("spawn_blocking failed: {}", e)))?
+    // Use block_in_place to run blocking recvmsg without spawn_blocking overhead.
+    // This temporarily converts this worker into a blocking thread, avoiding the
+    // scheduling latency of spawn_blocking while still allowing tokio to spawn
+    // replacement workers if needed. SO_RCVTIMEO bounds the blocking duration.
+    tokio::task::block_in_place(|| receive_fd_blocking(owned_fd, timeout, buffer_size))
 }
 
 /// Blocking recvmsg implementation.

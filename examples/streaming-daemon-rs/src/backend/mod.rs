@@ -16,7 +16,10 @@ use crate::error::BackendError;
 /// Create a backend from configuration.
 pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend>, BackendError> {
     match config.provider.as_str() {
-        "mock" => Ok(Arc::new(MockBackend::new())),
+        "mock" => {
+            // MockBackend::new() reads DAEMON_TOKEN_DELAY_MS env var
+            Ok(Arc::new(MockBackend::new()))
+        }
         "openai" => {
             let api_key = config
                 .openai

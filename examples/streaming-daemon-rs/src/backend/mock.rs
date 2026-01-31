@@ -16,9 +16,16 @@ pub struct MockBackend {
 
 impl MockBackend {
     /// Create a new mock backend.
+    ///
+    /// Reads DAEMON_TOKEN_DELAY_MS environment variable for token delay (default: 50ms).
+    /// For ~100-second streams with 18 messages, use DAEMON_TOKEN_DELAY_MS=5625.
     pub fn new() -> Self {
+        let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50);
         Self {
-            token_delay: Duration::from_millis(50),
+            token_delay: Duration::from_millis(delay_ms),
         }
     }
 
@@ -41,35 +48,54 @@ impl StreamingBackend for MockBackend {
     }
 
     async fn stream(&self, request: StreamRequest) -> Result<super::ChunkStream, BackendError> {
-        // Generate response based on prompt
-        let prompt_preview = if request.prompt.len() > 100 {
-            format!("{}...", &request.prompt[..100])
+        // Static messages - no allocation needed
+        static STATIC_MESSAGES: &[&str] = &[
+            "This daemon uses Tokio async tasks for concurrent handling.",
+            "Each connection runs as a lightweight async task.",
+            "Expected capacity: 100,000+ concurrent connections.",
+            "Memory per connection: ~10-15 KB.",
+            "The Apache worker was freed immediately after handoff.",
+            "Replace this mock backend with your LLM API integration.",
+            "Tokio provides async I/O with work-stealing scheduler.",
+            "Rust's zero-cost abstractions make async efficient.",
+            "Non-blocking I/O is built into Tokio's runtime.",
+            "This is similar to Go goroutines but with static guarantees.",
+            "This is message 13 of 18.",
+            "This is message 14 of 18.",
+            "This is message 15 of 18.",
+            "This is message 16 of 18.",
+            "This is message 17 of 18.",
+            "[DONE-CONTENT]",
+        ];
+
+        // Only allocate for dynamic messages (2 strings per connection)
+        let prompt_preview = if request.prompt.len() > 50 {
+            format!("{}...", &request.prompt[..50])
         } else {
             request.prompt.clone()
         };
 
-        let response = format!(
-            "Hello! I received your prompt: \"{}\"\n\n\
-             This response is being streamed from a Rust daemon that received \
-             the client socket via SCM_RIGHTS. The Apache worker has been freed.\n\n\
-             Replace this mock backend with your LLM API integration.",
+        let user_id = request
+            .user_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".into());
+
+        // Pre-allocate with exact capacity: 2 dynamic + 16 static + 1 done = 19
+        let mut chunks = Vec::with_capacity(19);
+
+        // Dynamic messages (allocate)
+        chunks.push(StreamChunk::content(format!(
+            "Hello from Rust daemon! Prompt: {}",
             prompt_preview
-        );
+        )));
+        chunks.push(StreamChunk::content(format!("User ID: {}", user_id)));
 
-        // Split into word chunks
-        let words: Vec<&str> = response.split_whitespace().collect();
-        let mut chunks: Vec<StreamChunk> = Vec::with_capacity(words.len() + 1);
-
-        for (i, word) in words.iter().enumerate() {
-            let content = if i == 0 {
-                word.to_string()
-            } else {
-                format!(" {}", word)
-            };
-            chunks.push(StreamChunk::content(content));
+        // Static messages (no allocation for the &str, only StreamChunk wrapper)
+        for msg in STATIC_MESSAGES {
+            chunks.push(StreamChunk::content(*msg));
         }
 
-        // Add done marker
+        // Done marker
         chunks.push(StreamChunk::done());
 
         Ok(Box::new(VecChunkStream::new(
