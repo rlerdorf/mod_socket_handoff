@@ -24,7 +24,7 @@ sudo ./streaming-daemon -socket-mode 0666
 
 **Options:**
 ```
--max-connections int    Maximum concurrent connections (default 100000)
+-max-connections int    Maximum concurrent connections (default 1000)
 -socket-mode uint       Unix socket permissions (default 0660)
 -message-delay duration Delay between SSE messages (default 50ms)
 -metrics-addr string    Prometheus metrics address (default ":9090")
@@ -122,7 +122,7 @@ The daemon automatically detects and uses uvloop when available, replacing the d
 -m, --mode MODE      Socket permissions in octal
 -w, --workers NUM    Thread pool size for blocking recvmsg (default: 500)
 -d, --delay MS       Delay between SSE messages (default: 50)
--b, --backlog NUM    Listen backlog (default: 8192)
+-b, --backlog NUM    Listen backlog (default: 1024)
 --benchmark          Enable benchmark mode
 ```
 

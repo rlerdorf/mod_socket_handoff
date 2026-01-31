@@ -71,7 +71,7 @@ def load_resources_csv(path: Path) -> Optional[Dict[str, Any]]:
                     conn_rss_pairs.append((conns, rss))
 
             except (ValueError, KeyError):
-                pass
+                pass  # Skip rows with invalid or missing numeric fields
 
     if not rss_values:
         return None

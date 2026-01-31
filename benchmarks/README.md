@@ -214,7 +214,7 @@ Options:
   -connections int      Number of concurrent connections (default 100)
   -ramp-up duration     Time to reach target connections (default 10s)
   -hold duration        Time to hold at target level (default 60s)
-  -stream-timeout dur   Timeout for reading response (default 60s)
+  -stream-timeout dur   Timeout for reading response (default 120s)
   -data string          JSON handoff data to send
   -output string        Output file for results (JSON)
   -verbose              Enable verbose per-connection logging

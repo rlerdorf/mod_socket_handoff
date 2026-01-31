@@ -17,10 +17,10 @@ pub struct MockBackend {
 impl MockBackend {
     /// Create a new mock backend.
     ///
-    /// Reads DAEMON_MOCK_DELAY_MS environment variable for token delay (default: 50ms).
-    /// For 30-second streams with 9 messages, use DAEMON_MOCK_DELAY_MS=3333.
+    /// Reads DAEMON_TOKEN_DELAY_MS environment variable for token delay (default: 50ms).
+    /// For ~100-second streams with 18 messages, use DAEMON_TOKEN_DELAY_MS=5625.
     pub fn new() -> Self {
-        let delay_ms = std::env::var("DAEMON_MOCK_DELAY_MS")
+        let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(50);

@@ -112,7 +112,7 @@ cleanup() {
     sleep 1
 }
 
-trap cleanup EXIT
+# Note: EXIT trap already set above with cleanup and restore_max_map_count
 
 # Function to test a single daemon
 test_daemon() {

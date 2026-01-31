@@ -316,7 +316,8 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
         if (!$benchmarkMode) {
             echo "[$connId] Handoff error: {$e->getMessage()}\n";
         }
-        $stats->streamEnd(false, 0);
+        // Note: Don't call streamEnd() here - streamStart() is only called
+        // inside streamResponse(), so calling streamEnd() here would unbalance counters
     } finally {
         socket_close($apacheConn);
     }

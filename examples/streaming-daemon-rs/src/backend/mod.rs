@@ -19,7 +19,7 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
     match config.provider.as_str() {
         "mock" => {
             // Check for custom token delay via environment variable
-            // DAEMON_TOKEN_DELAY_MS (default: 50ms, use 3333 for 30s streams with 9 messages)
+            // DAEMON_TOKEN_DELAY_MS (default: 50ms, use 5625 for ~100s streams with 18 messages)
             let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())

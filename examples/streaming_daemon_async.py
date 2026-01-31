@@ -34,7 +34,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple
+from typing import Tuple
 
 # Try to use uvloop for better performance (2-4x faster than default asyncio)
 try:
@@ -220,7 +220,7 @@ async def stream_response(
             try:
                 writer_file.close()
             except OSError:
-                pass
+                pass  # Ignore errors during close; OS will reclaim resources
         stats.stream_end(success, bytes_sent)
 
 
@@ -258,7 +258,8 @@ async def handle_handoff(
     except Exception as e:
         if not benchmark_mode:
             print(f"[{conn_id}] Handoff error: {e}", file=sys.stderr)
-        stats.stream_end(False, 0)
+        # Note: Don't call stats.stream_end() here - stream_start() is only called
+        # inside stream_response(), so calling stream_end() here would unbalance counters
 
     finally:
         apache_conn.close()
@@ -314,7 +315,7 @@ async def main_async(args: argparse.Namespace) -> None:
     try:
         os.unlink(socket_path)
     except FileNotFoundError:
-        pass
+        pass  # Socket doesn't exist yet, nothing to remove
 
     # Create Unix socket
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -361,7 +362,7 @@ async def main_async(args: argparse.Namespace) -> None:
     try:
         await accept_task
     except asyncio.CancelledError:
-        pass
+        pass  # Expected: accept loop was cancelled for shutdown
 
     # Cleanup
     executor.shutdown(wait=False)
@@ -369,7 +370,7 @@ async def main_async(args: argparse.Namespace) -> None:
     try:
         os.unlink(socket_path)
     except OSError:
-        pass
+        pass  # Socket file may already be removed
 
     # Print summary
     if benchmark_mode:

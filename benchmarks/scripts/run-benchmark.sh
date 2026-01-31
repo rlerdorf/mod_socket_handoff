@@ -71,7 +71,7 @@ case $DAEMON in
     php)
         SOCKET="/var/run/streaming-daemon-amp.sock"
         METRICS_PORT=""
-        DAEMON_PATTERN="streaming-daemon-amp"
+        DAEMON_PATTERN="streaming_daemon.php"
         ;;
     *)
         echo "Error: Unknown daemon type: $DAEMON"
