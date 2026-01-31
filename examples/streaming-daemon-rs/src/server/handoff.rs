@@ -200,14 +200,34 @@ fn validate_socket(fd: &OwnedFd) -> Result<(), HandoffError> {
 
 /// Parse JSON handoff data.
 fn parse_handoff_data(data: &[u8]) -> Result<HandoffData, HandoffError> {
+    // Trim NUL bytes and whitespace - mod_socket_handoff sends a dummy \0 byte
+    // when X-Handoff-Data is omitted, which would otherwise cause parse warnings.
+    let trimmed: &[u8] = {
+        let start = data
+            .iter()
+            .position(|&b| b != 0 && !b.is_ascii_whitespace());
+        let end = data
+            .iter()
+            .rposition(|&b| b != 0 && !b.is_ascii_whitespace());
+        match (start, end) {
+            (Some(s), Some(e)) => &data[s..=e],
+            _ => &[],
+        }
+    };
+
+    // Empty data after trimming means no handoff data was provided
+    if trimmed.is_empty() {
+        return Ok(HandoffData::default());
+    }
+
     // Try to parse as JSON, fall back to empty data on error
-    match serde_json::from_slice(data) {
+    match serde_json::from_slice(trimmed) {
         Ok(handoff) => Ok(handoff),
         Err(e) => {
             // Log but don't fail - handoff data is optional
             tracing::warn!(
                 error = %e,
-                data_len = data.len(),
+                data_len = trimmed.len(),
                 "Failed to parse handoff data as JSON, using defaults"
             );
             Ok(HandoffData::default())
@@ -241,5 +261,22 @@ mod tests {
         let data = parse_handoff_data(b"not json").unwrap();
         // Should return defaults, not error
         assert_eq!(data.user_id, None);
+    }
+
+    #[test]
+    fn test_parse_nul_byte() {
+        // mod_socket_handoff sends a dummy \0 byte when X-Handoff-Data is omitted
+        let data = parse_handoff_data(&[0]).unwrap();
+        assert_eq!(data.user_id, None);
+        assert_eq!(data.prompt, None);
+    }
+
+    #[test]
+    fn test_parse_json_with_nul_padding() {
+        // JSON with trailing NUL bytes (e.g., from fixed-size buffer)
+        let mut buf = br#"{"user_id": 42}"#.to_vec();
+        buf.extend_from_slice(&[0, 0, 0]);
+        let data = parse_handoff_data(&buf).unwrap();
+        assert_eq!(data.user_id, Some(42));
     }
 }

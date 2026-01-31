@@ -322,9 +322,12 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
         }
 
         // Parse handoff data
+        // Trim NUL bytes - mod_socket_handoff sends a dummy \0 byte when
+        // X-Handoff-Data is omitted.
         $handoffData = [];
-        if (!empty($data)) {
-            $handoffData = json_decode($data, true) ?? [];
+        $trimmedData = trim($data, "\x00");
+        if ($trimmedData !== '') {
+            $handoffData = json_decode($trimmedData, true) ?? [];
         }
 
         // Stream response using async I/O

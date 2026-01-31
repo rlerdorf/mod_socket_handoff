@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -531,9 +532,12 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}()
 
 	// Parse handoff data
+	// Trim NUL bytes - mod_socket_handoff sends a dummy \0 byte when
+	// X-Handoff-Data is omitted.
 	var handoff HandoffData
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &handoff); err != nil {
+	trimmedData := bytes.Trim(data, "\x00")
+	if len(trimmedData) > 0 {
+		if err := json.Unmarshal(trimmedData, &handoff); err != nil {
 			log.Printf("Failed to parse handoff data: %v", err)
 		}
 	}
