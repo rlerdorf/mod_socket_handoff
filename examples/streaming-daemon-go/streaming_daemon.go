@@ -654,21 +654,29 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("no control messages received")
 	}
 
-	fds, err := syscall.ParseUnixRights(&msgs[0])
-	if err != nil {
-		handoffBufPool.Put(bufPtr)
-		return -1, nil, fmt.Errorf("parse unix rights failed: %w", err)
+	// Collect all fds from all control messages to avoid leaking any.
+	// Normally there's only one message with one fd, but we handle the
+	// general case to be safe.
+	var allFds []int
+	for i := range msgs {
+		fds, err := syscall.ParseUnixRights(&msgs[i])
+		if err != nil {
+			// Not an SCM_RIGHTS message or malformed; log for diagnostics and skip
+			log.Printf("Warning: failed to parse SCM_RIGHTS control message: %v", err)
+			continue
+		}
+		allFds = append(allFds, fds...)
 	}
 
-	if len(fds) == 0 {
+	if len(allFds) == 0 {
 		handoffBufPool.Put(bufPtr)
 		return -1, nil, fmt.Errorf("no file descriptors received")
 	}
 
 	// Close any extra fds if multiple were received (we only use the first one)
-	if len(fds) > 1 {
-		log.Printf("Warning: received %d fds, expected 1; closing extras", len(fds))
-		for _, extraFd := range fds[1:] {
+	if len(allFds) > 1 {
+		log.Printf("Warning: received %d fds, expected 1; closing extras", len(allFds))
+		for _, extraFd := range allFds[1:] {
 			syscall.Close(extraFd)
 		}
 	}
@@ -678,7 +686,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	copy(data, buf[:n])
 	handoffBufPool.Put(bufPtr)
 
-	return fds[0], data, nil
+	return allFds[0], data, nil
 }
 
 // streamToClientWithBytes sends an SSE response and returns bytes sent.
@@ -787,9 +795,16 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData)
 			return totalBytes, err
 		}
 
-		// Simulate token generation delay (configurable via -message-delay flag)
+		// Simulate token generation delay (configurable via -message-delay flag).
+		// Use select to allow context cancellation to interrupt the delay,
+		// enabling faster shutdown with long message delays.
 		if i < len(messages)-1 {
-			time.Sleep(*messageDelay)
+			select {
+			case <-time.After(*messageDelay):
+				// Normal delay completed
+			case <-ctx.Done():
+				return totalBytes, ctx.Err()
+			}
 		}
 	}
 
