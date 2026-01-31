@@ -1,13 +1,68 @@
 #!/bin/bash
 #
 # Comprehensive Streaming Daemon Benchmark
-# Run as: sudo ./run_full_benchmark.sh
 #
-# Tests all 4 daemon implementations at multiple connection levels
+# Usage:
+#   sudo ./run_full_benchmark.sh              # Run all daemons
+#   sudo ./run_full_benchmark.sh rust         # Run only Rust daemon
+#   sudo ./run_full_benchmark.sh php go       # Run PHP and Go daemons
+#   sudo ./run_full_benchmark.sh --help       # Show help
+#
+# Available daemons: php, python, go, rust
+#
+# Tests daemon implementations at multiple connection levels
 # and measures TTFB, memory, CPU, and peak concurrency.
 #
 
 set -e
+
+# Parse arguments
+DAEMONS_TO_RUN=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            echo "Usage: sudo $0 [daemon ...]"
+            echo ""
+            echo "Run benchmarks for streaming daemons."
+            echo ""
+            echo "Arguments:"
+            echo "  daemon    One or more daemons to benchmark: php, python, go, rust"
+            echo "            If not specified, all daemons are benchmarked."
+            echo ""
+            echo "Examples:"
+            echo "  sudo $0              # Benchmark all daemons"
+            echo "  sudo $0 rust         # Benchmark only Rust"
+            echo "  sudo $0 php go       # Benchmark PHP and Go"
+            exit 0
+            ;;
+        php|python|go|rust)
+            DAEMONS_TO_RUN+=("$1")
+            shift
+            ;;
+        *)
+            echo "Error: Unknown daemon '$1'"
+            echo "Valid daemons: php, python, go, rust"
+            echo "Use --help for usage information."
+            exit 1
+            ;;
+    esac
+done
+
+# Default to all daemons if none specified
+if [ ${#DAEMONS_TO_RUN[@]} -eq 0 ]; then
+    DAEMONS_TO_RUN=(php python go rust)
+fi
+
+# Helper function to check if a daemon should be run
+should_run() {
+    local daemon=$1
+    for d in "${DAEMONS_TO_RUN[@]}"; do
+        if [ "$d" = "$daemon" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Check for root
 if [ "$EUID" -ne 0 ]; then
@@ -255,28 +310,40 @@ fi
 
 cleanup
 
-echo "Starting comprehensive benchmark at $(date)"
+echo "Starting benchmark at $(date)"
+echo "Daemons to test: ${DAEMONS_TO_RUN[*]}"
 echo ""
 
 # Test PHP
-test_daemon "php" \
-    "php -dextension=ev.so $EXAMPLES_DIR/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS --benchmark" \
-    "streaming_daemon.php"
+# Uses custom minimal php.ini with zend.max_allowed_stack_size=-1 (INI_SYSTEM setting).
+# The -n flag ignores the system php.ini, using only our custom config.
+# StreamSelectDriver is used (ev extension causes stack overflows with PHP 8.4+).
+if should_run php; then
+    test_daemon "php" \
+        "php -n -c $EXAMPLES_DIR/streaming-daemon-amp/php.ini $EXAMPLES_DIR/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS --benchmark" \
+        "streaming_daemon.php"
+fi
 
 # Test Python (using uvloop + 500 thread workers for high concurrency)
-test_daemon "python" \
-    "python3 $EXAMPLES_DIR/streaming_daemon_async.py -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
-    "streaming_daemon_async"
+if should_run python; then
+    test_daemon "python" \
+        "python3 $EXAMPLES_DIR/streaming_daemon_async.py -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
+        "streaming_daemon_async"
+fi
 
 # Test Go (disable metrics to avoid port conflicts between test runs)
-test_daemon "go" \
-    "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
-    "streaming-daemon-go/streaming-daemon"
+if should_run go; then
+    test_daemon "go" \
+        "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
+        "streaming-daemon-go/streaming-daemon"
+fi
 
 # Test Rust
-test_daemon "rust" \
-    "RUST_LOG=warn DAEMON_TOKEN_DELAY_MS=$MESSAGE_DELAY_MS DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false $EXAMPLES_DIR/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b mock" \
-    "streaming-daemon-rs"
+if should_run rust; then
+    test_daemon "rust" \
+        "RUST_LOG=warn DAEMON_TOKEN_DELAY_MS=$MESSAGE_DELAY_MS DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false $EXAMPLES_DIR/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b mock" \
+        "streaming-daemon-rs"
+fi
 
 
 # Generate summary report

@@ -1,7 +1,7 @@
 # Makefile for streaming daemon benchmarks
 #
 # Usage:
-#   make build          - Build the load generator
+#   make build          - Build all daemons and dependencies
 #   make test-quick     - Quick test with 100 connections
 #   make bench-python   - Benchmark Python asyncio daemon
 #   make bench-php      - Benchmark PHP pre-fork daemon
@@ -11,7 +11,7 @@
 #   make clean          - Clean build artifacts
 
 SHELL := /bin/bash
-.PHONY: all build clean test-quick bench-python bench-php bench-go bench-rust bench-all run analyze help
+.PHONY: all build build-rust clean test-quick bench-python bench-php bench-go bench-rust bench-all run analyze help check-go check-php check-composer check-python check-cargo
 
 # Directories
 ROOT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -42,17 +42,58 @@ TIMESTAMP := $(shell date +%Y-%m-%d-%H%M%S)
 
 all: build
 
-build:
+# Check for required tools
+check-go:
+	@command -v go >/dev/null 2>&1 || { echo "Error: 'go' is required but not installed."; exit 1; }
+
+check-php:
+	@command -v php >/dev/null 2>&1 || { echo "Error: 'php' is required but not installed."; exit 1; }
+
+check-composer:
+	@command -v composer >/dev/null 2>&1 || { echo "Error: 'composer' is required but not installed. Install via: https://getcomposer.org/download/"; exit 1; }
+
+check-python:
+	@command -v python3 >/dev/null 2>&1 || { echo "Error: 'python3' is required but not installed."; exit 1; }
+
+check-cargo:
+	@command -v cargo >/dev/null 2>&1 || { echo "Error: 'cargo' is required but not installed. Install via: https://rustup.rs/"; exit 1; }
+
+build: check-go check-php check-composer check-python
 	@echo "Building load generator..."
 	cd $(ROOT_DIR)/load-generator && go build -o load-generator .
 	@echo "Building Go daemon..."
 	cd $(EXAMPLES)/streaming-daemon-go && go build -o streaming-daemon .
+	@echo "Installing PHP AMP daemon dependencies..."
+	cd $(EXAMPLES)/streaming-daemon-amp && composer install --no-interaction --prefer-dist
+	@echo ""
+	@echo "Checking Python dependencies..."
+	@python3 -c "import uvloop" 2>/dev/null && echo "  uvloop: installed (good for performance)" || \
+		echo "  uvloop: not installed (optional, 2-4x faster event loop). Install with: pip install uvloop"
+	@echo ""
+	@# Build Rust daemon if cargo is available
+	@if command -v cargo >/dev/null 2>&1; then \
+		echo "Building Rust daemon (release mode)..."; \
+		cd $(EXAMPLES)/streaming-daemon-rs && cargo build --release; \
+		echo "Rust daemon built."; \
+	else \
+		echo "Note: cargo not found, skipping Rust daemon build."; \
+		echo "      Install Rust via https://rustup.rs/ to build the Rust daemon."; \
+	fi
+	@echo ""
 	@echo "Build complete."
+
+build-rust: check-cargo
+	@echo "Building Rust daemon (release mode)..."
+	cd $(EXAMPLES)/streaming-daemon-rs && cargo build --release
+	@echo "Rust daemon built: $(RUST_DAEMON)"
 
 clean:
 	rm -f $(LOAD_GEN)
 	rm -f $(GO_DAEMON)
 	rm -rf $(RESULTS)/*
+	rm -rf $(EXAMPLES)/streaming-daemon-amp/vendor
+	rm -f $(EXAMPLES)/streaming-daemon-amp/composer.lock
+	rm -rf $(EXAMPLES)/streaming-daemon-rs/target
 
 # Quick test to verify load generator works
 test-quick: build
@@ -175,7 +216,8 @@ help:
 	@echo "Streaming Daemon Benchmark Suite"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build        - Build load generator and Go daemon"
+	@echo "  build        - Build all daemons (Go, PHP deps, Rust if cargo available), check Python"
+	@echo "  build-rust   - Build Rust daemon only (release mode)"
 	@echo "  test-quick   - Quick 100-connection test"
 	@echo "  run          - Run benchmark for a single daemon (recommended)"
 	@echo "                 Usage: make run DAEMON=go CONNECTIONS=1000 HOLD=30s"
@@ -185,7 +227,7 @@ help:
 	@echo "  bench-rust   - Benchmark Rust daemon (starts daemon)"
 	@echo "  bench-all    - Run all benchmarks"
 	@echo "  analyze      - Analyze results (DIR=path/to/results)"
-	@echo "  clean        - Clean build artifacts"
+	@echo "  clean        - Clean build artifacts (including vendor dirs, Rust target)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  DAEMON       - Daemon to benchmark: go, rust, python, php"
