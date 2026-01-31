@@ -39,6 +39,15 @@ use function Amp\delay;
 const DEFAULT_SOCKET_PATH = '/var/run/streaming-daemon-amp.sock';
 const DEFAULT_SOCKET_MODE = 0660;
 const DEFAULT_SSE_DELAY_MS = 50;
+const MAX_HANDOFF_DATA_SIZE = 65536;  // 64KB - matches Go daemon
+
+// MSG_TRUNC and MSG_CTRUNC may not be defined on all platforms
+if (!defined('MSG_TRUNC')) {
+    define('MSG_TRUNC', 0x20);
+}
+if (!defined('MSG_CTRUNC')) {
+    define('MSG_CTRUNC', 0x08);
+}
 
 // Pre-defined SSE headers to avoid per-connection string building
 const SSE_HEADERS = "HTTP/1.1 200 OK\r\n" .
@@ -161,7 +170,7 @@ function receiveFd(\Socket $socket): array
 {
     $message = [
         'name' => [],
-        'buffer_size' => 4096,  // Handoff data is typically < 1KB
+        'buffer_size' => MAX_HANDOFF_DATA_SIZE,
         'controllen' => socket_cmsg_space(SOL_SOCKET, SCM_RIGHTS, 1),
     ];
 
@@ -170,7 +179,9 @@ function receiveFd(\Socket $socket): array
         throw new RuntimeException('socket_recvmsg failed: ' . socket_strerror(socket_last_error($socket)));
     }
 
-    // Extract the file descriptor from control message
+    // Extract the file descriptor from control message FIRST, before checking
+    // truncation flags. After recvmsg succeeds, any SCM_RIGHTS fds have been
+    // transferred to our process and must be closed to avoid leaks.
     $fd = null;
     if (!empty($message['control'])) {
         foreach ($message['control'] as $cmsg) {
@@ -179,6 +190,20 @@ function receiveFd(\Socket $socket): array
                 break;
             }
         }
+    }
+
+    // Check for truncation - if data exceeded buffer, JSON would be corrupt.
+    // Close the fd first to prevent leaks (SCM_RIGHTS fds are already in our
+    // process after recvmsg succeeds).
+    $flags = $message['flags'] ?? 0;
+    if (($flags & MSG_TRUNC) || ($flags & MSG_CTRUNC)) {
+        if ($fd !== null && function_exists('posix_close')) {
+            posix_close($fd);
+        }
+        $reason = ($flags & MSG_TRUNC)
+            ? 'Handoff data truncated (exceeded ' . MAX_HANDOFF_DATA_SIZE . ' byte buffer)'
+            : 'Control message truncated; fd may be corrupted';
+        throw new RuntimeException($reason);
     }
 
     // Extract the data from iov
