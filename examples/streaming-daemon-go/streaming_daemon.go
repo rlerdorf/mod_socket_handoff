@@ -661,7 +661,8 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	for i := range msgs {
 		fds, err := syscall.ParseUnixRights(&msgs[i])
 		if err != nil {
-			// Not an SCM_RIGHTS message, skip
+			// Not an SCM_RIGHTS message or malformed; log for diagnostics and skip
+			log.Printf("Warning: failed to parse SCM_RIGHTS control message: %v", err)
 			continue
 		}
 		allFds = append(allFds, fds...)
