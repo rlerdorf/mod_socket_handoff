@@ -36,6 +36,7 @@ trap 'cleanup; restore_max_map_count' EXIT INT TERM
 SOCKET="/var/run/streaming-daemon.sock"
 LOAD_GEN="$(dirname "$0")/load-generator/load-generator"
 RESULTS_DIR="$(dirname "$0")/results-$(date +%Y%m%d-%H%M%S)"
+EXAMPLES_DIR="$(cd "$(dirname "$0")/../examples" && pwd)"
 MESSAGE_DELAY_MS=5625  # ~96 second streams with 18 messages (17 delays × 5625ms)
 
 # Connection levels to test
@@ -259,22 +260,22 @@ echo ""
 
 # Test PHP
 test_daemon "php" \
-    "php -dextension=ev.so /home/rlerdorf/mod_socket_handoff/examples/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS --benchmark" \
+    "php -dextension=ev.so $EXAMPLES_DIR/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS --benchmark" \
     "streaming_daemon.php"
 
 # Test Python (using uvloop + 500 thread workers for high concurrency)
 test_daemon "python" \
-    "python3 /home/rlerdorf/mod_socket_handoff/examples/streaming_daemon_async.py -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
+    "python3 $EXAMPLES_DIR/streaming_daemon_async.py -s $SOCKET -m 0666 -d $MESSAGE_DELAY_MS -b 8192 -w 500 --benchmark" \
     "streaming_daemon_async"
 
 # Test Go (disable metrics to avoid port conflicts between test runs)
 test_daemon "go" \
-    "/home/rlerdorf/mod_socket_handoff/examples/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
+    "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
     "streaming-daemon-go/streaming-daemon"
 
 # Test Rust
 test_daemon "rust" \
-    "RUST_LOG=warn DAEMON_TOKEN_DELAY_MS=$MESSAGE_DELAY_MS DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false /home/rlerdorf/mod_socket_handoff/examples/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b mock" \
+    "RUST_LOG=warn DAEMON_TOKEN_DELAY_MS=$MESSAGE_DELAY_MS DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false $EXAMPLES_DIR/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b mock" \
     "streaming-daemon-rs"
 
 
