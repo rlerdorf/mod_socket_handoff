@@ -1,0 +1,12 @@
+# Compiled binary
+streaming-daemon-uring
+
+# Object files
+*.o
+
+# Editor files
+*.swp
+*~
+
+# Local config
+streaming-daemon.toml
