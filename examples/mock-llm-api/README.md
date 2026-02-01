@@ -86,7 +86,7 @@ data: [DONE]
 # Terminal 2: Configure and start Rust daemon
 export DAEMON_BACKEND_PROVIDER=openai
 export OPENAI_API_BASE=http://localhost:8080
-./streaming-daemon-rust
+./streaming-daemon-rs
 ```
 
 ### With Benchmark Suite

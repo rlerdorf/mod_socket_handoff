@@ -11,7 +11,24 @@ pub struct ResponseChunks {
 impl ResponseChunks {
     /// Generate pre-computed chunks at startup.
     /// Words are cycled if chunk_count exceeds word list length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chunk_count` is zero. Use a value of at least 1 to
+    /// produce a valid streaming response.
+    ///
+    /// # Note
+    ///
+    /// The JSON escaping only handles backslashes and quotes. The built-in
+    /// word list contains only simple ASCII text. If extending with custom
+    /// content containing control characters (newlines, tabs), use proper
+    /// JSON serialization.
     pub fn new(chunk_count: usize) -> Self {
+        assert!(
+            chunk_count >= 1,
+            "ResponseChunks::new requires chunk_count >= 1 to produce a valid streaming response"
+        );
+
         const WORDS: &[&str] = &[
             "Hello",
             " world",
@@ -92,6 +109,7 @@ impl ResponseChunks {
     }
 
     /// Whether there are no content chunks
+    #[allow(dead_code)] // Required by Rust convention when implementing len()
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }
@@ -107,4 +125,85 @@ pub fn models_response() -> Bytes {
 /// Pre-computed response for /health endpoint
 pub fn health_response() -> Bytes {
     Bytes::from_static(br#"{"status":"ok"}"#)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_response_chunks_new() {
+        let chunks = ResponseChunks::new(5);
+        assert_eq!(chunks.len(), 5);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_response_chunks_content_format() {
+        let chunks = ResponseChunks::new(1);
+        let content: Vec<Bytes> = chunks.content_chunks().collect();
+        assert_eq!(content.len(), 1);
+
+        let chunk_str = String::from_utf8_lossy(&content[0]);
+        // Verify SSE format
+        assert!(chunk_str.starts_with("data: "));
+        assert!(chunk_str.ends_with("\n\n"));
+        // Verify JSON structure
+        assert!(chunk_str.contains("\"id\":\"chatcmpl-mock\""));
+        assert!(chunk_str.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(chunk_str.contains("\"delta\":{\"content\":"));
+        assert!(chunk_str.contains("\"finish_reason\":null"));
+    }
+
+    #[test]
+    fn test_response_chunks_final_chunk_format() {
+        let chunks = ResponseChunks::new(1);
+        let final_chunk = chunks.final_chunk();
+        let chunk_str = String::from_utf8_lossy(&final_chunk);
+
+        assert!(chunk_str.starts_with("data: "));
+        assert!(chunk_str.contains("\"finish_reason\":\"stop\""));
+        assert!(chunk_str.contains("\"delta\":{}"));
+    }
+
+    #[test]
+    fn test_response_chunks_done_marker() {
+        let chunks = ResponseChunks::new(1);
+        let done = chunks.done_chunk();
+        assert_eq!(&done[..], b"data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn test_response_chunks_cycling() {
+        // Test that words cycle when chunk_count exceeds word list
+        let chunks = ResponseChunks::new(100);
+        assert_eq!(chunks.len(), 100);
+
+        // All chunks should be valid SSE format
+        for chunk in chunks.content_chunks() {
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            assert!(chunk_str.starts_with("data: "));
+            assert!(chunk_str.ends_with("\n\n"));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk_count >= 1")]
+    fn test_response_chunks_zero_panics() {
+        ResponseChunks::new(0);
+    }
+
+    #[test]
+    fn test_models_response_valid_json() {
+        let response = models_response();
+        let json_str = String::from_utf8_lossy(&response);
+        assert!(json_str.contains("\"object\":\"list\""));
+        assert!(json_str.contains("\"id\":\"mock-model\""));
+    }
+
+    #[test]
+    fn test_health_response_valid_json() {
+        let response = health_response();
+        assert_eq!(&response[..], br#"{"status":"ok"}"#);
+    }
 }

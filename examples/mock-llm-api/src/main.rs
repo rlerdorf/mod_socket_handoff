@@ -75,7 +75,5 @@ async fn run_server(config: Config) {
         config.worker_threads()
     );
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server error");
+    axum::serve(listener, app).await.expect("Server error");
 }

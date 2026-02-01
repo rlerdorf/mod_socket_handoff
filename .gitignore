@@ -28,6 +28,7 @@ examples/fdrecv
 
 # Rust build artifacts
 examples/streaming-daemon-rs/target/
+examples/mock-llm-api/target/
 
 # Python bytecode
 *.pyc

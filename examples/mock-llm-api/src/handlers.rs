@@ -58,7 +58,7 @@ pub async fn chat_completions(State(state): State<Arc<AppState>>) -> impl IntoRe
         .header(header::CACHE_CONTROL, "no-cache")
         .header("X-Accel-Buffering", "no")
         .body(Body::from_stream(delayed_stream))
-        .unwrap()
+        .expect("failed to build SSE response")
 }
 
 /// GET /v1/models
@@ -69,7 +69,7 @@ pub async fn list_models() -> impl IntoResponse {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(models_response()))
-        .unwrap()
+        .expect("failed to build models response")
 }
 
 /// GET /health
@@ -80,5 +80,5 @@ pub async fn health() -> impl IntoResponse {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(health_response()))
-        .unwrap()
+        .expect("failed to build health response")
 }
