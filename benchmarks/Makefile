@@ -11,7 +11,7 @@
 #   make clean          - Clean build artifacts
 
 SHELL := /bin/bash
-.PHONY: all build build-rust clean test-quick bench-python bench-php bench-go bench-rust bench-all run analyze help check-go check-php check-composer check-python check-cargo
+.PHONY: all build build-rust build-uring clean test-quick bench-python bench-php bench-go bench-rust bench-uring bench-all run analyze help check-go check-php check-composer check-python check-cargo check-liburing
 
 # Directories
 ROOT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -25,12 +25,14 @@ PYTHON_DAEMON := $(EXAMPLES)/streaming_daemon_async.py
 PHP_DAEMON := $(EXAMPLES)/streaming-daemon-amp/streaming_daemon.php
 GO_DAEMON := $(EXAMPLES)/streaming-daemon-go/streaming-daemon
 RUST_DAEMON := $(EXAMPLES)/streaming-daemon-rs/target/release/streaming-daemon-rs
+URING_DAEMON := $(EXAMPLES)/streaming-daemon-uring/streaming-daemon-uring
 
 # Socket paths
 PYTHON_SOCKET := /var/run/streaming-daemon-py.sock
 PHP_SOCKET := /var/run/streaming-daemon-amp.sock
 GO_SOCKET := /var/run/streaming-daemon.sock
 RUST_SOCKET := /var/run/streaming-daemon-rs.sock
+URING_SOCKET := /var/run/streaming-daemon-uring.sock
 
 # Default test parameters
 CONNECTIONS ?= 1000
@@ -58,6 +60,9 @@ check-python:
 check-cargo:
 	@command -v cargo >/dev/null 2>&1 || { echo "Error: 'cargo' is required but not installed. Install via: https://rustup.rs/"; exit 1; }
 
+check-liburing:
+	@pkg-config --exists liburing 2>/dev/null || { echo "Error: 'liburing-dev' is required but not installed. Install via: apt-get install liburing-dev"; exit 1; }
+
 build: check-go check-php check-composer check-python
 	@echo "Building load generator..."
 	cd $(ROOT_DIR)/load-generator && go build -o load-generator .
@@ -80,12 +85,27 @@ build: check-go check-php check-composer check-python
 		echo "      Install Rust via https://rustup.rs/ to build the Rust daemon."; \
 	fi
 	@echo ""
+	@# Build C io_uring daemon if liburing is available
+	@if pkg-config --exists liburing 2>/dev/null; then \
+		echo "Building C io_uring daemon..."; \
+		cd $(EXAMPLES)/streaming-daemon-uring && make; \
+		echo "C io_uring daemon built."; \
+	else \
+		echo "Note: liburing not found, skipping C io_uring daemon build."; \
+		echo "      Install via: apt-get install liburing-dev"; \
+	fi
+	@echo ""
 	@echo "Build complete."
 
 build-rust: check-cargo
 	@echo "Building Rust daemon (release mode)..."
 	cd $(EXAMPLES)/streaming-daemon-rs && cargo build --release
 	@echo "Rust daemon built: $(RUST_DAEMON)"
+
+build-uring: check-liburing
+	@echo "Building C io_uring daemon..."
+	cd $(EXAMPLES)/streaming-daemon-uring && make
+	@echo "C io_uring daemon built: $(URING_DAEMON)"
 
 clean:
 	rm -f $(LOAD_GEN)
@@ -94,6 +114,7 @@ clean:
 	rm -rf $(EXAMPLES)/streaming-daemon-amp/vendor
 	rm -f $(EXAMPLES)/streaming-daemon-amp/composer.lock
 	rm -rf $(EXAMPLES)/streaming-daemon-rs/target
+	cd $(EXAMPLES)/streaming-daemon-uring && make clean 2>/dev/null || true
 
 # Quick test to verify load generator works
 test-quick: build
@@ -150,7 +171,7 @@ bench-go: build
 	@echo "=== Benchmarking Go daemon ==="
 	@mkdir -p $(RESULTS)/$(TIMESTAMP)/go
 	@echo "Starting Go daemon..."
-	sudo $(GO_DAEMON) -max-connections 100000 -pprof-addr localhost:6060 -socket-mode 0666 &
+	sudo $(GO_DAEMON) -max-connections 100000 -pprof-addr localhost:6060 -socket-mode 0660 &
 	@sleep 2
 	@echo "Collecting resources (memory, CPU, connections)..."
 	$(SCRIPTS)/collect-resources.sh $$(pgrep -f "streaming-daemon" | head -1) $(RESULTS)/$(TIMESTAMP)/go/resources.csv 9090 &
@@ -190,8 +211,34 @@ bench-rust:
 	@sudo pkill -f "streaming-daemon-rs" || true
 	@echo "Rust benchmark complete."
 
+# Benchmark C io_uring daemon
+bench-uring: build
+	@echo "=== Benchmarking C io_uring daemon ==="
+	@mkdir -p $(RESULTS)/$(TIMESTAMP)/uring
+	@if [ ! -f $(URING_DAEMON) ]; then \
+		echo "Building C io_uring daemon..."; \
+		cd $(EXAMPLES)/streaming-daemon-uring && make; \
+	fi
+	@echo "Starting C io_uring daemon..."
+	@# Note: delay=0 for benchmarking raw throughput (blocking sleep would stall event loop)
+	sudo $(URING_DAEMON) --socket $(URING_SOCKET) --socket-mode 0660 \
+		--max-connections 100000 --delay 0 --benchmark &
+	@sleep 2
+	@echo "Collecting resources (memory, CPU)..."
+	$(SCRIPTS)/collect-resources.sh $$(pgrep -f "streaming-daemon-uring" | head -1) $(RESULTS)/$(TIMESTAMP)/uring/resources.csv &
+	@echo "Running load test..."
+	$(LOAD_GEN) -socket $(URING_SOCKET) \
+		-connections $(CONNECTIONS) \
+		-ramp-up $(RAMP_UP) \
+		-hold $(HOLD) \
+		-output $(RESULTS)/$(TIMESTAMP)/uring/latency.json
+	@sleep 3
+	@pkill -f "collect-resources.sh" || true
+	@sudo pkill -f "streaming-daemon-uring" || true
+	@echo "C io_uring benchmark complete."
+
 # Run all benchmarks
-bench-all: bench-python bench-php bench-go bench-rust
+bench-all: bench-python bench-php bench-go bench-rust bench-uring
 	@echo "=== All benchmarks complete ==="
 	@echo "Results in $(RESULTS)/$(TIMESTAMP)/"
 
@@ -216,8 +263,9 @@ help:
 	@echo "Streaming Daemon Benchmark Suite"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build        - Build all daemons (Go, PHP deps, Rust if cargo available), check Python"
+	@echo "  build        - Build all daemons (Go, PHP deps, Rust, C io_uring if available)"
 	@echo "  build-rust   - Build Rust daemon only (release mode)"
+	@echo "  build-uring  - Build C io_uring daemon only"
 	@echo "  test-quick   - Quick 100-connection test"
 	@echo "  run          - Run benchmark for a single daemon (recommended)"
 	@echo "                 Usage: make run DAEMON=go CONNECTIONS=1000 HOLD=30s"
@@ -225,17 +273,18 @@ help:
 	@echo "  bench-php    - Benchmark PHP AMP daemon (starts daemon)"
 	@echo "  bench-go     - Benchmark Go daemon (starts daemon)"
 	@echo "  bench-rust   - Benchmark Rust daemon (starts daemon)"
+	@echo "  bench-uring  - Benchmark C io_uring daemon (starts daemon)"
 	@echo "  bench-all    - Run all benchmarks"
 	@echo "  analyze      - Analyze results (DIR=path/to/results)"
 	@echo "  clean        - Clean build artifacts (including vendor dirs, Rust target)"
 	@echo ""
 	@echo "Variables:"
-	@echo "  DAEMON       - Daemon to benchmark: go, rust, python, php"
+	@echo "  DAEMON       - Daemon to benchmark: go, rust, python, php, uring"
 	@echo "  CONNECTIONS  - Target connections (default: 1000)"
 	@echo "  RAMP_UP      - Ramp-up time (default: 10s)"
 	@echo "  HOLD         - Hold time (default: 60s)"
 	@echo ""
 	@echo "Example:"
 	@echo "  # Start daemon manually, then run benchmark"
-	@echo "  sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0666 &"
+	@echo "  sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0660 &"
 	@echo "  make run DAEMON=go CONNECTIONS=500 HOLD=30s"

@@ -8,7 +8,7 @@
 #   sudo ./run_full_benchmark.sh php go       # Run PHP and Go daemons
 #   sudo ./run_full_benchmark.sh --help       # Show help
 #
-# Available daemons: php, python, go, rust
+# Available daemons: php, python, go, rust, uring
 #
 # Tests daemon implementations at multiple connection levels
 # and measures TTFB, memory, CPU, and peak concurrency.
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             echo "Run benchmarks for streaming daemons."
             echo ""
             echo "Arguments:"
-            echo "  daemon    One or more daemons to benchmark: php, python, go, rust"
+            echo "  daemon    One or more daemons to benchmark: php, python, go, rust, uring"
             echo "            If not specified, all daemons are benchmarked."
             echo ""
             echo "Examples:"
@@ -35,13 +35,13 @@ while [[ $# -gt 0 ]]; do
             echo "  sudo $0 php go       # Benchmark PHP and Go"
             exit 0
             ;;
-        php|python|go|rust)
+        php|python|go|rust|uring)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown daemon '$1'"
-            echo "Valid daemons: php, python, go, rust"
+            echo "Valid daemons: php, python, go, rust, uring"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -50,7 +50,7 @@ done
 
 # Default to all daemons if none specified
 if [ ${#DAEMONS_TO_RUN[@]} -eq 0 ]; then
-    DAEMONS_TO_RUN=(php python go rust)
+    DAEMONS_TO_RUN=(php python go rust uring)
 fi
 
 # Helper function to check if a daemon should be run
@@ -133,9 +133,10 @@ cleanup() {
     local rust_pids=$(pgrep -f "streaming-daemon-rs" 2>/dev/null || true)
     local py_pids=$(pgrep -f "streaming_daemon_async.py" 2>/dev/null || true)
     local php_pids=$(pgrep -f "streaming_daemon.php" 2>/dev/null || true)
+    local uring_pids=$(pgrep -f "streaming-daemon-uring" 2>/dev/null || true)
 
     # Send SIGTERM first for graceful shutdown (allows socket cleanup)
-    for pid in $go_pids $rust_pids $py_pids $php_pids; do
+    for pid in $go_pids $rust_pids $py_pids $php_pids $uring_pids; do
         if [ -n "$pid" ]; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -145,7 +146,7 @@ cleanup() {
     local tries=0
     while [ $tries -lt 5 ]; do
         local still_running=false
-        for pid in $go_pids $rust_pids $py_pids $php_pids; do
+        for pid in $go_pids $rust_pids $py_pids $php_pids $uring_pids; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 still_running=true
                 break
@@ -159,7 +160,7 @@ cleanup() {
     done
 
     # Force kill any remaining processes
-    for pid in $go_pids $rust_pids $py_pids $php_pids; do
+    for pid in $go_pids $rust_pids $py_pids $php_pids $uring_pids; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Force killing PID $pid..."
             kill -9 "$pid" 2>/dev/null || true
@@ -272,7 +273,8 @@ test_daemon() {
         local ttfb_p99=$(jq -r '.ttfb_latency_ms.p99 // 0' "$json_file" 2>/dev/null || echo 0)
 
         # Get peak concurrent from daemon log (if available)
-        local peak_concurrent=$(grep -o "Peak concurrent streams: [0-9]*" "$daemon_log" 2>/dev/null | grep -o '[0-9]*' | tail -1 || echo "-")
+        # Match both "Peak concurrent streams:" (Go) and "Peak concurrent:" (uring)
+        local peak_concurrent=$(grep -oE "Peak concurrent( streams)?: [0-9]+" "$daemon_log" 2>/dev/null | grep -o '[0-9]*' | tail -1 || echo "-")
 
         # Stop daemon and get final summary
         pkill -TERM -f "$pattern" 2>/dev/null || true
@@ -280,7 +282,7 @@ test_daemon() {
 
         # If peak_concurrent not found yet, check again after shutdown
         if [ "$peak_concurrent" = "-" ] || [ -z "$peak_concurrent" ]; then
-            peak_concurrent=$(grep -o "Peak concurrent streams: [0-9]*" "$daemon_log" 2>/dev/null | grep -o '[0-9]*' | tail -1 || echo "0")
+            peak_concurrent=$(grep -oE "Peak concurrent( streams)?: [0-9]+" "$daemon_log" 2>/dev/null | grep -o '[0-9]*' | tail -1 || echo "0")
         fi
 
         # Print results
@@ -334,7 +336,7 @@ fi
 # Test Go (disable metrics to avoid port conflicts between test runs)
 if should_run go; then
     test_daemon "go" \
-        "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
+        "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0660 -metrics-addr=" \
         "streaming-daemon-go/streaming-daemon"
 fi
 
@@ -343,6 +345,17 @@ if should_run rust; then
     test_daemon "rust" \
         "RUST_LOG=warn DAEMON_TOKEN_DELAY_MS=$MESSAGE_DELAY_MS DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false $EXAMPLES_DIR/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b mock" \
         "streaming-daemon-rs"
+fi
+
+# Test C io_uring
+# Note: delay=0 because blocking nanosleep stalls the single-threaded event loop
+# Note: max-connections capped at 110000 to limit total memory consumption
+# For realistic stream timing benchmarks, compare with Go/Rust which use per-connection tasks
+if should_run uring; then
+    URING_MAX_CONNS=$((MAX_CONNECTIONS > 110000 ? 110000 : MAX_CONNECTIONS))
+    test_daemon "uring" \
+        "$EXAMPLES_DIR/streaming-daemon-uring/streaming-daemon-uring --socket $SOCKET --socket-mode 0660 --max-connections ${URING_MAX_CONNS} --delay 0 --benchmark" \
+        "streaming-daemon-uring"
 fi
 
 
@@ -368,7 +381,7 @@ EOF
 
 sed -i "s/DATE_PLACEHOLDER/$(date)/" "$RESULTS_DIR/REPORT.md"
 
-for daemon in php python go rust; do
+for daemon in php python go rust uring; do
     if [ -f "$RESULTS_DIR/${daemon}.csv" ]; then
         echo "### ${daemon^}" >> "$RESULTS_DIR/REPORT.md"
         echo "" >> "$RESULTS_DIR/REPORT.md"

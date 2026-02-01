@@ -1,0 +1,41 @@
+# Example configuration for streaming-daemon-uring
+# Copy to streaming-daemon.toml or /etc/streaming-daemon.toml
+
+[server]
+# Unix socket path for receiving connections from Apache
+socket = "/var/run/streaming-daemon.sock"
+
+# Socket permissions (octal)
+socket_mode = 0660
+
+# Maximum concurrent connections
+max_connections = 10000
+
+[timeouts]
+# Timeout for writing to client (ms)
+write_timeout_ms = 30000
+
+# Graceful shutdown timeout (seconds)
+shutdown_timeout_s = 120
+
+[streaming]
+# Delay between SSE messages (ms, 0 for benchmarks)
+delay = 50
+
+[thread_pool]
+# Enable thread pool for LLM API calls
+thread_pool = false
+
+# Number of worker threads
+pool_size = 8
+
+[performance]
+# Enable SQPOLL (kernel polling, requires root/CAP_SYS_NICE)
+sqpoll = false
+
+[monitoring]
+# Prometheus metrics port (0 to disable)
+metrics_port = 0
+
+# Enable benchmark mode (stats on exit)
+benchmark = false
