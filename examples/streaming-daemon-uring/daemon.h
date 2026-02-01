@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include <liburing.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>

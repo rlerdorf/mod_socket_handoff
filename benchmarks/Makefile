@@ -212,7 +212,7 @@ bench-rust:
 	@echo "Rust benchmark complete."
 
 # Benchmark C io_uring daemon
-bench-uring:
+bench-uring: build
 	@echo "=== Benchmarking C io_uring daemon ==="
 	@mkdir -p $(RESULTS)/$(TIMESTAMP)/uring
 	@if [ ! -f $(URING_DAEMON) ]; then \

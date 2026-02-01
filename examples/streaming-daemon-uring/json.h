@@ -10,6 +10,7 @@
 #undef JSMN_HEADER
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /* Maximum tokens for handoff JSON (object + ~10 key-value pairs) */
 #define MAX_JSON_TOKENS 32
