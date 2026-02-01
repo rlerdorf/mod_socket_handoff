@@ -90,6 +90,11 @@ impl ResponseChunks {
     pub fn len(&self) -> usize {
         self.chunks.len()
     }
+
+    /// Whether there are no content chunks
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
 }
 
 /// Pre-computed JSON response for /v1/models endpoint

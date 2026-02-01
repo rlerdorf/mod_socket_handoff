@@ -25,14 +25,16 @@ pub async fn chat_completions(State(state): State<Arc<AppState>>) -> impl IntoRe
     let delay = state.chunk_delay;
 
     // Build the stream: content chunks + final chunk + done marker
-    let content_stream = stream::iter(state.chunks.content_chunks().collect::<Vec<_>>());
+    // Note: collect() is required here to create owned data that outlives the borrow of `state`
+    let chunks: Vec<Bytes> = state.chunks.content_chunks().collect();
     let final_chunk = state.chunks.final_chunk();
     let done_chunk = state.chunks.done_chunk();
 
-    // Add delays between chunks
-    let delayed_stream = content_stream
-        .then(move |chunk| async move {
-            if delay > Duration::ZERO {
+    // Add delays between chunks (first chunk sent immediately, then delays between subsequent)
+    let delayed_stream = stream::iter(chunks)
+        .enumerate()
+        .then(move |(index, chunk)| async move {
+            if index > 0 && delay > Duration::ZERO {
                 tokio::time::sleep(delay).await;
             }
             Ok::<Bytes, Infallible>(chunk)
@@ -43,7 +45,12 @@ pub async fn chat_completions(State(state): State<Arc<AppState>>) -> impl IntoRe
             }
             Ok::<Bytes, Infallible>(final_chunk)
         }))
-        .chain(stream::once(async move { Ok::<Bytes, Infallible>(done_chunk) }));
+        .chain(stream::once(async move {
+            if delay > Duration::ZERO {
+                tokio::time::sleep(delay).await;
+            }
+            Ok::<Bytes, Infallible>(done_chunk)
+        }));
 
     Response::builder()
         .status(StatusCode::OK)
