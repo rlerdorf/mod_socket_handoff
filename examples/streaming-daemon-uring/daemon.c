@@ -183,7 +183,7 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
             break;
         case 'M':
             ctx->metrics_port = atoi(optarg);
-            if (ctx->metrics_port < 1 || ctx->metrics_port > 65535) {
+            if (ctx->metrics_port < 0 || ctx->metrics_port > 65535) {
                 fprintf(stderr, "Invalid metrics port: %s\n", optarg);
                 return -1;
             }
@@ -311,7 +311,14 @@ static void start_streaming(daemon_ctx_t *ctx, connection_t *conn) {
     }
 
     /* Link timeout */
-    ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms);
+    if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
+        fprintf(stderr, "Failed to submit linked timeout\n");
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_failed, 1);
+        }
+        conn_free(ctx, conn);
+        return;
+    }
 }
 
 /* Handle recvmsg completion (fd received) */
@@ -458,7 +465,13 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
             conn_free(ctx, conn);
             return;
         }
-        ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms);
+        if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_failed, 1);
+            }
+            conn_free(ctx, conn);
+            return;
+        }
         return;
     }
 
@@ -500,7 +513,13 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         conn_free(ctx, conn);
         return;
     }
-    ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms);
+    if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_failed, 1);
+        }
+        conn_free(ctx, conn);
+        return;
+    }
 }
 
 /* Process a completion queue entry */

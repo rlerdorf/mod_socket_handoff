@@ -336,7 +336,7 @@ fi
 # Test Go (disable metrics to avoid port conflicts between test runs)
 if should_run go; then
     test_daemon "go" \
-        "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0666 -metrics-addr=" \
+        "$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -benchmark -message-delay ${MESSAGE_DELAY_MS}ms -max-connections ${MAX_CONNECTIONS} -socket-mode 0660 -metrics-addr=" \
         "streaming-daemon-go/streaming-daemon"
 fi
 
@@ -354,7 +354,7 @@ fi
 if should_run uring; then
     URING_MAX_CONNS=$((MAX_CONNECTIONS > 110000 ? 110000 : MAX_CONNECTIONS))
     test_daemon "uring" \
-        "$EXAMPLES_DIR/streaming-daemon-uring/streaming-daemon-uring --socket $SOCKET --socket-mode 0666 --max-connections ${URING_MAX_CONNS} --delay 0 --benchmark" \
+        "$EXAMPLES_DIR/streaming-daemon-uring/streaming-daemon-uring --socket $SOCKET --socket-mode 0660 --max-connections ${URING_MAX_CONNS} --delay 0 --benchmark" \
         "streaming-daemon-uring"
 fi
 

@@ -95,12 +95,6 @@ static int parse_line(daemon_ctx_t *ctx, const char *key, const char *value) {
                 return -1;
             }
             ctx->metrics_port = (int)num;
-        } else if (strcmp(key, "handoff_timeout_ms") == 0) {
-            if (num < 1 || num > 60000) {
-                fprintf(stderr, "handoff_timeout_ms out of range (1-60000): %ld\n", num);
-                return -1;
-            }
-            ctx->handoff_timeout_ms = (int)num;
         } else if (strcmp(key, "write_timeout_ms") == 0) {
             if (num < 1 || num > 300000) {
                 fprintf(stderr, "write_timeout_ms out of range (1-300000): %ld\n", num);

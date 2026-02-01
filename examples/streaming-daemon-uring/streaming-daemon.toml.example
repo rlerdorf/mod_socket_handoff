@@ -12,9 +12,6 @@ socket_mode = 0660
 max_connections = 10000
 
 [timeouts]
-# Timeout for receiving handoff data from Apache (ms)
-handoff_timeout_ms = 5000
-
 # Timeout for writing to client (ms)
 write_timeout_ms = 30000
 

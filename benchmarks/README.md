@@ -74,7 +74,7 @@ This builds:
 
 ```bash
 # Start Go daemon
-sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0666 &
+sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0660 &
 
 # Run 100 connections
 ./benchmarks/load-generator/load-generator \
@@ -115,7 +115,7 @@ For manual testing of individual daemons:
 sudo rm -f /var/run/streaming-daemon.sock
 sudo ./examples/streaming-daemon-go/streaming-daemon \
   -max-connections 10000 \
-  -socket-mode 0666 &
+  -socket-mode 0660 &
 
 # Run benchmark
 ./benchmarks/load-generator/load-generator \

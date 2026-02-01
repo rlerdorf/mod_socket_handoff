@@ -154,9 +154,18 @@ int backend_process(connection_t *conn) {
     char url[512];
     snprintf(url, sizeof(url), "%s/chat/completions", api_base);
 
-    /* Build request body */
-    const char *model = conn->data.model ? conn->data.model : default_model;
+    /* Build request body
+     * NOTE: Copy prompt and model now since we may overwrite handoff_buf later
+     * with the LLM response. conn->data.prompt/model point into handoff_buf.
+     */
+    char prompt_copy[8192];
+    char model_copy[128];
     const char *prompt = conn->data.prompt ? conn->data.prompt : "Hello";
+    const char *model = conn->data.model ? conn->data.model : default_model;
+    snprintf(prompt_copy, sizeof(prompt_copy), "%s", prompt);
+    snprintf(model_copy, sizeof(model_copy), "%s", model);
+    prompt = prompt_copy;
+    model = model_copy;
     int max_tokens = conn->data.max_tokens > 0 ? conn->data.max_tokens : 1024;
 
     /* Escape prompt for JSON */
@@ -291,8 +300,14 @@ int backend_process(connection_t *conn) {
 
     free(resp.buffer);
 
-    /* Store accumulated response for streaming */
-    /* We'll use the connection's handoff_buf to store it since we're done with handoff data */
+    /* Store accumulated response for streaming.
+     * We reuse handoff_buf since we're done with handoff data.
+     * IMPORTANT: Clear data.prompt/model pointers since they pointed into
+     * handoff_buf and are now invalid after this overwrite.
+     */
+    conn->data.prompt = NULL;
+    conn->data.model = NULL;
+
     if (acc_len > 0 && acc_len < MAX_HANDOFF_DATA_SIZE) {
         memcpy(conn->handoff_buf, accumulated, acc_len + 1);
         conn->handoff_len = acc_len;
@@ -304,7 +319,11 @@ int backend_process(connection_t *conn) {
         conn->handoff_len = copy_len;
     }
 
-    /* Initialize streaming - we'll need to modify streaming.c to support this */
+    /* Initialize streaming
+     * NOTE: Currently streaming.c uses demo messages, not the accumulated
+     * LLM response. The accumulated content in handoff_buf is available
+     * but not wired into the SSE stream yet.
+     */
     stream_start(conn);
 
     return 0;

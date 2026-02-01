@@ -171,7 +171,7 @@ bench-go: build
 	@echo "=== Benchmarking Go daemon ==="
 	@mkdir -p $(RESULTS)/$(TIMESTAMP)/go
 	@echo "Starting Go daemon..."
-	sudo $(GO_DAEMON) -max-connections 100000 -pprof-addr localhost:6060 -socket-mode 0666 &
+	sudo $(GO_DAEMON) -max-connections 100000 -pprof-addr localhost:6060 -socket-mode 0660 &
 	@sleep 2
 	@echo "Collecting resources (memory, CPU, connections)..."
 	$(SCRIPTS)/collect-resources.sh $$(pgrep -f "streaming-daemon" | head -1) $(RESULTS)/$(TIMESTAMP)/go/resources.csv 9090 &
@@ -221,7 +221,7 @@ bench-uring:
 	fi
 	@echo "Starting C io_uring daemon..."
 	@# Note: delay=0 for benchmarking raw throughput (blocking sleep would stall event loop)
-	sudo $(URING_DAEMON) --socket $(URING_SOCKET) --socket-mode 0666 \
+	sudo $(URING_DAEMON) --socket $(URING_SOCKET) --socket-mode 0660 \
 		--max-connections 100000 --delay 0 --benchmark &
 	@sleep 2
 	@echo "Collecting resources (memory, CPU)..."
@@ -286,5 +286,5 @@ help:
 	@echo ""
 	@echo "Example:"
 	@echo "  # Start daemon manually, then run benchmark"
-	@echo "  sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0666 &"
+	@echo "  sudo ./examples/streaming-daemon-go/streaming-daemon -socket-mode 0660 &"
 	@echo "  make run DAEMON=go CONNECTIONS=500 HOLD=30s"
