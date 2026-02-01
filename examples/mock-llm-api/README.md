@@ -7,7 +7,7 @@ High-performance mock OpenAI-compatible streaming API server for benchmarking st
 This server simulates an OpenAI Chat Completions streaming endpoint. It's designed to be fast enough that it never becomes a bottleneck during daemon benchmarks.
 
 Key characteristics:
-- **Zero allocation per request** - All SSE chunks are pre-computed at startup
+- **Minimal per-request allocation** - SSE chunks are pre-computed at startup
 - **Request body ignored** - No JSON parsing overhead
 - **Configurable timing** - Simulate realistic LLM response delays
 
@@ -103,7 +103,7 @@ make benchmark-rust DAEMON_BACKEND=openai OPENAI_API_BASE=http://localhost:8080
 
 The server is designed for maximum throughput:
 
-- Pre-computed byte buffers eliminate per-request allocations
+- Pre-computed byte buffers minimize per-request allocations
 - No request body parsing - just streams the response
 - Multi-threaded Tokio runtime for concurrent connections
 - Minimal logging in production (`--quiet`)

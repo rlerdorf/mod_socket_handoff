@@ -1,7 +1,8 @@
 use bytes::Bytes;
 
-/// Pre-computed SSE response chunks for zero-allocation streaming.
+/// Pre-computed SSE response chunks to minimize per-request allocations.
 /// Each chunk is a complete SSE data line with trailing newlines.
+/// Note: Bytes::clone() is used per-request but is cheap (reference counted).
 pub struct ResponseChunks {
     chunks: Vec<Bytes>,
     final_chunk: Bytes,
