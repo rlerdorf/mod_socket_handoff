@@ -258,7 +258,7 @@ static void handle_accept(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
     }
 
     conn->unix_fd = fd;
-    conn->state = CONN_STATE_RECEIVING_FD;
+    atomic_store(&conn->state, CONN_STATE_RECEIVING_FD);
     clock_gettime(CLOCK_MONOTONIC, &conn->start_time);
 
     if (ctx->benchmark_mode) {
@@ -341,12 +341,12 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
     }
 
     /* Parse handoff data */
-    conn->state = CONN_STATE_PARSING;
+    atomic_store(&conn->state, CONN_STATE_PARSING);
     handoff_parse_data(conn->handoff_buf, conn->handoff_len, &conn->data);
 
     if (ctx->use_thread_pool) {
         /* Submit to thread pool for LLM processing */
-        conn->state = CONN_STATE_LLM_QUEUED;
+        atomic_store(&conn->state, CONN_STATE_LLM_QUEUED);
         if (pool_submit(ctx->pool, conn) < 0) {
             fprintf(stderr, "Failed to submit to thread pool\n");
             if (ctx->benchmark_mode) {
@@ -356,7 +356,7 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
         }
     } else {
         /* Direct streaming (Phase 1 mode) */
-        conn->state = CONN_STATE_STREAMING;
+        atomic_store(&conn->state, CONN_STATE_STREAMING);
         stream_start(conn);
         start_streaming(ctx, conn);
     }
@@ -372,9 +372,10 @@ static void handle_eventfd(daemon_ctx_t *ctx) {
     /* Process all completed connections */
     connection_t *conn;
     while ((conn = pool_get_completion(ctx->pool)) != NULL) {
-        if (conn->state == CONN_STATE_STREAMING) {
+        conn_state_t state = atomic_load(&conn->state);
+        if (state == CONN_STATE_STREAMING) {
             start_streaming(ctx, conn);
-        } else if (conn->state == CONN_STATE_CLOSING) {
+        } else if (state == CONN_STATE_CLOSING) {
             /* Backend failed */
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
@@ -410,7 +411,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
     }
 
     /* Check if we're done (after sending [DONE] marker) */
-    if (conn->state == CONN_STATE_CLOSING) {
+    if (atomic_load(&conn->state) == CONN_STATE_CLOSING) {
         /* [DONE] was sent, now complete */
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_completed, 1);
@@ -429,7 +430,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         static const char done[] = SSE_DONE;
 
         /* Mark as closing BEFORE submitting write */
-        conn->state = CONN_STATE_CLOSING;
+        atomic_store(&conn->state, CONN_STATE_CLOSING);
 
         if (ring_submit_write(ctx, conn, done, sizeof(done) - 1) < 0) {
             if (ctx->benchmark_mode) {
@@ -497,7 +498,7 @@ static void process_cqe(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
 
     case OP_RECV_FD: {
         connection_t *conn = conn_get(ctx, conn_id);
-        if (conn && conn->state == CONN_STATE_RECEIVING_FD) {
+        if (conn && atomic_load(&conn->state) == CONN_STATE_RECEIVING_FD) {
             handle_recv_fd(ctx, conn, cqe);
         }
         break;
@@ -505,8 +506,9 @@ static void process_cqe(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
 
     case OP_WRITE: {
         connection_t *conn = conn_get(ctx, conn_id);
-        if (conn && (conn->state == CONN_STATE_STREAMING ||
-                     conn->state == CONN_STATE_CLOSING)) {
+        conn_state_t state = conn ? atomic_load(&conn->state) : CONN_STATE_UNUSED;
+        if (conn && (state == CONN_STATE_STREAMING ||
+                     state == CONN_STATE_CLOSING)) {
             handle_write(ctx, conn, cqe);
         }
         break;

@@ -9,7 +9,7 @@
 # 5. Generates a quick summary
 #
 # Usage: ./run-benchmark.sh <daemon> [connections] [hold_time] [ramp_up]
-#   daemon:      go, rust, python, php
+#   daemon:      go, rust, python, php, uring
 #   connections: number of concurrent connections (default: 1000)
 #   hold_time:   hold duration (default: 30s)
 #   ramp_up:     ramp-up duration (default: 10s)

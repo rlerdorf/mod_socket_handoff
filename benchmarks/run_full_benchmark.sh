@@ -349,7 +349,7 @@ fi
 
 # Test C io_uring
 # Note: delay=0 because blocking nanosleep stalls the single-threaded event loop
-# Note: max-connections capped at 110000 because connection structs have embedded buffers
+# Note: max-connections capped at 110000 to limit total memory consumption
 # For realistic stream timing benchmarks, compare with Go/Rust which use per-connection tasks
 if should_run uring; then
     URING_MAX_CONNS=$((MAX_CONNECTIONS > 110000 ? 110000 : MAX_CONNECTIONS))

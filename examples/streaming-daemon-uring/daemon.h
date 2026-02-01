@@ -74,7 +74,7 @@ typedef struct {
 /* Per-connection state */
 typedef struct connection {
     uint32_t id;
-    conn_state_t state;
+    _Atomic conn_state_t state;  /* Atomic for thread-safe access from pool workers */
 
     /* File descriptors */
     int unix_fd;        /* Connection from Apache (for receiving fd) */

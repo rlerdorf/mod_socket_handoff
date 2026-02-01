@@ -18,7 +18,7 @@ int conn_pool_init(daemon_ctx_t *ctx) {
     ctx->free_list = NULL;
     for (int i = ctx->max_connections - 1; i >= 0; i--) {
         ctx->connections[i].id = i;
-        ctx->connections[i].state = CONN_STATE_UNUSED;
+        atomic_init(&ctx->connections[i].state, CONN_STATE_UNUSED);
         ctx->connections[i].unix_fd = -1;
         ctx->connections[i].client_fd = -1;
         ctx->connections[i].next_free = ctx->free_list;
@@ -92,7 +92,7 @@ void conn_free(daemon_ctx_t *ctx, connection_t *conn) {
 }
 
 void conn_reset(connection_t *conn) {
-    conn->state = CONN_STATE_UNUSED;
+    atomic_store(&conn->state, CONN_STATE_UNUSED);
     conn->unix_fd = -1;
     conn->client_fd = -1;
     conn->handoff_len = 0;
@@ -115,7 +115,7 @@ connection_t *conn_get(daemon_ctx_t *ctx, uint32_t id) {
 }
 
 void conn_set_state(connection_t *conn, conn_state_t state) {
-    conn->state = state;
+    atomic_store(&conn->state, state);
 }
 
 void conn_close_fds(connection_t *conn) {

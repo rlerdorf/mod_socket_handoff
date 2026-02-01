@@ -5,12 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Demo messages matching Go/Rust daemon behavior */
+/* Demo messages matching Go/Rust daemon behavior.
+ * Total: 2 dynamic + 16 static = 18 messages.
+ */
 static const char *demo_messages[] = {
     "This daemon uses io_uring for async I/O.",
     "Single-threaded event loop with high concurrency.",
     "Expected capacity: 100,000+ concurrent connections.",
-    "Memory per connection: ~8 KB (with 8KB handoff buffer).",
+    "Memory per connection: ~68 KB (64KB handoff + 4KB write buffer).",
     "The Apache worker was freed immediately after handoff.",
     "Replace this mock backend with your LLM API integration.",
     "io_uring provides true async I/O with kernel polling.",
