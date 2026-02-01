@@ -118,6 +118,10 @@ class SharedTicker:
                 raise asyncio.CancelledError
             return self.current_tick
 
+    async def get_tick(self) -> int:
+        async with self._cond:
+            return self.current_tick
+
 
 stats = Stats()
 benchmark_mode = False
@@ -243,7 +247,7 @@ async def stream_response(
         ]
 
         # Stream each line with simulated delay
-        last_tick = ticker.current_tick
+        last_tick = await ticker.get_tick()
         for index, line in enumerate(lines):
             data = json.dumps({"content": line, "index": index})
             sse_msg = f"data: {data}\n\n"
