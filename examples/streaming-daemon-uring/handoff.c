@@ -96,7 +96,7 @@ int handoff_validate_socket(int fd) {
     return 0;
 }
 
-int handoff_parse_data(const char *data, size_t len, handoff_data_t *out) {
+int handoff_parse_data(char *data, size_t len, handoff_data_t *out) {
     memset(out, 0, sizeof(*out));
 
     /* Skip leading whitespace and NUL bytes */
@@ -142,16 +142,16 @@ int handoff_parse_data(const char *data, size_t len, handoff_data_t *out) {
      */
     idx = json_find_key(data, tokens, num_tokens, "prompt");
     if (idx > 0 && tokens[idx].type == JSMN_STRING) {
-        out->prompt = (char *)data + tokens[idx].start;
+        out->prompt = data + tokens[idx].start;
         /* Null-terminate in place (modifying the buffer) */
-        ((char *)data)[tokens[idx].end] = '\0';
+        data[tokens[idx].end] = '\0';
     }
 
     /* Extract model */
     idx = json_find_key(data, tokens, num_tokens, "model");
     if (idx > 0 && tokens[idx].type == JSMN_STRING) {
-        out->model = (char *)data + tokens[idx].start;
-        ((char *)data)[tokens[idx].end] = '\0';
+        out->model = data + tokens[idx].start;
+        data[tokens[idx].end] = '\0';
     }
 
     return 0;

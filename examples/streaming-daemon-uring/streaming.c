@@ -47,7 +47,11 @@ static const char *truncate_prompt(const char *prompt, size_t max_len) {
     if (len <= max_len) {
         return prompt;
     }
-    snprintf(truncated, sizeof(truncated), "%.50s...", prompt);
+    /* Clamp max_len to ensure space for ellipsis and null terminator */
+    if (max_len > sizeof(truncated) - 4) {
+        max_len = sizeof(truncated) - 4;
+    }
+    snprintf(truncated, sizeof(truncated), "%.*s...", (int)max_len, prompt);
     return truncated;
 }
 

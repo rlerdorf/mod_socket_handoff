@@ -16,9 +16,10 @@ int handoff_recv_fd(int unix_fd, int *client_fd,
 
 /* Parse handoff JSON data
  * Populates fields in handoff_data_t, pointing into the data buffer
+ * NOTE: This function modifies the data buffer (null-terminates strings)
  * Returns 0 on success, -1 on error
  */
-int handoff_parse_data(const char *data, size_t len, handoff_data_t *out);
+int handoff_parse_data(char *data, size_t len, handoff_data_t *out);
 
 /* Validate received socket is a stream socket */
 int handoff_validate_socket(int fd);

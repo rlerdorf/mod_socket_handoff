@@ -65,15 +65,55 @@ static int parse_line(daemon_ctx_t *ctx, const char *key, const char *value) {
     char *endptr;
     long num = strtol(value, &endptr, 0);
     if (*endptr == '\0') {
-        if (strcmp(key, "max_connections") == 0) ctx->max_connections = (int)num;
-        else if (strcmp(key, "socket_mode") == 0) ctx->socket_mode = (int)num;
-        else if (strcmp(key, "delay") == 0 || strcmp(key, "message_delay_ms") == 0)
+        if (strcmp(key, "max_connections") == 0) {
+            if (num < 1 || num > 1000000) {
+                fprintf(stderr, "max_connections out of range (1-1000000): %ld\n", num);
+                return -1;
+            }
+            ctx->max_connections = (int)num;
+        } else if (strcmp(key, "socket_mode") == 0) {
+            if (num < 0 || num > 0777) {
+                fprintf(stderr, "socket_mode out of range (0-0777): %ld\n", num);
+                return -1;
+            }
+            ctx->socket_mode = (int)num;
+        } else if (strcmp(key, "delay") == 0 || strcmp(key, "message_delay_ms") == 0) {
+            if (num < 0 || num > 60000) {
+                fprintf(stderr, "message_delay_ms out of range (0-60000): %ld\n", num);
+                return -1;
+            }
             ctx->message_delay_ms = (int)num;
-        else if (strcmp(key, "pool_size") == 0) ctx->pool_size = (int)num;
-        else if (strcmp(key, "metrics_port") == 0) ctx->metrics_port = (int)num;
-        else if (strcmp(key, "handoff_timeout_ms") == 0) ctx->handoff_timeout_ms = (int)num;
-        else if (strcmp(key, "write_timeout_ms") == 0) ctx->write_timeout_ms = (int)num;
-        else if (strcmp(key, "shutdown_timeout_s") == 0) ctx->shutdown_timeout_s = (int)num;
+        } else if (strcmp(key, "pool_size") == 0) {
+            if (num < 1 || num > MAX_POOL_SIZE) {
+                fprintf(stderr, "pool_size out of range (1-%d): %ld\n", MAX_POOL_SIZE, num);
+                return -1;
+            }
+            ctx->pool_size = (int)num;
+        } else if (strcmp(key, "metrics_port") == 0) {
+            if (num < 0 || num > 65535) {
+                fprintf(stderr, "metrics_port out of range (0-65535): %ld\n", num);
+                return -1;
+            }
+            ctx->metrics_port = (int)num;
+        } else if (strcmp(key, "handoff_timeout_ms") == 0) {
+            if (num < 1 || num > 60000) {
+                fprintf(stderr, "handoff_timeout_ms out of range (1-60000): %ld\n", num);
+                return -1;
+            }
+            ctx->handoff_timeout_ms = (int)num;
+        } else if (strcmp(key, "write_timeout_ms") == 0) {
+            if (num < 1 || num > 300000) {
+                fprintf(stderr, "write_timeout_ms out of range (1-300000): %ld\n", num);
+                return -1;
+            }
+            ctx->write_timeout_ms = (int)num;
+        } else if (strcmp(key, "shutdown_timeout_s") == 0) {
+            if (num < 1 || num > 3600) {
+                fprintf(stderr, "shutdown_timeout_s out of range (1-3600): %ld\n", num);
+                return -1;
+            }
+            ctx->shutdown_timeout_s = (int)num;
+        }
         return 0;
     }
 

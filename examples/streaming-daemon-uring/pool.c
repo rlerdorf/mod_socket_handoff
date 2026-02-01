@@ -186,11 +186,19 @@ static void pool_add_completion(pool_ctx_t *pool, connection_t *conn) {
     pthread_mutex_lock(&pool->completion_mutex);
 
     int next_tail = (pool->completion_tail + 1) % pool->completion_size;
-    if (next_tail != pool->completion_head) {
-        pool->completions[pool->completion_tail] = conn;
-        pool->completion_tail = next_tail;
+
+    /* If ring is full, wait until there is space instead of dropping */
+    while (next_tail == pool->completion_head) {
+        pthread_mutex_unlock(&pool->completion_mutex);
+        /* Briefly sleep to avoid busy-waiting while waiting for the main loop
+         * to consume completions and free space in the ring. */
+        usleep(1000); /* 1 ms */
+        pthread_mutex_lock(&pool->completion_mutex);
+        next_tail = (pool->completion_tail + 1) % pool->completion_size;
     }
-    /* If ring is full, drop completion (shouldn't happen with proper sizing) */
+
+    pool->completions[pool->completion_tail] = conn;
+    pool->completion_tail = next_tail;
 
     pthread_mutex_unlock(&pool->completion_mutex);
 

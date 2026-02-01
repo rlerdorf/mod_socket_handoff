@@ -128,7 +128,27 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
         {NULL, 0, NULL, 0}
     };
 
+    /* First pass: find --config option and load it before processing other args.
+     * This ensures CLI args always override config file settings.
+     * If no --config is specified, load from default locations. */
+    int saved_optind = optind;
     int opt;
+    int found_config = 0;
+    while ((opt = getopt_long(argc, argv, "s:m:c:d:p:tqM:C:bhv", long_options, NULL)) != -1) {
+        if (opt == 'C') {
+            if (config_load(ctx, optarg) < 0) {
+                return -1;
+            }
+            found_config = 1;
+            break; /* Found and loaded config, stop first pass */
+        }
+    }
+    if (!found_config) {
+        config_load_default(ctx);
+    }
+    optind = saved_optind; /* Reset for second pass */
+
+    /* Second pass: process all CLI args (overriding config file) */
     while ((opt = getopt_long(argc, argv, "s:m:c:d:p:tqM:C:bhv", long_options, NULL)) != -1) {
         switch (opt) {
         case 's':
@@ -169,9 +189,7 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
             }
             break;
         case 'C':
-            if (config_load(ctx, optarg) < 0) {
-                return -1;
-            }
+            /* Already loaded in first pass, skip */
             break;
         case 'b':
             ctx->benchmark_mode = true;
@@ -633,10 +651,7 @@ int main(int argc, char **argv) {
     daemon_init(&ctx);
     g_ctx = &ctx;
 
-    /* Load default config file if present */
-    config_load_default(&ctx);
-
-    /* CLI args override config file */
+    /* Parse args (loads config file first, then CLI args override) */
     if (parse_args(argc, argv, &ctx) < 0) {
         return 1;
     }
