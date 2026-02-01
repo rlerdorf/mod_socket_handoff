@@ -92,6 +92,7 @@ class SharedTicker:
     def __init__(self, interval: float):
         self.interval = interval
         self.current_tick = 0
+        self._shutdown = False
         self._cond = asyncio.Condition()
 
     async def run(self) -> None:
@@ -104,11 +105,17 @@ class SharedTicker:
                     self.current_tick += 1
                     self._cond.notify_all()
         except asyncio.CancelledError:
-            pass
+            async with self._cond:
+                self._shutdown = True
+                self._cond.notify_all()
 
     async def wait_for_next(self, last_tick: int) -> int:
         async with self._cond:
-            await self._cond.wait_for(lambda: self.current_tick > last_tick)
+            await self._cond.wait_for(
+                lambda: self._shutdown or self.current_tick > last_tick
+            )
+            if self._shutdown:
+                raise asyncio.CancelledError
             return self.current_tick
 
 
@@ -176,7 +183,7 @@ async def stream_response(
     client_fd: int,
     handoff_data: dict,
     conn_id: int,
-    ticker: "SharedTicker",
+    ticker: SharedTicker,
     write_delay: float = 0.05,
 ) -> None:
     """
@@ -273,7 +280,7 @@ async def handle_handoff(
     apache_conn: socket.socket,
     conn_id: int,
     executor: ThreadPoolExecutor,
-    ticker: "SharedTicker",
+    ticker: SharedTicker,
     write_delay: float,
 ) -> None:
     """
@@ -314,7 +321,7 @@ async def handle_handoff(
 async def accept_loop(
     server: socket.socket,
     executor: ThreadPoolExecutor,
-    ticker: "SharedTicker",
+    ticker: SharedTicker,
     write_delay: float,
 ) -> None:
     """
@@ -424,7 +431,7 @@ async def main_async(args: argparse.Namespace) -> None:
     try:
         await ticker_task
     except asyncio.CancelledError:
-        pass
+        pass  # Expected: ticker task was cancelled for shutdown
 
     # Cleanup
     executor.shutdown(wait=False)
