@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <poll.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -18,7 +19,7 @@
 
 static pthread_t metrics_thread;
 static int metrics_fd = -1;
-static volatile int metrics_shutdown = 0;
+static atomic_bool metrics_shutdown = false;
 static daemon_ctx_t *metrics_ctx = NULL;
 
 /* Format metrics in Prometheus text format */
@@ -114,7 +115,7 @@ static void handle_request(int client_fd, daemon_ctx_t *ctx) {
 static void *metrics_thread_func(void *arg) {
     daemon_ctx_t *ctx = (daemon_ctx_t *)arg;
 
-    while (!metrics_shutdown) {
+    while (!atomic_load(&metrics_shutdown)) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
 
@@ -174,7 +175,7 @@ int metrics_start(daemon_ctx_t *ctx, int port) {
     }
 
     metrics_ctx = ctx;
-    metrics_shutdown = 0;
+    atomic_store(&metrics_shutdown, false);
 
     /* Start thread */
     if (pthread_create(&metrics_thread, NULL, metrics_thread_func, ctx) != 0) {
@@ -193,7 +194,7 @@ void metrics_stop(void) {
         return;
     }
 
-    metrics_shutdown = 1;
+    atomic_store(&metrics_shutdown, true);
     pthread_join(metrics_thread, NULL);
 
     close(metrics_fd);

@@ -81,6 +81,10 @@ int pool_init(pool_ctx_t *pool, daemon_ctx_t *ctx, int num_threads) {
             pthread_cond_destroy(&pool->queue_cond);
             pthread_mutex_destroy(&pool->queue_mutex);
             close(pool->eventfd);
+            /* Leave pool in safe state so pool_cleanup can be called */
+            pool->threads = NULL;
+            pool->completions = NULL;
+            pool->eventfd = -1;
             return -1;
         }
     }
