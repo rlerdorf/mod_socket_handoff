@@ -86,6 +86,45 @@ class Stats:
         print("=========================")
 
 
+class SharedTicker:
+    """Shared ticker to avoid per-connection sleep timers under heavy load."""
+
+    def __init__(self, interval: float):
+        self.interval = interval
+        self.current_tick = 0
+        self._shutdown = False
+        self._cond = asyncio.Condition()
+
+    async def run(self) -> None:
+        if self.interval <= 0:
+            return
+        try:
+            while True:
+                await asyncio.sleep(self.interval)
+                async with self._cond:
+                    self.current_tick += 1
+                    self._cond.notify_all()
+        except asyncio.CancelledError:
+            async with self._cond:
+                self._shutdown = True
+                self._cond.notify_all()
+
+    async def wait_for_next(self, last_tick: int) -> int:
+        async with self._cond:
+            if self.interval <= 0:
+                return last_tick + 1
+            await self._cond.wait_for(
+                lambda: self._shutdown or self.current_tick > last_tick
+            )
+            if self._shutdown:
+                raise asyncio.CancelledError
+            return self.current_tick
+
+    async def get_tick(self) -> int:
+        async with self._cond:
+            return self.current_tick
+
+
 stats = Stats()
 benchmark_mode = False
 
@@ -147,7 +186,11 @@ def recv_fd_blocking(conn: socket.socket) -> Tuple[int, bytes]:
 
 
 async def stream_response(
-    client_fd: int, handoff_data: dict, conn_id: int, write_delay: float = 0.05
+    client_fd: int,
+    handoff_data: dict,
+    conn_id: int,
+    ticker: SharedTicker,
+    write_delay: float = 0.05,
 ) -> None:
     """
     Stream an SSE response to the client.
@@ -206,6 +249,7 @@ async def stream_response(
         ]
 
         # Stream each line with simulated delay
+        last_tick = await ticker.get_tick()
         for index, line in enumerate(lines):
             data = json.dumps({"content": line, "index": index})
             sse_msg = f"data: {data}\n\n"
@@ -218,8 +262,9 @@ async def stream_response(
             except (BrokenPipeError, OSError):
                 break
 
-            # Non-blocking delay using asyncio
-            await asyncio.sleep(write_delay)
+            # Shared ticker to reduce per-connection timers under heavy load
+            if write_delay > 0:
+                last_tick = await ticker.wait_for_next(last_tick)
 
         success = True
 
@@ -241,6 +286,7 @@ async def handle_handoff(
     apache_conn: socket.socket,
     conn_id: int,
     executor: ThreadPoolExecutor,
+    ticker: SharedTicker,
     write_delay: float,
 ) -> None:
     """
@@ -266,7 +312,7 @@ async def handle_handoff(
             handoff_data = {"raw": data.decode("utf-8", errors="replace")}
 
         # Stream response as a coroutine (non-blocking)
-        await stream_response(client_fd, handoff_data, conn_id, write_delay)
+        await stream_response(client_fd, handoff_data, conn_id, ticker, write_delay)
 
     except Exception as e:
         if not benchmark_mode:
@@ -279,7 +325,10 @@ async def handle_handoff(
 
 
 async def accept_loop(
-    server: socket.socket, executor: ThreadPoolExecutor, write_delay: float
+    server: socket.socket,
+    executor: ThreadPoolExecutor,
+    ticker: SharedTicker,
+    write_delay: float,
 ) -> None:
     """
     Main accept loop using asyncio.
@@ -297,12 +346,15 @@ async def accept_loop(
         try:
             # Non-blocking accept using asyncio
             apache_conn, _ = await loop.sock_accept(server)
-            conn_id += 1
-
-            # Spawn coroutine for this connection (fire and forget)
-            asyncio.create_task(
-                handle_handoff(apache_conn, conn_id, executor, write_delay)
-            )
+            while True:
+                conn_id += 1
+                asyncio.create_task(
+                    handle_handoff(apache_conn, conn_id, executor, ticker, write_delay)
+                )
+                try:
+                    apache_conn, _ = server.accept()
+                except BlockingIOError:
+                    break
 
         except asyncio.CancelledError:
             print("Accept loop cancelled")
@@ -362,9 +414,13 @@ async def main_async(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
+    # Start shared ticker for all streams (reduces per-connection timers)
+    ticker = SharedTicker(args.delay / 1000.0)
+    ticker_task = asyncio.create_task(ticker.run())
+
     # Start accept loop
     accept_task = asyncio.create_task(
-        accept_loop(server, executor, args.delay / 1000.0)
+        accept_loop(server, executor, ticker, args.delay / 1000.0)
     )
 
     # Wait for shutdown signal
@@ -372,11 +428,16 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # Cancel accept task
     accept_task.cancel()
+    ticker_task.cancel()
 
     try:
         await accept_task
     except asyncio.CancelledError:
         pass  # Expected: accept loop was cancelled for shutdown
+    try:
+        await ticker_task
+    except asyncio.CancelledError:
+        pass  # Expected: ticker task was cancelled for shutdown
 
     # Cleanup
     executor.shutdown(wait=False)
