@@ -256,7 +256,16 @@ static void handle_accept(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
     if (!(cqe->flags & IORING_CQE_F_MORE)) {
         /* Resubmit accept */
         if (!atomic_load(&ctx->shutdown_requested)) {
-            ring_submit_accept(ctx);
+            int rc = ring_submit_accept(ctx);
+            if (rc == -EAGAIN) {
+                /* SQ ring temporarily full: retry a few times */
+                for (int i = 0; i < 3 && rc == -EAGAIN; i++) {
+                    rc = ring_submit_accept(ctx);
+                }
+            }
+            if (rc < 0 && rc != -EAGAIN && rc != -ECANCELED) {
+                fprintf(stderr, "Failed to resubmit accept: %s\n", strerror(-rc));
+            }
         }
     }
 
@@ -301,6 +310,8 @@ static void handle_accept(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
 static void start_streaming(daemon_ctx_t *ctx, connection_t *conn) {
     /* Send HTTP headers first */
     static const char headers[] = SSE_HEADERS;
+    conn->write_len = sizeof(headers) - 1;
+    conn->write_offset = 0;
     if (ring_submit_write(ctx, conn, headers, sizeof(headers) - 1) < 0) {
         fprintf(stderr, "Failed to submit header write\n");
         if (ctx->benchmark_mode) {
@@ -428,8 +439,46 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
     }
 
     conn->bytes_sent += cqe->res;
+    conn->write_offset += cqe->res;
 
-    /* Free previous write buffer if any */
+    /* Handle short writes - resubmit remaining bytes */
+    if (conn->write_len > 0 && conn->write_offset < conn->write_len) {
+        /* Short write - submit remaining portion */
+        const char *buf;
+        if (conn->write_buf) {
+            buf = conn->write_buf + conn->write_offset;
+        } else {
+            /* Static buffer (headers or done marker) - can't easily handle short writes
+             * for static buffers, but they're small so this is unlikely */
+            fprintf(stderr, "Short write on static buffer, dropping connection\n");
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_failed, 1);
+            }
+            conn_free(ctx, conn);
+            return;
+        }
+
+        size_t remaining = conn->write_len - conn->write_offset;
+        if (ring_submit_write(ctx, conn, buf, remaining) < 0) {
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_failed, 1);
+            }
+            conn_free(ctx, conn);
+            return;
+        }
+        if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_failed, 1);
+            }
+            conn_free(ctx, conn);
+            return;
+        }
+        return; /* Wait for next completion */
+    }
+
+    /* Write complete - reset tracking and free buffer */
+    conn->write_len = 0;
+    conn->write_offset = 0;
     if (conn->write_buf) {
         free(conn->write_buf);
         conn->write_buf = NULL;
@@ -457,6 +506,8 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         /* Mark as closing BEFORE submitting write */
         atomic_store(&conn->state, CONN_STATE_CLOSING);
 
+        conn->write_len = sizeof(done) - 1;
+        conn->write_offset = 0;
         if (ring_submit_write(ctx, conn, done, sizeof(done) - 1) < 0) {
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_completed, 1);
@@ -495,6 +546,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
     }
 
     conn->write_len = len;
+    conn->write_offset = 0;
 
     /* Add delay between messages if configured */
     if (ctx->message_delay_ms > 0) {

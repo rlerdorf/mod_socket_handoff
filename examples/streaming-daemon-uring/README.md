@@ -9,7 +9,7 @@ Receives client TCP sockets from Apache via SCM_RIGHTS and streams SSE responses
 - **Multishot accept** (Linux 5.19+) for efficient connection handling
 - **Single-threaded** event loop avoiding synchronization complexity
 - **Thread pool** for blocking LLM API calls (optional)
-- **OpenAI backend** with libcurl for real LLM streaming (optional)
+- **OpenAI backend** with libcurl (optional, accumulates response but streams demo messages - see backend_openai.c)
 - **Dynamic memory allocation** - 64KB handoff buffers allocated on-demand
 - **Connection pooling** with pre-allocated structures
 - **Graceful shutdown** with connection draining
