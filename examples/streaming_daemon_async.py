@@ -111,6 +111,8 @@ class SharedTicker:
 
     async def wait_for_next(self, last_tick: int) -> int:
         async with self._cond:
+            if self.interval <= 0:
+                return last_tick + 1
             await self._cond.wait_for(
                 lambda: self._shutdown or self.current_tick > last_tick
             )
