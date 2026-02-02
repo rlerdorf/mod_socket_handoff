@@ -305,9 +305,10 @@ func main() {
 				DisableCompression: true, // Skip compression overhead for local mock API
 				ReadIdleTimeout:    30 * time.Second,
 				PingTimeout:        15 * time.Second,
+				// DialTLSContext is used by http2.Transport for ALL connections, not just TLS.
+				// For h2c (HTTP/2 cleartext), we dial plain TCP without TLS.
+				// The name is misleading but this is the correct approach per the http2 package docs.
 				DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-					// For h2c (HTTP/2 cleartext), dial plain TCP without TLS
-					// Use a dialer with keep-alive for connection reuse
 					d := net.Dialer{
 						KeepAlive: 30 * time.Second,
 					}
@@ -1042,24 +1043,28 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 4096), 65536)
 
+	// Pre-allocate byte slices for comparisons to avoid allocations
+	dataPrefix := []byte("data: ")
+	doneMarker := []byte("[DONE]")
+
 	writeCount := 0
 	for scanner.Scan() {
-		line := scanner.Bytes() // Use Bytes() to avoid string allocation
+		line := scanner.Bytes()
 
 		// Skip empty lines
 		if len(line) == 0 {
 			continue
 		}
 
-		// Check for data: prefix (6 bytes)
-		if len(line) < 6 || string(line[:6]) != "data: " {
+		// Check for data: prefix using bytes comparison (no allocation)
+		if !bytes.HasPrefix(line, dataPrefix) {
 			continue
 		}
 
 		data := line[6:] // Skip "data: " prefix
 
-		// Check for [DONE] marker
-		if len(data) == 6 && string(data) == "[DONE]" {
+		// Check for [DONE] marker using bytes comparison (no allocation)
+		if bytes.Equal(data, doneMarker) {
 			break
 		}
 
@@ -1116,14 +1121,15 @@ func extractContentFast(data []byte) string {
 	}
 
 	// Find the end of the string (unescaped quote)
+	// Check for escape sequence first, then closing quote
 	end := start
 	for end < len(data) {
+		if data[end] == '\\' && end+1 < len(data) {
+			end += 2 // Skip escaped character (e.g., \", \\, \n)
+			continue
+		}
 		if data[end] == '"' {
 			break
-		}
-		if data[end] == '\\' && end+1 < len(data) {
-			end += 2 // Skip escaped character
-			continue
 		}
 		end++
 	}
@@ -1161,10 +1167,15 @@ func unescapeJSON(b []byte) string {
 			case '"', '\\', '/':
 				result = append(result, b[i])
 			case 'u':
-				// Unicode escape \uXXXX - simplified handling
+				// Unicode escape \uXXXX - decode to UTF-8
 				if i+4 < len(b) {
-					// For simplicity, just skip the unicode escape
-					// A full implementation would parse the hex value
+					r := decodeHex4(b[i+1 : i+5])
+					if r >= 0 {
+						// Encode rune as UTF-8
+						var buf [4]byte
+						n := encodeRuneToBytes(buf[:], rune(r))
+						result = append(result, buf[:n]...)
+					}
 					i += 4
 				}
 			default:
@@ -1175,6 +1186,52 @@ func unescapeJSON(b []byte) string {
 		}
 	}
 	return string(result)
+}
+
+// decodeHex4 decodes 4 hex digits to an integer. Returns -1 on error.
+func decodeHex4(b []byte) int {
+	if len(b) < 4 {
+		return -1
+	}
+	var n int
+	for _, c := range b[:4] {
+		n <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			n |= int(c - '0')
+		case c >= 'a' && c <= 'f':
+			n |= int(c - 'a' + 10)
+		case c >= 'A' && c <= 'F':
+			n |= int(c - 'A' + 10)
+		default:
+			return -1
+		}
+	}
+	return n
+}
+
+// encodeRuneToBytes encodes a rune to UTF-8 bytes. Returns number of bytes written.
+func encodeRuneToBytes(buf []byte, r rune) int {
+	if r < 0x80 {
+		buf[0] = byte(r)
+		return 1
+	}
+	if r < 0x800 {
+		buf[0] = byte(0xC0 | (r >> 6))
+		buf[1] = byte(0x80 | (r & 0x3F))
+		return 2
+	}
+	if r < 0x10000 {
+		buf[0] = byte(0xE0 | (r >> 12))
+		buf[1] = byte(0x80 | ((r >> 6) & 0x3F))
+		buf[2] = byte(0x80 | (r & 0x3F))
+		return 3
+	}
+	buf[0] = byte(0xF0 | (r >> 18))
+	buf[1] = byte(0x80 | ((r >> 12) & 0x3F))
+	buf[2] = byte(0x80 | ((r >> 6) & 0x3F))
+	buf[3] = byte(0x80 | (r & 0x3F))
+	return 4
 }
 
 // sseBufPool reuses buffers for SSE message construction to reduce allocations.
