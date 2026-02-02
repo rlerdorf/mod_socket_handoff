@@ -9,8 +9,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use hyper::server::conn::http2;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as AutoBuilder;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 #[cfg(unix)]
@@ -21,6 +20,61 @@ use tracing_subscriber::EnvFilter;
 use config::Config;
 use handlers::AppState;
 use responses::ResponseChunks;
+
+/// HTTP/2 settings for high-concurrency streaming
+#[derive(Clone, Copy)]
+struct Http2Settings {
+    max_concurrent_streams: u32,
+    initial_stream_window_size: u32,
+    initial_connection_window_size: u32,
+    max_send_buffer_size: usize,
+    keep_alive_interval: Option<Duration>,
+    keep_alive_timeout: Option<Duration>,
+}
+
+impl Http2Settings {
+    fn from_config(config: &Config) -> Self {
+        // Only configure keep-alive settings when enabled (h2_keepalive_secs > 0)
+        let (keep_alive_interval, keep_alive_timeout) = if config.h2_keepalive_secs > 0 {
+            let interval = Duration::from_secs(config.h2_keepalive_secs);
+            // Use a longer timeout than interval (2x) to allow for network delays
+            // and processing time, avoiding premature connection closure.
+            let timeout = Duration::from_secs(config.h2_keepalive_secs.saturating_mul(2));
+            (Some(interval), Some(timeout))
+        } else {
+            (None, None)
+        };
+
+        Self {
+            max_concurrent_streams: config.h2_max_streams,
+            initial_stream_window_size: config.h2_stream_window_kb * 1024,
+            initial_connection_window_size: config.h2_connection_window_kb * 1024,
+            max_send_buffer_size: (config.h2_send_buffer_kb as usize) * 1024,
+            keep_alive_interval,
+            keep_alive_timeout,
+        }
+    }
+
+    fn configure_builder(&self, builder: &mut http2::Builder<TokioExecutor>) {
+        builder.max_concurrent_streams(self.max_concurrent_streams);
+        builder.initial_stream_window_size(self.initial_stream_window_size);
+        builder.initial_connection_window_size(self.initial_connection_window_size);
+        builder.adaptive_window(true);
+        // Rely on the HTTP/2 max frame size RFC 7540 default (16 KiB).
+        // Larger frames can increase memory pressure and cause interoperability
+        // issues with some clients and intermediaries, so we intentionally do
+        // not expose this as a user-tunable CLI option.
+        builder.max_send_buf_size(self.max_send_buffer_size);
+
+        // Keep-alive requires a timer for scheduling pings
+        if let (Some(interval), Some(timeout)) = (self.keep_alive_interval, self.keep_alive_timeout)
+        {
+            builder.timer(TokioTimer::new());
+            builder.keep_alive_interval(Some(interval));
+            builder.keep_alive_timeout(timeout);
+        }
+    }
+}
 
 fn main() {
     let config = Config::parse();
@@ -52,10 +106,20 @@ async fn run_server(config: Config) {
     let chunks = ResponseChunks::new(config.chunk_count);
     let chunk_delay = Duration::from_millis(config.chunk_delay_ms);
 
+    // HTTP/2 settings for high-concurrency streaming
+    let h2_settings = Http2Settings::from_config(&config);
+
     info!(
         "Pre-computed {} SSE chunks, {}ms delay between chunks",
         chunks.len(),
         config.chunk_delay_ms
+    );
+    info!(
+        "HTTP/2: max_streams={}, stream_window={}KB, conn_window={}KB, send_buffer={}KB",
+        h2_settings.max_concurrent_streams,
+        h2_settings.initial_stream_window_size / 1024,
+        h2_settings.initial_connection_window_size / 1024,
+        h2_settings.max_send_buffer_size / 1024
     );
 
     let state = Arc::new(AppState {
@@ -101,16 +165,11 @@ async fn run_server(config: Config) {
                 let io = TokioIo::new(stream);
                 let service = TowerToHyperService::new(app);
 
-                // Use http2::Builder for h2c prior knowledge support
-                // The TokioExecutor is critical for spawning sub-tasks to handle
-                // concurrent streams on the same connection.
-                // Limit to 100 concurrent streams per connection (HTTP/2 best practice).
-                // Curl will open multiple connections for higher concurrency.
-                if let Err(e) = http2::Builder::new(TokioExecutor::new())
-                    .max_concurrent_streams(100)
-                    .serve_connection(io, service)
-                    .await
-                {
+                // HTTP/2 settings optimized for high-concurrency streaming
+                let mut builder = http2::Builder::new(TokioExecutor::new());
+                h2_settings.configure_builder(&mut builder);
+
+                if let Err(e) = builder.serve_connection(io, service).await {
                     // Only log unexpected errors, not normal connection closes
                     let err_str = format!("{}", e);
                     if !err_str.contains("connection closed") {
@@ -138,24 +197,31 @@ async fn run_server(config: Config) {
 
         info!("Also listening on unix:{}", socket_path);
 
-        // Serve on Unix socket - use auto builder for HTTP/1.1 and HTTP/2 support
+        // Serve on Unix socket with same HTTP/2 settings as TCP
         loop {
-            let (stream, _) = unix_listener
-                .accept()
-                .await
-                .expect("Failed to accept Unix connection");
+            let (stream, _) = match unix_listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::error!("Failed to accept Unix connection: {}", e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let app = app.clone();
 
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let service = TowerToHyperService::new(app);
 
-                // AutoBuilder detects HTTP/1.1 vs HTTP/2 automatically
-                if let Err(e) = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection(io, service)
-                    .await
-                {
-                    tracing::error!("Connection error: {}", e);
+                // Same HTTP/2 settings as TCP for consistency
+                let mut builder = http2::Builder::new(TokioExecutor::new());
+                h2_settings.configure_builder(&mut builder);
+
+                if let Err(e) = builder.serve_connection(io, service).await {
+                    let err_str = format!("{}", e);
+                    if !err_str.contains("connection closed") {
+                        tracing::debug!("H2 Unix connection error: {}", e);
+                    }
                 }
             });
         }

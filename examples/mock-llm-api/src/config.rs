@@ -30,6 +30,33 @@ pub struct Config {
     /// Minimal logging output
     #[arg(long)]
     pub quiet: bool,
+
+    // HTTP/2 tuning options for high-concurrency scenarios
+
+    /// Max concurrent streams per HTTP/2 connection.
+    /// Default is 100 (e.g., 100k streams across 1k connections); adjust for other workloads as needed.
+    #[arg(long, default_value = "100")]
+    pub h2_max_streams: u32,
+
+    /// HTTP/2 initial stream window size in KB (flow control per stream).
+    /// Larger values reduce flow control blocking for streaming responses.
+    #[arg(long, default_value = "1024")]
+    pub h2_stream_window_kb: u32,
+
+    /// HTTP/2 initial connection window size in KB (flow control per connection).
+    /// Should be large enough for all concurrent streams: streams × stream_window.
+    #[arg(long, default_value = "16384")]
+    pub h2_connection_window_kb: u32,
+
+    /// HTTP/2 max send buffer size per stream in KB.
+    /// Buffers data during flow control waits.
+    #[arg(long, default_value = "1024")]
+    pub h2_send_buffer_kb: u32,
+
+    /// HTTP/2 keep-alive ping interval in seconds (0 = disabled).
+    /// Keeps idle connections alive during streaming gaps.
+    #[arg(long, default_value = "20")]
+    pub h2_keepalive_secs: u64,
 }
 
 impl Config {
