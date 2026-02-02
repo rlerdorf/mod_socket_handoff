@@ -436,7 +436,10 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.backend.openai.http2.enabled);
         assert_eq!(config.backend.openai.http2.initial_stream_window_kb, 128);
-        assert_eq!(config.backend.openai.http2.initial_connection_window_kb, 2048);
+        assert_eq!(
+            config.backend.openai.http2.initial_connection_window_kb,
+            2048
+        );
         assert!(!config.backend.openai.http2.adaptive_window);
         assert_eq!(config.backend.openai.http2.keep_alive_interval_secs, 30);
         assert_eq!(config.backend.openai.http2.keep_alive_timeout_secs, 60);

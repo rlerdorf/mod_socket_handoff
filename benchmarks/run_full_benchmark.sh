@@ -10,7 +10,7 @@
 #   sudo ./run_full_benchmark.sh --http2 rust # Test Rust with HTTP/2 multiplexing
 #   sudo ./run_full_benchmark.sh --help       # Show help
 #
-# Available daemons: php, python, go, rust, rust-http2, uring
+# Available daemons: php, python, go, go-http2, rust, rust-http2, uring
 #
 # Tests daemon implementations at multiple connection levels
 # and measures TTFB, memory, CPU, and peak concurrency.
@@ -47,10 +47,14 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Arguments:"
             echo "  daemon    One or more daemons to benchmark:"
-            echo "            php, python, go, rust, rust-http2, uring"
+            echo "            php, python, go, go-http2, rust, rust-http2, uring"
             echo ""
+            echo "            go        - Go daemon with HTTP/1.1 (Unix socket to API)"
+            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "                        (requires --backend llm-api, skipped otherwise)"
             echo "            rust      - Rust daemon with HTTP/1.1 (Unix socket to API)"
             echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "                        (requires --backend llm-api, skipped otherwise)"
             echo ""
             echo "            If not specified, all daemons are benchmarked."
             echo ""
@@ -73,13 +77,13 @@ while [[ $# -gt 0 ]]; do
             BACKEND_MODE="$1"
             shift
             ;;
-        php|python|go|rust|rust-http2|uring)
+        php|python|go|go-http2|rust|rust-http2|uring)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, python, go, rust, rust-http2, uring"
+            echo "Valid daemons: php, python, go, go-http2, rust, rust-http2, uring"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -100,8 +104,9 @@ mkdir -p "$RESULTS_DIR"
 echo "Results will be saved to: $RESULTS_DIR"
 echo ""
 
-# Set up cleanup trap
-trap 'cleanup; restore_sysctl' EXIT INT TERM
+# Set up cleanup trap - use abort_handler for INT to kill current test immediately
+trap 'cleanup' EXIT
+trap 'abort_handler' INT TERM
 
 # Clean up any leftover processes from previous runs
 echo "Cleaning up any leftover processes..."
@@ -154,14 +159,17 @@ test_daemon() {
 
         local pid=$(pgrep -nf "$pattern" 2>/dev/null | head -1)
         if [ -z "$pid" ]; then
+            CURRENT_DAEMON_PID=""
             echo -e "${RED}ERROR: $name failed to start (no process)${NC}"
             cat "$daemon_log"
             echo "$conns,0,0,0,0,0,0,0" >> "$daemon_results"
             continue
         fi
+        CURRENT_DAEMON_PID="$pid"
 
         # Verify socket exists
         if [ ! -S "$SOCKET" ]; then
+            CURRENT_DAEMON_PID=""
             echo -e "${RED}ERROR: $name socket not created${NC}"
             cat "$daemon_log"
             echo "$conns,0,0,0,0,0,0,0" >> "$daemon_results"
@@ -188,13 +196,18 @@ test_daemon() {
         ) &
         local monitor_pid=$!
 
-        # Run load generator
+        # Run load generator in background so Ctrl+C can interrupt via trap
         local lg_output="$RESULTS_DIR/${name}_${conns}_load.json"
         "$LOAD_GEN" -socket "$SOCKET" \
             -connections "$conns" \
             -ramp-up "${rampup}s" \
             -hold "${hold}s" \
-            > "$lg_output" 2>&1
+            > "$lg_output" 2>&1 &
+        CURRENT_LG_PID=$!
+
+        # Wait for load generator (this allows signals to interrupt)
+        wait $CURRENT_LG_PID 2>/dev/null || true
+        CURRENT_LG_PID=""
 
         # Stop monitor
         kill $monitor_pid 2>/dev/null || true
@@ -222,6 +235,7 @@ test_daemon() {
 
         # Stop daemon and get final summary
         pkill -TERM -f "$pattern" 2>/dev/null || true
+        CURRENT_DAEMON_PID=""
         sleep 2
 
         # If peak_concurrent not found yet, check again after shutdown
@@ -261,7 +275,7 @@ if should_run uring; then
     fi
 fi
 
-if should_run go; then
+if should_run go || should_run go-http2; then
     build_go_daemon
 fi
 
@@ -291,11 +305,22 @@ if should_run python; then
     fi
 fi
 
-# Test Go
+# Test Go (HTTP/1.1 with Unix socket)
 if should_run go; then
     test_daemon "go" \
-        "$(get_go_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS")" \
+        "$(get_go_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http1")" \
         "streaming-daemon-go/streaming-daemon"
+fi
+
+# Test Go (HTTP/2 with TCP h2c multiplexing)
+if should_run go-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping go-http2: HTTP/2 requires TCP (llm-api backend), not Unix sockets used by delay backend${NC}"
+    else
+        test_daemon "go-http2" \
+            "$(get_go_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2")" \
+            "streaming-daemon-go/streaming-daemon"
+    fi
 fi
 
 # Test Rust (HTTP/1.1 with Unix socket)
@@ -345,7 +370,7 @@ Generated: $(date)
 
 EOF
 
-for daemon in php python go rust rust-http2 uring; do
+for daemon in php python go go-http2 rust rust-http2 uring; do
     if [ -f "$RESULTS_DIR/${daemon}.csv" ]; then
         echo "### ${daemon^}" >> "$RESULTS_DIR/REPORT.md"
         echo "" >> "$RESULTS_DIR/REPORT.md"
@@ -369,6 +394,8 @@ cat >> "$RESULTS_DIR/REPORT.md" << 'EOF'
 - Peak Backlog = Maximum pending connections in kernel accept queue (from ss Recv-Q)
 
 ## HTTP/2 Mode
+- go: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
+- go-http2: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
 - rust: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
 - rust-http2: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
   - With HTTP/2, ~100 streams share each TCP connection vs 1 stream per connection with HTTP/1.1

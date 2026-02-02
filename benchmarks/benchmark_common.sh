@@ -323,8 +323,53 @@ cleanup_daemons() {
 
 # Full cleanup including mock API
 cleanup() {
+    echo ""
+    echo "Cleaning up..."
     stop_mock_api
     cleanup_daemons
+}
+
+# Abort handler for Ctrl+C - kills current test immediately
+# Usage: Set CURRENT_LG_PID before running load generator
+CURRENT_LG_PID=""
+CURRENT_DAEMON_PID=""
+
+# Terminate a process gracefully (SIGTERM first, then SIGKILL after timeout)
+terminate_process() {
+    local pid="$1"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        return
+    fi
+
+    # Try graceful termination first
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..5}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.2
+    done
+
+    # Force kill if still running
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+
+    # Reap the process to avoid zombies
+    wait "$pid" 2>/dev/null || true
+}
+
+abort_handler() {
+    echo ""
+    echo -e "${RED}Interrupted! Cleaning up...${NC}"
+
+    terminate_process "$CURRENT_LG_PID"
+    terminate_process "$CURRENT_DAEMON_PID"
+
+    cleanup
+    restore_sysctl
+    echo "Aborted."
+    exit 130
 }
 
 #=============================================================================
@@ -399,15 +444,23 @@ get_php_cmd() {
 }
 
 # Generate Go daemon command
-# Usage: get_go_cmd <backend_mode> <message_delay_ms>
+# Usage: get_go_cmd <backend_mode> <message_delay_ms> [http_mode]
+# http_mode: "http1" (default, uses Unix socket) or "http2" (uses TCP with h2c multiplexing)
 get_go_cmd() {
     local backend_mode=$1
     local message_delay_ms=$2
+    local http_mode=${3:-http1}
 
     local base_cmd="$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -socket $SOCKET -benchmark -max-connections ${MAX_CONNECTIONS} -socket-mode 0660 -metrics-addr="
 
     if [ "$backend_mode" = "llm-api" ]; then
-        echo "OPENAI_API_KEY=benchmark-test $base_cmd -backend openai -openai-base http://localhost/v1 -openai-socket $MOCK_API_SOCKET"
+        if [ "$http_mode" = "http2" ]; then
+            # HTTP/2 mode: Use TCP endpoint (not Unix socket) for h2c multiplexing
+            echo "OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=true $base_cmd -backend openai -openai-base http://${MOCK_API_TCP_ADDR}/v1"
+        else
+            # HTTP/1.1 mode: Use Unix socket for connection pooling
+            echo "OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=false $base_cmd -backend openai -openai-base http://localhost/v1 -openai-socket $MOCK_API_SOCKET"
+        fi
     else
         echo "$base_cmd -message-delay ${message_delay_ms}ms"
     fi

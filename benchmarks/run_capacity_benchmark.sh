@@ -14,9 +14,10 @@
 #   sudo ./run_capacity_benchmark.sh              # Test all daemons
 #   sudo ./run_capacity_benchmark.sh rust         # Test only Rust daemon
 #   sudo ./run_capacity_benchmark.sh rust-http2   # Test Rust with HTTP/2 multiplexing
+#   sudo ./run_capacity_benchmark.sh go-http2     # Test Go with HTTP/2 multiplexing
 #   sudo ./run_capacity_benchmark.sh --help       # Show help
 #
-# Available daemons: php, go, rust, rust-http2, uring
+# Available daemons: php, go, go-http2, rust, rust-http2, uring
 #
 
 set -e
@@ -62,8 +63,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Arguments:"
             echo "  daemon    One or more daemons to test:"
-            echo "            php, go, rust, rust-http2, uring"
+            echo "            php, go, go-http2, rust, rust-http2, uring"
             echo ""
+            echo "            go        - Go daemon with HTTP/1.1 (Unix socket to API)"
+            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (TCP h2c)"
             echo "            rust      - Rust daemon with HTTP/1.1 (Unix socket to API)"
             echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (TCP h2c)"
             echo ""
@@ -80,16 +83,17 @@ while [[ $# -gt 0 ]]; do
             echo "  sudo $0              # Test all daemons"
             echo "  sudo $0 rust go      # Test Rust and Go only"
             echo "  sudo $0 rust-http2   # Test Rust with HTTP/2 multiplexing"
+            echo "  sudo $0 go-http2     # Test Go with HTTP/2 multiplexing"
             echo ""
             exit 0
             ;;
-        php|go|rust|rust-http2|uring)
+        php|go|go-http2|rust|rust-http2|uring)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, go, rust, rust-http2, uring"
+            echo "Valid daemons: php, go, go-http2, rust, rust-http2, uring"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -110,8 +114,9 @@ mkdir -p "$RESULTS_DIR"
 echo "Results will be saved to: $RESULTS_DIR"
 echo ""
 
-# Set up cleanup trap
-trap 'cleanup; restore_sysctl' EXIT INT TERM
+# Set up cleanup trap - use abort_handler for INT to kill current test immediately
+trap 'cleanup; restore_sysctl' EXIT
+trap 'abort_handler' INT TERM
 
 #=============================================================================
 # SINGLE TEST EXECUTION
@@ -150,23 +155,31 @@ run_single_test() {
 
     local pid=$(pgrep -nf "$pattern" 2>/dev/null | head -1)
     if [ -z "$pid" ]; then
+        CURRENT_DAEMON_PID=""
         echo '{"error": "daemon_failed_to_start", "connections_failed": '$conns'}' > "$result_json"
         echo "$result_json"
         return 1
     fi
+    CURRENT_DAEMON_PID="$pid"
 
     if [ ! -S "$SOCKET" ]; then
+        CURRENT_DAEMON_PID=""
         echo '{"error": "socket_not_created", "connections_failed": '$conns'}' > "$result_json"
         echo "$result_json"
         return 1
     fi
 
-    # Run load generator (this is the long-running part)
+    # Run load generator in background so Ctrl+C can interrupt via trap
     "$LOAD_GEN" -socket "$SOCKET" \
         -connections "$conns" \
         -ramp-up "${rampup}s" \
         -hold "${hold}s" \
-        > "$lg_output" 2>&1
+        > "$lg_output" 2>&1 &
+    CURRENT_LG_PID=$!
+
+    # Wait for load generator (this allows signals to interrupt)
+    wait $CURRENT_LG_PID 2>/dev/null || true
+    CURRENT_LG_PID=""
 
     # Get metrics while daemon is still running
     local peak_rss=$(awk '/VmHWM/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
@@ -177,6 +190,7 @@ run_single_test() {
     # Kill daemon with SIGKILL (SIGTERM may be ignored when busy)
     kill -9 $pid 2>/dev/null || true
     pkill -9 -f "$pattern" 2>/dev/null || true
+    CURRENT_DAEMON_PID=""
 
     # Extract JSON from load generator
     local json_tmp="${result_prefix}_lg.json"
@@ -426,7 +440,7 @@ if should_run uring; then
     build_uring_daemon "openai"
 fi
 
-if should_run go; then
+if should_run go || should_run go-http2; then
     build_go_daemon
 fi
 
@@ -462,10 +476,17 @@ if should_run php; then
 fi
 
 if should_run go; then
-    find_capacity "go" "$(get_go_cmd "llm-api" 0)" "streaming-daemon-go/streaming-daemon"
+    find_capacity "go" "$(get_go_cmd "llm-api" 0 "http1")" "streaming-daemon-go/streaming-daemon"
     CAPACITY_RESULTS[go]=$FOUND_CAPACITY
     LIMITING_FACTORS[go]="$LIMITING_FACTOR"
     RESULT_JSONS[go]="$FOUND_JSON"
+fi
+
+if should_run go-http2; then
+    find_capacity "go-http2" "$(get_go_cmd "llm-api" 0 "http2")" "streaming-daemon-go/streaming-daemon"
+    CAPACITY_RESULTS[go-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[go-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[go-http2]="$FOUND_JSON"
 fi
 
 if should_run rust; then
@@ -521,7 +542,7 @@ Generated: $(date)
 |--------|-----------------|----------|----------|----------|---------|-----------------|
 EOF
 
-for daemon in rust rust-http2 go uring php; do
+for daemon in rust rust-http2 go go-http2 uring php; do
     if [ -n "${CAPACITY_RESULTS[$daemon]}" ]; then
         json="${RESULT_JSONS[$daemon]}"
         capacity="${CAPACITY_RESULTS[$daemon]}"
@@ -555,6 +576,8 @@ cat >> "$REPORT_FILE" << 'EOF'
 
 ## HTTP/2 Mode
 
+- **go**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
+- **go-http2**: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
 - **rust**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
 - **rust-http2**: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
   - With HTTP/2, ~100 streams share each TCP connection vs 1 stream per connection with HTTP/1.1
