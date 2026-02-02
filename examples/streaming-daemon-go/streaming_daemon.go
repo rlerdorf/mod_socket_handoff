@@ -339,6 +339,10 @@ func main() {
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
 			}
 			log.Printf("OpenAI backend: %s (HTTP/2 ALPN)", openaiAPIBase)
 		} else if socketPath != "" {
@@ -1186,7 +1190,8 @@ func extractContentFast(data []byte) string {
 		end++
 	}
 
-	// end < start shouldn't happen; end == start means empty string which is valid
+	// Defensive check: end < start should be impossible since end starts at start
+	// and only increments. end == start means empty string which is valid.
 	if end < start {
 		return ""
 	}
@@ -1304,7 +1309,7 @@ func appendJSONEscaped(buf []byte, s string) []byte {
 			if c < 0x20 {
 				// Control characters (0x00-0x1F) must be escaped as \uXXXX.
 				// First two hex digits are always '0' since c < 0x20 (max 0x1F).
-				// c>>4 selects the high nibble (0-1), c&0xf selects the low nibble (0-F).
+				// c>>4 selects the high nibble (values 0-1 for 0x00-0x1F), c&0xf selects the low nibble (0-F).
 				buf = append(buf, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
 			} else {
 				buf = append(buf, c)
