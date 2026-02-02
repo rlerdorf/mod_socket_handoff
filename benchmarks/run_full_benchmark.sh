@@ -105,7 +105,7 @@ echo "Results will be saved to: $RESULTS_DIR"
 echo ""
 
 # Set up cleanup trap - use abort_handler for INT to kill current test immediately
-trap 'cleanup; restore_sysctl' EXIT
+trap 'cleanup' EXIT
 trap 'abort_handler' INT TERM
 
 # Clean up any leftover processes from previous runs

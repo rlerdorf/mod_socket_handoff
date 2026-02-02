@@ -334,39 +334,37 @@ cleanup() {
 CURRENT_LG_PID=""
 CURRENT_DAEMON_PID=""
 
+# Terminate a process gracefully (SIGTERM first, then SIGKILL after timeout)
+terminate_process() {
+    local pid="$1"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        return
+    fi
+
+    # Try graceful termination first
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..5}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.2
+    done
+
+    # Force kill if still running
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+
+    # Reap the process to avoid zombies
+    wait "$pid" 2>/dev/null || true
+}
+
 abort_handler() {
     echo ""
     echo -e "${RED}Interrupted! Cleaning up...${NC}"
 
-    # Kill current load generator if running (try SIGTERM first, then SIGKILL)
-    if [ -n "$CURRENT_LG_PID" ] && kill -0 "$CURRENT_LG_PID" 2>/dev/null; then
-        kill "$CURRENT_LG_PID" 2>/dev/null || true
-        for _ in {1..5}; do
-            if ! kill -0 "$CURRENT_LG_PID" 2>/dev/null; then
-                break
-            fi
-            sleep 0.2
-        done
-        if kill -0 "$CURRENT_LG_PID" 2>/dev/null; then
-            kill -9 "$CURRENT_LG_PID" 2>/dev/null || true
-        fi
-        wait "$CURRENT_LG_PID" 2>/dev/null || true
-    fi
-
-    # Kill current daemon if running (try SIGTERM first, then SIGKILL)
-    if [ -n "$CURRENT_DAEMON_PID" ] && kill -0 "$CURRENT_DAEMON_PID" 2>/dev/null; then
-        kill "$CURRENT_DAEMON_PID" 2>/dev/null || true
-        for _ in {1..5}; do
-            if ! kill -0 "$CURRENT_DAEMON_PID" 2>/dev/null; then
-                break
-            fi
-            sleep 0.2
-        done
-        if kill -0 "$CURRENT_DAEMON_PID" 2>/dev/null; then
-            kill -9 "$CURRENT_DAEMON_PID" 2>/dev/null || true
-        fi
-        wait "$CURRENT_DAEMON_PID" 2>/dev/null || true
-    fi
+    terminate_process "$CURRENT_LG_PID"
+    terminate_process "$CURRENT_DAEMON_PID"
 
     cleanup
     restore_sysctl

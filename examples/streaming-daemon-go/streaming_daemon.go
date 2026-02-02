@@ -298,7 +298,12 @@ func main() {
 		// Check HTTP/2 setting (env var overrides flag)
 		useHTTP2 := *http2Enabled
 		if envVal := os.Getenv("OPENAI_HTTP2_ENABLED"); envVal != "" {
-			useHTTP2 = envVal != "false" && envVal != "0"
+			// Treat common false-like values (case-insensitive) as disabling HTTP/2
+			isFalse := strings.EqualFold(envVal, "false") ||
+				strings.EqualFold(envVal, "0") ||
+				strings.EqualFold(envVal, "no") ||
+				strings.EqualFold(envVal, "off")
+			useHTTP2 = !isFalse
 		}
 
 		// Create HTTP transport based on configuration
@@ -1215,9 +1220,9 @@ func unescapeJSON(b []byte) string {
 			case '"', '\\', '/':
 				result = append(result, b[i])
 			case 'u':
-				// Unicode escape \uXXXX - decode to UTF-8 using standard library
-				// Need 4 hex digits after 'u', so check i+5 <= len(b) for slice b[i+1:i+5]
-				if i+5 <= len(b) {
+				// Unicode escape \uXXXX - decode to UTF-8 using standard library.
+				// Need 4 hex digits (b[i+1] through b[i+4]), so require i+4 < len(b).
+				if i+4 < len(b) {
 					hexStr := string(b[i+1 : i+5])
 					if codepoint, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
 						// Encode rune as UTF-8 using standard library
