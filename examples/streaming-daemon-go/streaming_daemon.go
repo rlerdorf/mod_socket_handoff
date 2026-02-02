@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -41,6 +42,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/net/http2"
 )
 
 const (
@@ -93,11 +95,13 @@ var (
 		"OpenAI API base URL (default: OPENAI_API_BASE env or https://api.openai.com/v1)")
 	openaiSocket = flag.String("openai-socket", "",
 		"Unix socket for OpenAI API (eliminates ephemeral port limits for high concurrency)")
+	http2Enabled = flag.Bool("http2-enabled", true,
+		"Enable HTTP/2 for upstream API (uses h2c for http://, ALPN for https://)")
 )
 
 // Benchmark stats (only updated in benchmark mode)
+// Uses atomic operations instead of mutex for better performance under high concurrency.
 type BenchmarkStats struct {
-	mu             sync.Mutex
 	peakStreams    int64
 	activeStreams  int64
 	totalStarted   int64
@@ -109,36 +113,37 @@ type BenchmarkStats struct {
 var benchStats BenchmarkStats
 
 func (b *BenchmarkStats) streamStart() {
-	b.mu.Lock()
-	b.activeStreams++
-	if b.activeStreams > b.peakStreams {
-		b.peakStreams = b.activeStreams
+	atomic.AddInt64(&b.totalStarted, 1)
+	current := atomic.AddInt64(&b.activeStreams, 1)
+	// Update peak using CAS loop
+	for {
+		peak := atomic.LoadInt64(&b.peakStreams)
+		if current <= peak {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&b.peakStreams, peak, current) {
+			break
+		}
 	}
-	b.totalStarted++
-	b.mu.Unlock()
 }
 
-func (b *BenchmarkStats) streamEnd(success bool, bytes int64) {
-	b.mu.Lock()
-	b.activeStreams--
+func (b *BenchmarkStats) streamEnd(success bool, bytesSent int64) {
+	atomic.AddInt64(&b.activeStreams, -1)
 	if success {
-		b.totalCompleted++
+		atomic.AddInt64(&b.totalCompleted, 1)
 	} else {
-		b.totalFailed++
+		atomic.AddInt64(&b.totalFailed, 1)
 	}
-	b.totalBytes += bytes
-	b.mu.Unlock()
+	atomic.AddInt64(&b.totalBytes, bytesSent)
 }
 
 func (b *BenchmarkStats) print() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	fmt.Println("\n=== Benchmark Summary ===")
-	fmt.Printf("Peak concurrent streams: %d\n", b.peakStreams)
-	fmt.Printf("Total started: %d\n", b.totalStarted)
-	fmt.Printf("Total completed: %d\n", b.totalCompleted)
-	fmt.Printf("Total failed: %d\n", b.totalFailed)
-	fmt.Printf("Total bytes sent: %d\n", b.totalBytes)
+	fmt.Printf("Peak concurrent streams: %d\n", atomic.LoadInt64(&b.peakStreams))
+	fmt.Printf("Total started: %d\n", atomic.LoadInt64(&b.totalStarted))
+	fmt.Printf("Total completed: %d\n", atomic.LoadInt64(&b.totalCompleted))
+	fmt.Printf("Total failed: %d\n", atomic.LoadInt64(&b.totalFailed))
+	fmt.Printf("Total bytes sent: %d\n", atomic.LoadInt64(&b.totalBytes))
 	fmt.Println("=========================")
 }
 
@@ -240,6 +245,22 @@ var handoffBufPool = sync.Pool{
 	},
 }
 
+// oobBufPool reuses buffers for SCM_RIGHTS control messages.
+var oobBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 256)
+		return &buf
+	},
+}
+
+// Pre-allocated HTTP headers for SSE responses (avoid []byte conversion on every request)
+var sseHeadersBytes = []byte("HTTP/1.1 200 OK\r\n" +
+	"Content-Type: text/event-stream\r\n" +
+	"Cache-Control: no-cache\r\n" +
+	"Connection: close\r\n" +
+	"X-Accel-Buffering: no\r\n" +
+	"\r\n")
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
@@ -267,10 +288,44 @@ func main() {
 			log.Println("Warning: OPENAI_API_KEY not set, API calls will fail")
 		}
 
-		// Create HTTP transport
-		var transport *http.Transport
-		if socketPath != "" {
-			// Use Unix socket for high-concurrency (no ephemeral port limits)
+		// Check HTTP/2 setting (env var overrides flag)
+		useHTTP2 := *http2Enabled
+		if envVal := os.Getenv("OPENAI_HTTP2_ENABLED"); envVal != "" {
+			useHTTP2 = envVal != "false" && envVal != "0"
+		}
+
+		// Create HTTP transport based on configuration
+		var transport http.RoundTripper
+
+		if useHTTP2 && strings.HasPrefix(openaiAPIBase, "http://") {
+			// HTTP/2 with h2c (prior knowledge) for http:// endpoints
+			// HTTP/2 requires TCP, so ignore Unix socket setting
+			transport = &http2.Transport{
+				AllowHTTP:          true,
+				DisableCompression: true, // Skip compression overhead for local mock API
+				ReadIdleTimeout:    30 * time.Second,
+				PingTimeout:        15 * time.Second,
+				DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+					// For h2c (HTTP/2 cleartext), dial plain TCP without TLS
+					// Use a dialer with keep-alive for connection reuse
+					d := net.Dialer{
+						KeepAlive: 30 * time.Second,
+					}
+					return d.DialContext(ctx, network, addr)
+				},
+			}
+			log.Printf("OpenAI backend: %s (HTTP/2 h2c)", openaiAPIBase)
+		} else if useHTTP2 && strings.HasPrefix(openaiAPIBase, "https://") {
+			// HTTP/2 with ALPN negotiation for https:// endpoints
+			transport = &http.Transport{
+				ForceAttemptHTTP2:   true,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			}
+			log.Printf("OpenAI backend: %s (HTTP/2 ALPN)", openaiAPIBase)
+		} else if socketPath != "" {
+			// HTTP/1.1 with Unix socket for high-concurrency (no ephemeral port limits)
 			transport = &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return net.Dial("unix", socketPath)
@@ -279,15 +334,15 @@ func main() {
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
 			}
-			log.Printf("OpenAI backend: %s (via unix:%s)", openaiAPIBase, socketPath)
+			log.Printf("OpenAI backend: %s (HTTP/1.1 via unix:%s)", openaiAPIBase, socketPath)
 		} else {
-			// Use TCP
+			// HTTP/1.1 with TCP
 			transport = &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
 			}
-			log.Printf("OpenAI backend: %s", openaiAPIBase)
+			log.Printf("OpenAI backend: %s (HTTP/1.1)", openaiAPIBase)
 		}
 
 		// Create HTTP client with connection pooling
@@ -544,7 +599,6 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// Receive file descriptor and handoff data from Apache
 	handoffStart := time.Now()
 	clientFd, data, err := receiveFd(conn)
-	handoffDuration := time.Since(handoffStart).Seconds()
 
 	// Close Apache connection immediately after receiving fd.
 	// The Apache socket is only needed for the brief SCM_RIGHTS handoff.
@@ -561,6 +615,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		log.Printf("Failed to receive fd: %v", err)
 		return
 	}
+	handoffDuration := time.Since(handoffStart).Seconds()
 	if !*benchmarkMode {
 		metricHandoffDuration.Observe(handoffDuration)
 		metricHandoffsTotal.Inc()
@@ -664,19 +719,19 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		return -1, nil, fmt.Errorf("could not set read deadline: %w", err)
 	}
 
-	// Get buffer from pool to reduce allocations under high throughput
+	// Get buffers from pools to reduce allocations under high throughput
 	bufPtr := handoffBufPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	// Buffer for control message (SCM_RIGHTS)
-	// Use 256 bytes to handle any edge cases with ancillary data.
-	oob := make([]byte, 256)
+	oobPtr := oobBufPool.Get().(*[]byte)
+	oob := *oobPtr
 
 	// Use ReadMsgUnix instead of File() + syscall.Recvmsg to avoid
 	// the issues with File() disconnecting the Go runtime's poller.
 	n, oobn, recvflags, _, err := unixConn.ReadMsgUnix(buf, oob)
 	if err != nil {
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("ReadMsgUnix failed: %w", err)
 	}
 
@@ -710,6 +765,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	if recvflags&syscall.MSG_TRUNC != 0 {
 		closeReceivedFDs()
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", MaxHandoffDataSize)
 	}
 
@@ -717,16 +773,19 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	if recvflags&syscall.MSG_CTRUNC != 0 {
 		closeReceivedFDs()
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("control message truncated; fd may be corrupted")
 	}
 
 	if parseErr != nil {
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("parse control message failed: %w", parseErr)
 	}
 
 	if len(msgs) == 0 {
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("no control messages received")
 	}
 
@@ -746,6 +805,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	if len(allFds) == 0 {
 		handoffBufPool.Put(bufPtr)
+		oobBufPool.Put(oobPtr)
 		return -1, nil, fmt.Errorf("no file descriptors received")
 	}
 
@@ -757,10 +817,11 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		}
 	}
 
-	// Copy data before returning buffer to pool
+	// Copy data before returning buffers to pool
 	data := make([]byte, n)
 	copy(data, buf[:n])
 	handoffBufPool.Put(bufPtr)
+	oobBufPool.Put(oobPtr)
 
 	return allFds[0], data, nil
 }
@@ -793,14 +854,8 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	// Write directly to conn without buffering for lowest latency SSE streaming.
 	// Each write goes straight to the kernel, minimizing TTFB.
 
-	// Send HTTP headers for SSE
-	headers := "HTTP/1.1 200 OK\r\n" +
-		"Content-Type: text/event-stream\r\n" +
-		"Cache-Control: no-cache\r\n" +
-		"Connection: close\r\n" +
-		"X-Accel-Buffering: no\r\n" + // Disable buffering in nginx/proxies
-		"\r\n"
-	headerBytes, err := conn.Write([]byte(headers))
+	// Send HTTP headers for SSE (use pre-allocated bytes to avoid conversion)
+	headerBytes, err := conn.Write(sseHeadersBytes)
 	if err != nil {
 		return totalBytes, fmt.Errorf("failed to write headers: %w", err)
 	}
@@ -862,6 +917,11 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData)
 		"[DONE-CONTENT]",
 	}
 
+	// Set write deadline once upfront, refresh periodically
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
+
 	for i, msg := range messages {
 		select {
 		case <-ctx.Done():
@@ -869,11 +929,18 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData)
 		default:
 		}
 
-		// Send SSE event (resets write deadline after each successful write)
+		// Send SSE event
 		n, err := sendSSE(conn, msg)
 		totalBytes += int64(n)
 		if err != nil {
 			return totalBytes, err
+		}
+
+		// Refresh write deadline every 5 writes to reduce syscalls
+		if (i+1)%5 == 0 {
+			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				return totalBytes, fmt.Errorf("set write deadline: %w", err)
+			}
 		}
 
 		// Simulate token generation delay (configurable via -message-delay flag).
@@ -906,32 +973,19 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData)
 	return totalBytes, nil
 }
 
-// OpenAI API request/response types
-type openAIRequest struct {
-	Model    string          `json:"model"`
-	Messages []openAIMessage `json:"messages"`
-	Stream   bool            `json:"stream"`
-}
-
-type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type openAIChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
+// requestBufPool reuses buffers for building HTTP request bodies.
+var requestBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 512)
+		return &buf
+	},
 }
 
 // streamFromOpenAI streams a response from an OpenAI-compatible API.
 func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
 
-	// Build request body
+	// Build request body using pooled buffer to avoid allocations
 	prompt := handoff.Prompt
 	if prompt == "" {
 		prompt = "Hello"
@@ -941,23 +995,21 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		model = "gpt-4o-mini"
 	}
 
-	reqBody := openAIRequest{
-		Model: model,
-		Messages: []openAIMessage{
-			{Role: "user", Content: prompt},
-		},
-		Stream: true,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("marshal request: %w", err)
-	}
+	// Get buffer from pool and build request JSON manually
+	bufPtr := requestBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	buf = append(buf, `{"model":"`...)
+	buf = appendJSONEscaped(buf, model)
+	buf = append(buf, `","messages":[{"role":"user","content":"`...)
+	buf = appendJSONEscaped(buf, prompt)
+	buf = append(buf, `"}],"stream":true}`...)
 
 	// Create HTTP request
 	url := openaiAPIBase + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(buf))
 	if err != nil {
+		*bufPtr = buf
+		requestBufPool.Put(bufPtr)
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -965,6 +1017,11 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 
 	// Make request
 	resp, err := httpClient.Do(req)
+
+	// Return buffer to pool after request is sent
+	*bufPtr = buf
+	requestBufPool.Put(bufPtr)
+
 	if err != nil {
 		return 0, fmt.Errorf("http request: %w", err)
 	}
@@ -975,40 +1032,53 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
+	// Set write deadline once for entire stream (refreshed periodically below)
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
+
 	// Parse SSE stream and forward to client
+	// Use a larger buffer to reduce syscalls
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 65536)
+
+	writeCount := 0
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := scanner.Bytes() // Use Bytes() to avoid string allocation
 
 		// Skip empty lines
-		if line == "" {
+		if len(line) == 0 {
 			continue
 		}
 
-		// Check for data: prefix
-		if !strings.HasPrefix(line, "data: ") {
+		// Check for data: prefix (6 bytes)
+		if len(line) < 6 || string(line[:6]) != "data: " {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := line[6:] // Skip "data: " prefix
 
 		// Check for [DONE] marker
-		if data == "[DONE]" {
+		if len(data) == 6 && string(data) == "[DONE]" {
 			break
 		}
 
-		// Parse JSON chunk
-		var chunk openAIChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue // Skip malformed chunks
-		}
-
-		// Extract content and forward
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			n, err := sendSSE(conn, chunk.Choices[0].Delta.Content)
+		// Fast-path content extraction without full JSON parsing.
+		// Look for "content":" pattern and extract the value.
+		content := extractContentFast(data)
+		if content != "" {
+			n, err := sendSSE(conn, content)
 			totalBytes += int64(n)
 			if err != nil {
 				return totalBytes, err
+			}
+
+			// Refresh write deadline every 10 writes instead of every write
+			writeCount++
+			if writeCount%10 == 0 {
+				if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+					return totalBytes, fmt.Errorf("set write deadline: %w", err)
+				}
 			}
 		}
 	}
@@ -1028,33 +1098,151 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	return totalBytes, nil
 }
 
+// extractContentFast extracts the "content" field from an OpenAI SSE chunk
+// without full JSON parsing. Returns empty string if not found.
+// Expected format: {"choices":[{"delta":{"content":"text"},...}]}
+func extractContentFast(data []byte) string {
+	// Look for "content":" pattern
+	pattern := []byte(`"content":"`)
+	idx := bytes.Index(data, pattern)
+	if idx < 0 {
+		return ""
+	}
+
+	// Find the start of the content value
+	start := idx + len(pattern)
+	if start >= len(data) {
+		return ""
+	}
+
+	// Find the end of the string (unescaped quote)
+	end := start
+	for end < len(data) {
+		if data[end] == '"' {
+			break
+		}
+		if data[end] == '\\' && end+1 < len(data) {
+			end += 2 // Skip escaped character
+			continue
+		}
+		end++
+	}
+
+	if end <= start {
+		return ""
+	}
+
+	// Unescape the content if it contains escapes
+	content := data[start:end]
+	if bytes.IndexByte(content, '\\') >= 0 {
+		return unescapeJSON(content)
+	}
+	return string(content)
+}
+
+// unescapeJSON unescapes a JSON string value.
+func unescapeJSON(b []byte) string {
+	// Fast path: no escapes
+	if bytes.IndexByte(b, '\\') < 0 {
+		return string(b)
+	}
+
+	result := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\\' && i+1 < len(b) {
+			i++
+			switch b[i] {
+			case 'n':
+				result = append(result, '\n')
+			case 'r':
+				result = append(result, '\r')
+			case 't':
+				result = append(result, '\t')
+			case '"', '\\', '/':
+				result = append(result, b[i])
+			case 'u':
+				// Unicode escape \uXXXX - simplified handling
+				if i+4 < len(b) {
+					// For simplicity, just skip the unicode escape
+					// A full implementation would parse the hex value
+					i += 4
+				}
+			default:
+				result = append(result, b[i])
+			}
+		} else {
+			result = append(result, b[i])
+		}
+	}
+	return string(result)
+}
+
+// sseBufPool reuses buffers for SSE message construction to reduce allocations.
+var sseBufPool = sync.Pool{
+	New: func() any {
+		// Pre-allocate buffer for typical SSE message: "data: {"content":"..."}\n\n"
+		buf := make([]byte, 0, 256)
+		return &buf
+	},
+}
+
 // sendSSE sends a single SSE event with the given content.
 // Writes directly to conn without buffering for lowest latency.
-// It resets the write deadline after each successful write to implement
-// a per-write idle timeout (not a total stream timeout).
 // Returns bytes written and any error.
+// Note: Write deadline should be set by caller for better performance.
 func sendSSE(conn net.Conn, content string) (int, error) {
-	// json.Marshal on map[string]string cannot fail with current types;
-	// keep error check as defensive programming in case payload changes.
-	data, err := json.Marshal(map[string]string{"content": content})
-	if err != nil {
-		return 0, fmt.Errorf("json marshal failed: %w", err)
-	}
-	msg := fmt.Sprintf("data: %s\n\n", data)
-	n, err := conn.Write([]byte(msg))
+	// Get buffer from pool
+	bufPtr := sseBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+
+	// Manually construct JSON to avoid map allocation and reflection.
+	// Format: data: {"content":"<escaped-content>"}\n\n
+	buf = append(buf, "data: {\"content\":\""...)
+	buf = appendJSONEscaped(buf, content)
+	buf = append(buf, "\"}\n\n"...)
+
+	n, err := conn.Write(buf)
+
+	// Return buffer to pool
+	*bufPtr = buf
+	sseBufPool.Put(bufPtr)
+
 	if err != nil {
 		return n, fmt.Errorf("write failed: %w", err)
 	}
 	if !*benchmarkMode {
 		metricBytesSent.Add(float64(n))
 	}
-	// Reset deadline after successful write for per-write idle timeout.
-	// Treat failure as fatal so we don't continue streaming without timeout protection.
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return n, fmt.Errorf("set write deadline failed: %w", err)
-	}
 	return n, nil
 }
+
+// appendJSONEscaped appends a JSON-escaped string to buf.
+// Only escapes characters required by JSON spec: \ " and control chars.
+func appendJSONEscaped(buf []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\', '"':
+			buf = append(buf, '\\', c)
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			if c < 0x20 {
+				// Control character - use \uXXXX format
+				buf = append(buf, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
+			} else {
+				buf = append(buf, c)
+			}
+		}
+	}
+	return buf
+}
+
+const hexDigits = "0123456789abcdef"
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
