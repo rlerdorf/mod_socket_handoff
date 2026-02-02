@@ -29,22 +29,28 @@ struct Http2Settings {
     initial_connection_window_size: u32,
     max_send_buffer_size: usize,
     keep_alive_interval: Option<Duration>,
-    keep_alive_timeout: Duration,
+    keep_alive_timeout: Option<Duration>,
 }
 
 impl Http2Settings {
     fn from_config(config: &Config) -> Self {
+        // Only configure keep-alive settings when enabled (h2_keepalive_secs > 0)
+        let (keep_alive_interval, keep_alive_timeout) = if config.h2_keepalive_secs > 0 {
+            (
+                Some(Duration::from_secs(config.h2_keepalive_secs)),
+                Some(Duration::from_secs(config.h2_keepalive_secs)),
+            )
+        } else {
+            (None, None)
+        };
+
         Self {
             max_concurrent_streams: config.h2_max_streams,
             initial_stream_window_size: config.h2_stream_window_kb * 1024,
             initial_connection_window_size: config.h2_connection_window_kb * 1024,
             max_send_buffer_size: (config.h2_send_buffer_kb as usize) * 1024,
-            keep_alive_interval: if config.h2_keepalive_secs > 0 {
-                Some(Duration::from_secs(config.h2_keepalive_secs))
-            } else {
-                None
-            },
-            keep_alive_timeout: Duration::from_secs(config.h2_keepalive_secs.max(10)),
+            keep_alive_interval,
+            keep_alive_timeout,
         }
     }
 
@@ -53,14 +59,19 @@ impl Http2Settings {
         builder.initial_stream_window_size(self.initial_stream_window_size);
         builder.initial_connection_window_size(self.initial_connection_window_size);
         builder.adaptive_window(true);
+        // Keep the HTTP/2 max frame size at the RFC 7540 default (16 KiB).
+        // Larger frames can increase memory pressure and cause interoperability
+        // issues with some clients and intermediaries, so we intentionally do
+        // not expose this as a user-tunable CLI option.
         builder.max_frame_size(16 * 1024);
         builder.max_send_buf_size(self.max_send_buffer_size);
 
         // Keep-alive requires a timer for scheduling pings
-        if self.keep_alive_interval.is_some() {
+        if let (Some(interval), Some(timeout)) = (self.keep_alive_interval, self.keep_alive_timeout)
+        {
             builder.timer(TokioTimer::new());
-            builder.keep_alive_interval(self.keep_alive_interval);
-            builder.keep_alive_timeout(self.keep_alive_timeout);
+            builder.keep_alive_interval(Some(interval));
+            builder.keep_alive_timeout(timeout);
         }
     }
 }
