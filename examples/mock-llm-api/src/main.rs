@@ -11,10 +11,10 @@ use clap::Parser;
 use hyper::server::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use hyper_util::service::TowerToHyperService;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -86,7 +86,10 @@ async fn run_server(config: Config) {
     let tcp_app = app.clone();
     let tcp_task = tokio::spawn(async move {
         loop {
-            let (stream, _) = tcp_listener.accept().await.expect("Failed to accept TCP connection");
+            let (stream, _) = tcp_listener
+                .accept()
+                .await
+                .expect("Failed to accept TCP connection");
             let app = tcp_app.clone();
 
             tokio::spawn(async move {
@@ -122,17 +125,20 @@ async fn run_server(config: Config) {
         let unix_listener = UnixListener::bind(socket_path).expect("Failed to bind Unix socket");
 
         // Set permissions to allow other processes to connect
-        std::fs::set_permissions(socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o666))
-            .expect("Failed to set socket permissions");
+        std::fs::set_permissions(
+            socket_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o666),
+        )
+        .expect("Failed to set socket permissions");
 
-        info!(
-            "Also listening on unix:{}",
-            socket_path
-        );
+        info!("Also listening on unix:{}", socket_path);
 
         // Serve on Unix socket - use auto builder for HTTP/1.1 and HTTP/2 support
         loop {
-            let (stream, _) = unix_listener.accept().await.expect("Failed to accept Unix connection");
+            let (stream, _) = unix_listener
+                .accept()
+                .await
+                .expect("Failed to accept Unix connection");
             let app = app.clone();
 
             tokio::spawn(async move {
