@@ -13,12 +13,17 @@
 # Usage:
 #   sudo ./run_capacity_benchmark.sh              # Test all daemons
 #   sudo ./run_capacity_benchmark.sh rust         # Test only Rust daemon
+#   sudo ./run_capacity_benchmark.sh rust-http2   # Test Rust with HTTP/2 multiplexing
 #   sudo ./run_capacity_benchmark.sh --help       # Show help
 #
-# Available daemons: php, go, rust, uring
+# Available daemons: php, go, rust, rust-http2, uring
 #
 
 set -e
+
+# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/benchmark_common.sh"
 
 #=============================================================================
 # CONFIGURABLE THRESHOLDS
@@ -56,7 +61,12 @@ while [[ $# -gt 0 ]]; do
             echo "Discover maximum sustainable connection count for streaming daemons."
             echo ""
             echo "Arguments:"
-            echo "  daemon    One or more daemons to test: php, go, rust, uring"
+            echo "  daemon    One or more daemons to test:"
+            echo "            php, go, rust, rust-http2, uring"
+            echo ""
+            echo "            rust      - Rust daemon with HTTP/1.1 (Unix socket to API)"
+            echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo ""
             echo "            If not specified, all daemons are tested."
             echo ""
             echo "Thresholds (edit script to change):"
@@ -69,16 +79,17 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  sudo $0              # Test all daemons"
             echo "  sudo $0 rust go      # Test Rust and Go only"
+            echo "  sudo $0 rust-http2   # Test Rust with HTTP/2 multiplexing"
             echo ""
             exit 0
             ;;
-        php|go|rust|uring)
+        php|go|rust|rust-http2|uring)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, go, rust, uring"
+            echo "Valid daemons: php, go, rust, rust-http2, uring"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -90,251 +101,17 @@ if [ ${#DAEMONS_TO_RUN[@]} -eq 0 ]; then
     DAEMONS_TO_RUN=(php go rust uring)
 fi
 
-# Check for required dependencies
-if ! command -v jq >/dev/null 2>&1; then
-    echo "Error: jq is required but not installed"
-    echo "Install with: apt install jq (Debian/Ubuntu) or brew install jq (macOS)"
-    exit 1
-fi
+# Initialize benchmark environment
+init_benchmark "$SCRIPT_DIR"
 
-# Check if daemon should be run
-should_run() {
-    local daemon=$1
-    for d in "${DAEMONS_TO_RUN[@]}"; do
-        if [ "$d" = "$daemon" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Check root
-IS_ROOT=false
-if [ "$EUID" -eq 0 ]; then
-    IS_ROOT=true
-fi
-
-# Set up file descriptor limit
-DESIRED_FD_LIMIT=500000
-if ! ulimit -n $DESIRED_FD_LIMIT 2>/dev/null; then
-    DESIRED_FD_LIMIT=65536
-    if ! ulimit -n $DESIRED_FD_LIMIT 2>/dev/null; then
-        DESIRED_FD_LIMIT=$(ulimit -n)
-        echo "Warning: Could not increase fd limit (current: $DESIRED_FD_LIMIT)"
-        echo "         High connection counts may fail. Run with sudo for full tests."
-    fi
-fi
-echo "File descriptor limit set to: $(ulimit -n)"
-
-# System tuning (if root)
-ORIG_MAX_MAP_COUNT=""
-ORIG_SOMAXCONN=""
-restore_sysctl() {
-    if [ -n "$ORIG_MAX_MAP_COUNT" ]; then
-        sysctl -w vm.max_map_count="$ORIG_MAX_MAP_COUNT" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$ORIG_SOMAXCONN" ]; then
-        sysctl -w net.core.somaxconn="$ORIG_SOMAXCONN" >/dev/null 2>&1 || true
-    fi
-}
-if $IS_ROOT; then
-    ORIG_MAX_MAP_COUNT=$(sysctl -n vm.max_map_count)
-    sysctl -w vm.max_map_count=262144 >/dev/null
-    echo "vm.max_map_count set to: $(sysctl -n vm.max_map_count)"
-
-    ORIG_SOMAXCONN=$(sysctl -n net.core.somaxconn)
-    sysctl -w net.core.somaxconn=65535 >/dev/null
-    echo "net.core.somaxconn set to: $(sysctl -n net.core.somaxconn)"
-else
-    echo "Note: Running without root. Some daemons may fail at high connection counts."
-fi
-trap 'cleanup; restore_sysctl' EXIT INT TERM
-
-# Paths
-if $IS_ROOT; then
-    SOCKET="/var/run/streaming-daemon.sock"
-else
-    SOCKET="/tmp/streaming-daemon-bench.sock"
-fi
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOAD_GEN="$SCRIPT_DIR/load-generator/load-generator"
+# Set up results directory
 RESULTS_DIR="$SCRIPT_DIR/capacity-results-$(date +%Y%m%d-%H%M%S)"
-EXAMPLES_DIR="$(cd "$SCRIPT_DIR/../examples" && pwd)"
-MOCK_API_DIR="$EXAMPLES_DIR/mock-llm-api"
-MOCK_API_BIN="$MOCK_API_DIR/target/release/mock-llm-api"
-# Mock API endpoints:
-# - Unix socket for HTTP/1.1 daemons (avoids TCP port exhaustion)
-# - TCP for HTTP/2 daemons (enables multiplexing)
-MOCK_API_SOCKET="/tmp/mock-llm-api-capacity.sock"
-MOCK_API_HOST="127.0.0.1"
-MOCK_API_PORT="18080"
-MOCK_API_TCP_ADDR="${MOCK_API_HOST}:${MOCK_API_PORT}"
-MOCK_API_PID=""
-
-# Calculate max connections based on fd limits
-HARD_FD_LIMIT=$(ulimit -Hn)
-if [ "$HARD_FD_LIMIT" = "unlimited" ] || ! [[ "$HARD_FD_LIMIT" =~ ^[0-9]+$ ]]; then
-    HARD_FD_LIMIT=1048576
-fi
-MAX_CONNECTIONS=$(( (HARD_FD_LIMIT - 1000) / 3 ))
-if [ "$MAX_CONNECTIONS" -lt 150000 ]; then
-    MAX_CONNECTIONS=150000
-fi
-echo "Max testable connections: $MAX_CONNECTIONS"
-
 mkdir -p "$RESULTS_DIR"
 echo "Results will be saved to: $RESULTS_DIR"
 echo ""
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-# Find binaries
-find_binary() {
-    local name=$1
-    if command -v "$name" >/dev/null 2>&1; then
-        command -v "$name"
-        return
-    fi
-    for dir in "$HOME/.cargo/bin" "/home/$SUDO_USER/.cargo/bin" \
-               "$HOME/go/bin" "/home/$SUDO_USER/go/bin" \
-               "/usr/local/go/bin" "/usr/local/bin" "/usr/bin"; do
-        if [ -x "$dir/$name" ]; then
-            echo "$dir/$name"
-            return
-        fi
-    done
-    echo ""
-}
-CARGO_BIN="$(find_binary cargo)"
-GO_BIN="$(find_binary go)"
-
-#=============================================================================
-# MOCK API MANAGEMENT
-#=============================================================================
-
-# Calculate chunk delay for stream duration to match ramp-up
-calculate_chunk_delay() {
-    local conns=$1
-    local rampup_ms
-    if [ "$conns" -le 10000 ]; then
-        rampup_ms=10000
-    elif [ "$conns" -le 100000 ]; then
-        rampup_ms=30000
-    else
-        rampup_ms=60000
-    fi
-    echo $(( (rampup_ms * 12 / 10) / 17 ))
-}
-
-build_mock_api() {
-    if [ ! -x "$MOCK_API_BIN" ]; then
-        if [ -z "$CARGO_BIN" ]; then
-            echo -e "${RED}ERROR: cargo not found. Please build mock-llm-api first.${NC}"
-            exit 1
-        fi
-        echo "Building mock-llm-api..."
-        (cd "$MOCK_API_DIR" && "$CARGO_BIN" build --release)
-    fi
-}
-
-start_mock_api() {
-    local chunk_delay=${1:-706}
-    stop_mock_api
-    rm -f "$MOCK_API_SOCKET"
-
-    # Start mock API with both Unix socket (HTTP/1.1) and TCP (HTTP/2)
-    "$MOCK_API_BIN" --socket "$MOCK_API_SOCKET" --listen "$MOCK_API_TCP_ADDR" --chunk-delay-ms "$chunk_delay" --chunk-count 18 --quiet &
-    MOCK_API_PID=$!
-
-    # Wait for both endpoints to be ready
-    local tries=0
-    while [ $tries -lt 30 ]; do
-        local socket_ok=false
-        local tcp_ok=false
-        if [ -S "$MOCK_API_SOCKET" ]; then
-            if curl -s --unix-socket "$MOCK_API_SOCKET" http://localhost/health > /dev/null 2>&1; then
-                socket_ok=true
-            fi
-        fi
-        # TCP endpoint uses h2c prior knowledge (HTTP/2 only)
-        if curl -s --http2-prior-knowledge "http://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
-            tcp_ok=true
-        fi
-        if $socket_ok && $tcp_ok; then
-            return 0
-        fi
-        sleep 0.1
-        tries=$((tries + 1))
-    done
-
-    echo -e "${RED}ERROR: Mock API failed to start${NC}"
-    exit 1
-}
-
-stop_mock_api() {
-    if [ -n "$MOCK_API_PID" ]; then
-        kill -TERM "$MOCK_API_PID" 2>/dev/null || true
-        wait "$MOCK_API_PID" 2>/dev/null || true
-        MOCK_API_PID=""
-    fi
-    pkill -9 -f "mock-llm-api" 2>/dev/null || true
-    rm -f "$MOCK_API_SOCKET"
-}
-
-#=============================================================================
-# DAEMON MANAGEMENT
-#=============================================================================
-
-cleanup_daemons() {
-    pkill -9 -f "load-generator" 2>/dev/null || true
-
-    local go_pids=$(pgrep -f "streaming-daemon-go/streaming-daemon" 2>/dev/null || true)
-    local rust_pids=$(pgrep -f "streaming-daemon-rs" 2>/dev/null || true)
-    local php_pids=$(pgrep -f "streaming_daemon.php" 2>/dev/null || true)
-    local uring_pids=$(pgrep -f "streaming-daemon-uring" 2>/dev/null || true)
-
-    for pid in $go_pids $rust_pids $php_pids $uring_pids; do
-        if [ -n "$pid" ]; then
-            kill -TERM "$pid" 2>/dev/null || true
-        fi
-    done
-
-    local tries=0
-    while [ $tries -lt 5 ]; do
-        local still_running=false
-        for pid in $go_pids $rust_pids $php_pids $uring_pids; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                still_running=true
-                break
-            fi
-        done
-        if ! $still_running; then
-            break
-        fi
-        sleep 1
-        tries=$((tries + 1))
-    done
-
-    for pid in $go_pids $rust_pids $php_pids $uring_pids; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
-
-    pkill -9 -f "sudo.*streaming-daemon" 2>/dev/null || true
-    rm -f "$SOCKET"
-    sleep 1
-}
-
-cleanup() {
-    stop_mock_api
-    cleanup_daemons
-}
+# Set up cleanup trap
+trap 'cleanup; restore_sysctl' EXIT INT TERM
 
 #=============================================================================
 # SINGLE TEST EXECUTION
@@ -342,7 +119,7 @@ cleanup() {
 
 # Run a single test at N connections and collect metrics
 # Returns JSON file path with results
-# Usage: run_single_test <daemon_name> <start_cmd> <pattern> <connections>
+# Usage: run_single_test <daemon_name> <start_cmd> <pattern> <connections> <test_id>
 run_single_test() {
     set +e  # Disable errexit for this function to ensure we always output result path
     local name=$1
@@ -639,71 +416,18 @@ find_capacity() {
 }
 
 #=============================================================================
-# DAEMON-SPECIFIC CONFIGURATIONS
-#=============================================================================
-
-get_php_cmd() {
-    echo "php -n -dextension=ev.so -c $EXAMPLES_DIR/streaming-daemon-amp/php.ini $EXAMPLES_DIR/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 --max-connections 50000 --backend openai --openai-base http://localhost/v1 --openai-socket $MOCK_API_SOCKET --benchmark"
-}
-
-get_go_cmd() {
-    echo "OPENAI_API_KEY=benchmark-test $EXAMPLES_DIR/streaming-daemon-go/streaming-daemon -socket $SOCKET -benchmark -backend openai -openai-base http://localhost/v1 -openai-socket $MOCK_API_SOCKET -max-connections ${MAX_CONNECTIONS} -socket-mode 0660 -metrics-addr="
-}
-
-get_rust_cmd() {
-    echo "RUST_LOG=warn DAEMON_SOCKET_MODE=0666 DAEMON_METRICS_ENABLED=false OPENAI_API_BASE=http://localhost/v1 OPENAI_API_SOCKET=$MOCK_API_SOCKET OPENAI_API_KEY=benchmark-test $EXAMPLES_DIR/streaming-daemon-rs/target/release/streaming-daemon-rs --benchmark -s $SOCKET -b openai"
-}
-
-get_uring_cmd() {
-    # Use TCP for HTTP/2 multiplexing (no OPENAI_API_SOCKET, which would use Unix socket)
-    echo "OPENAI_API_BASE=http://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test $EXAMPLES_DIR/streaming-daemon-uring/streaming-daemon-uring --socket $SOCKET --socket-mode 0660 --max-connections ${MAX_CONNECTIONS} --benchmark"
-}
-
-#=============================================================================
 # BUILD DEPENDENCIES
 #=============================================================================
 
-# Build load generator
-if [ ! -x "$LOAD_GEN" ]; then
-    if [ -z "$GO_BIN" ]; then
-        echo -e "${RED}ERROR: go not found. Please build load generator first.${NC}"
-        exit 1
-    fi
-    echo "Building load generator..."
-    (cd "$SCRIPT_DIR/load-generator" && "$GO_BIN" build -o load-generator .)
-fi
-
-# Build mock API
+build_load_generator
 build_mock_api
 
-# Build uring daemon if needed
 if should_run uring; then
-    URING_DIR="$EXAMPLES_DIR/streaming-daemon-uring"
-    URING_BIN="$URING_DIR/streaming-daemon-uring"
-    URING_BACKEND_MARKER="$URING_DIR/.backend"
-    CURRENT_BACKEND=""
-    if [ -f "$URING_BACKEND_MARKER" ]; then
-        CURRENT_BACKEND=$(cat "$URING_BACKEND_MARKER")
-    fi
-    if [ ! -x "$URING_BIN" ] || [ "$CURRENT_BACKEND" != "openai" ]; then
-        echo "Building C io_uring daemon with openai backend..."
-        make -C "$URING_DIR" clean >/dev/null 2>&1
-        make -C "$URING_DIR" BACKEND=openai -j$(nproc)
-        echo "openai" > "$URING_BACKEND_MARKER"
-    fi
+    build_uring_daemon "openai"
 fi
 
-# Build Go daemon if needed
 if should_run go; then
-    GO_DAEMON="$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon"
-    if [ ! -x "$GO_DAEMON" ]; then
-        if [ -z "$GO_BIN" ]; then
-            echo -e "${RED}ERROR: go not found. Please build Go daemon first.${NC}"
-            exit 1
-        fi
-        echo "Building Go daemon..."
-        (cd "$EXAMPLES_DIR/streaming-daemon-go" && "$GO_BIN" build -o streaming-daemon .)
-    fi
+    build_go_daemon
 fi
 
 #=============================================================================
@@ -731,28 +455,35 @@ declare -A RESULT_JSONS
 
 # Test each daemon
 if should_run php; then
-    find_capacity "php" "$(get_php_cmd)" "streaming_daemon.php"
+    find_capacity "php" "$(get_php_cmd "llm-api" 0 50000)" "streaming_daemon.php"
     CAPACITY_RESULTS[php]=$FOUND_CAPACITY
     LIMITING_FACTORS[php]="$LIMITING_FACTOR"
     RESULT_JSONS[php]="$FOUND_JSON"
 fi
 
 if should_run go; then
-    find_capacity "go" "$(get_go_cmd)" "streaming-daemon-go/streaming-daemon"
+    find_capacity "go" "$(get_go_cmd "llm-api" 0)" "streaming-daemon-go/streaming-daemon"
     CAPACITY_RESULTS[go]=$FOUND_CAPACITY
     LIMITING_FACTORS[go]="$LIMITING_FACTOR"
     RESULT_JSONS[go]="$FOUND_JSON"
 fi
 
 if should_run rust; then
-    find_capacity "rust" "$(get_rust_cmd)" "streaming-daemon-rs"
+    find_capacity "rust" "$(get_rust_cmd "llm-api" 0 "http1")" "streaming-daemon-rs"
     CAPACITY_RESULTS[rust]=$FOUND_CAPACITY
     LIMITING_FACTORS[rust]="$LIMITING_FACTOR"
     RESULT_JSONS[rust]="$FOUND_JSON"
 fi
 
+if should_run rust-http2; then
+    find_capacity "rust-http2" "$(get_rust_cmd "llm-api" 0 "http2")" "streaming-daemon-rs"
+    CAPACITY_RESULTS[rust-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[rust-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[rust-http2]="$FOUND_JSON"
+fi
+
 if should_run uring; then
-    find_capacity "uring" "$(get_uring_cmd)" "streaming-daemon-uring"
+    find_capacity "uring" "$(get_uring_cmd "llm-api" 0)" "streaming-daemon-uring"
     CAPACITY_RESULTS[uring]=$FOUND_CAPACITY
     LIMITING_FACTORS[uring]="$LIMITING_FACTOR"
     RESULT_JSONS[uring]="$FOUND_JSON"
@@ -790,7 +521,7 @@ Generated: $(date)
 |--------|-----------------|----------|----------|----------|---------|-----------------|
 EOF
 
-for daemon in rust go uring php; do
+for daemon in rust rust-http2 go uring php; do
     if [ -n "${CAPACITY_RESULTS[$daemon]}" ]; then
         json="${RESULT_JSONS[$daemon]}"
         capacity="${CAPACITY_RESULTS[$daemon]}"
@@ -821,6 +552,13 @@ cat >> "$REPORT_FILE" << 'EOF'
 - **Peak RSS**: Peak Resident Set Size from /proc/PID/status
 - **Limiting Factor**: The metric that caused the first failure above the max capacity
 - Results confirmed with stability runs to ensure consistency
+
+## HTTP/2 Mode
+
+- **rust**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
+- **rust-http2**: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
+  - With HTTP/2, ~100 streams share each TCP connection vs 1 stream per connection with HTTP/1.1
+  - This reduces connection overhead from 100k to ~1k connections for 100k concurrent streams
 
 ## Methodology
 

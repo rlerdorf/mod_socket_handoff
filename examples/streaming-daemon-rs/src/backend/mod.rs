@@ -39,6 +39,7 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 config.timeout(),
                 config.openai.pool_max_idle_per_host,
                 config.openai.api_socket.clone(),
+                &config.openai.http2,
             )?))
         }
         other => Err(BackendError::Config(format!(
