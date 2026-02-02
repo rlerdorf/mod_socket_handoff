@@ -90,6 +90,13 @@ if [ ${#DAEMONS_TO_RUN[@]} -eq 0 ]; then
     DAEMONS_TO_RUN=(php go rust uring)
 fi
 
+# Check for required dependencies
+if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq is required but not installed"
+    echo "Install with: apt install jq (Debian/Ubuntu) or brew install jq (macOS)"
+    exit 1
+fi
+
 # Check if daemon should be run
 should_run() {
     local daemon=$1

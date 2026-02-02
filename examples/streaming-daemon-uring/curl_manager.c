@@ -230,8 +230,13 @@ static int timer_callback(CURLM *multi, long timeout_ms, void *userp) {
          */
     }
 
-    /* Submit new timeout */
+    /* Submit new timeout.
+     * Skip 0 on wraparound so it can be used as "no timer".
+     */
     mgr->timer_id++;
+    if (mgr->timer_id == 0) {
+        mgr->timer_id = 1;
+    }
     if (ring_submit_curl_timeout(mgr->ctx, (int)timeout_ms, mgr->timer_id) == 0) {
         mgr->timer_active = true;
     }
@@ -264,7 +269,11 @@ static int process_sse_line(curl_request_t *req, const char *line) {
 
     content_key += 11;  /* Skip "content":" */
 
-    /* Extract content until closing quote, handling escapes */
+    /* Extract content until closing quote, handling escapes.
+     * Note: This handles the common escapes (\n, \r, \t, \", \\) but not
+     * all JSON escapes (\b, \f, \uXXXX). LLM responses rarely use these,
+     * but if needed, add cases below or use a proper JSON parser.
+     */
     char content[4096];
     size_t i = 0;
     while (*content_key && *content_key != '"' && i < sizeof(content) - 1) {
