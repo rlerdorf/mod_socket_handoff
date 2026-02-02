@@ -222,22 +222,18 @@ start_mock_api() {
         --chunk-delay-ms "$chunk_delay" --chunk-count 18 --quiet &
     MOCK_API_PID=$!
 
-    # Wait for both endpoints to be ready.
-    # Note: Mock API speaks HTTP/2 (h2c) on both the Unix socket and TCP listener.
-    #       Some daemons may disable HTTP/2 on their *client* side, but the Unix
-    #       socket itself still serves HTTP/2, which is why we use
-    #       --http2-prior-knowledge for this health check.
+    # Wait until both Unix socket and TCP health endpoints are ready.
     local tries=0
     local socket_ready=false
     local tcp_ready=false
     while [ $tries -lt 50 ]; do
-        # Check Unix socket (serves HTTP/2; HTTP/2 prior knowledge required)
+        # Check Unix socket health endpoint
         if [ -S "$MOCK_API_SOCKET" ] && ! $socket_ready; then
             if curl -s --http2-prior-knowledge --unix-socket "$MOCK_API_SOCKET" http://localhost/health > /dev/null 2>&1; then
                 socket_ready=true
             fi
         fi
-        # Check TCP endpoint (HTTP/2 prior knowledge)
+        # Check TCP health endpoint
         if ! $tcp_ready; then
             if curl -s --http2-prior-knowledge "http://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
                 tcp_ready=true
