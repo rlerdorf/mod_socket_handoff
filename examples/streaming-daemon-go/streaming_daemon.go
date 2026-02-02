@@ -33,11 +33,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -1111,6 +1113,12 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 // extractContentFast extracts the "content" field from an OpenAI SSE chunk
 // without full JSON parsing. Returns empty string if not found.
 // Expected format: {"choices":[{"delta":{"content":"text"},...}]}
+//
+// Edge cases handled:
+//   - Incomplete escape at buffer end: breaks loop, returns content up to that point
+//   - Invalid escape sequences (e.g., \x): logs warning, treats backslash as literal
+//   - Empty content ("content":""): returns empty string (valid)
+//   - Missing closing quote: returns content up to buffer end
 func extractContentFast(data []byte) string {
 	// Look for "content":" pattern
 	pattern := []byte(`"content":"`)
@@ -1142,7 +1150,9 @@ func extractContentFast(data []byte) string {
 				end += 2 // Skip valid escaped character
 				continue
 			}
-			// Invalid escape sequence; treat backslash as normal character
+			// Invalid escape sequence; log warning and treat backslash as normal character
+			// This could indicate malformed JSON from the API
+			log.Printf("Warning: invalid JSON escape sequence '\\%c' in content field", next)
 			end++
 			continue
 		}
@@ -1183,16 +1193,20 @@ func unescapeJSON(b []byte) string {
 				result = append(result, '\r')
 			case 't':
 				result = append(result, '\t')
+			case 'b':
+				result = append(result, '\b')
+			case 'f':
+				result = append(result, '\f')
 			case '"', '\\', '/':
 				result = append(result, b[i])
 			case 'u':
-				// Unicode escape \uXXXX - decode to UTF-8
+				// Unicode escape \uXXXX - decode to UTF-8 using standard library
 				if i+4 < len(b) {
-					r := decodeHex4(b[i+1 : i+5])
-					if r >= 0 {
-						// Encode rune as UTF-8
+					hexStr := string(b[i+1 : i+5])
+					if codepoint, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
+						// Encode rune as UTF-8 using standard library
 						var buf [4]byte
-						n := encodeRuneToBytes(buf[:], rune(r))
+						n := utf8.EncodeRune(buf[:], rune(codepoint))
 						result = append(result, buf[:n]...)
 					}
 					i += 4
@@ -1207,52 +1221,6 @@ func unescapeJSON(b []byte) string {
 	return string(result)
 }
 
-// decodeHex4 decodes 4 hex digits (e.g., "0041" -> 65) to an integer.
-// Returns -1 if input is too short or contains invalid hex characters.
-func decodeHex4(b []byte) int {
-	if len(b) < 4 {
-		return -1
-	}
-	var n int
-	for _, c := range b[:4] {
-		n <<= 4
-		switch {
-		case c >= '0' && c <= '9':
-			n |= int(c - '0')
-		case c >= 'a' && c <= 'f':
-			n |= int(c - 'a' + 10)
-		case c >= 'A' && c <= 'F':
-			n |= int(c - 'A' + 10)
-		default:
-			return -1
-		}
-	}
-	return n
-}
-
-// encodeRuneToBytes encodes a rune to UTF-8 bytes. Returns number of bytes written.
-func encodeRuneToBytes(buf []byte, r rune) int {
-	if r < 0x80 {
-		buf[0] = byte(r)
-		return 1
-	}
-	if r < 0x800 {
-		buf[0] = byte(0xC0 | (r >> 6))
-		buf[1] = byte(0x80 | (r & 0x3F))
-		return 2
-	}
-	if r < 0x10000 {
-		buf[0] = byte(0xE0 | (r >> 12))
-		buf[1] = byte(0x80 | ((r >> 6) & 0x3F))
-		buf[2] = byte(0x80 | (r & 0x3F))
-		return 3
-	}
-	buf[0] = byte(0xF0 | (r >> 18))
-	buf[1] = byte(0x80 | ((r >> 12) & 0x3F))
-	buf[2] = byte(0x80 | ((r >> 6) & 0x3F))
-	buf[3] = byte(0x80 | (r & 0x3F))
-	return 4
-}
 
 // sseBufPool reuses buffers for SSE message construction to reduce allocations.
 var sseBufPool = sync.Pool{
