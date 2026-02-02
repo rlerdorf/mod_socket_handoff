@@ -25,16 +25,29 @@ pub struct OpenAIBackend {
 
 impl OpenAIBackend {
     /// Create a new OpenAI backend.
+    ///
+    /// If `api_socket` is provided, all connections will use the Unix socket
+    /// instead of TCP, eliminating ephemeral port limits for high-concurrency scenarios.
     pub fn new(
         api_key: String,
         api_base: String,
         default_model: String,
         timeout: Duration,
         pool_max_idle_per_host: usize,
+        api_socket: Option<String>,
     ) -> Result<Self, BackendError> {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(timeout)
-            .pool_max_idle_per_host(pool_max_idle_per_host)
+            .pool_max_idle_per_host(pool_max_idle_per_host);
+
+        // Use Unix socket if configured (eliminates ephemeral port limits)
+        #[cfg(unix)]
+        if let Some(socket_path) = api_socket {
+            tracing::info!(socket = %socket_path, "Using Unix socket for API connections");
+            builder = builder.unix_socket(socket_path);
+        }
+
+        let client = builder
             .build()
             .map_err(|e| BackendError::Connection(e.to_string()))?;
 

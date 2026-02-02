@@ -5,9 +5,15 @@ use clap::Parser;
 #[command(name = "mock-llm-api")]
 #[command(about = "Mock LLM API server for benchmarking streaming daemons")]
 pub struct Config {
-    /// Listen address
+    /// Listen address (TCP) for HTTP/2 multiplexing clients
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     pub listen: String,
+
+    /// Unix socket path (optional, in addition to TCP)
+    /// This provides an alternative endpoint for high-concurrency benchmarks
+    /// where TCP ephemeral port limits may be a concern
+    #[arg(short, long)]
+    pub socket: Option<String>,
 
     /// Number of chunks to stream per response
     #[arg(short = 'c', long, default_value = "18")]

@@ -9,6 +9,9 @@ license = "Apache-2.0"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+tower = { version = "0.4", features = ["util"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

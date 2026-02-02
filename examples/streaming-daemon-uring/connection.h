@@ -24,6 +24,9 @@ void conn_reset(connection_t *conn);
 /* Get connection by ID */
 connection_t *conn_get(daemon_ctx_t *ctx, uint32_t id);
 
+/* Grow handoff buffer to next tier size. Returns 0 on success, -1 if at max. */
+int conn_grow_handoff_buf(connection_t *conn);
+
 /* Set connection state */
 void conn_set_state(connection_t *conn, conn_state_t state);
 

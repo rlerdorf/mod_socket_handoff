@@ -29,9 +29,15 @@ static const char *demo_messages[] = {
 
 #define NUM_DEMO_MESSAGES (sizeof(demo_messages) / sizeof(demo_messages[0]))
 
+/* Target chunk size for LLM response streaming (~100-200 chars like demo messages) */
+#define LLM_CHUNK_TARGET_SIZE 150
+
 /* Static buffer for first two dynamic messages */
 static __thread char dynamic_msg1[256];
 static __thread char dynamic_msg2[128];
+
+/* Static buffer for LLM response chunks */
+static __thread char llm_chunk_buf[LLM_CHUNK_TARGET_SIZE + 64];
 
 const char **stream_get_messages(int *count) {
     *count = NUM_DEMO_MESSAGES;
@@ -56,6 +62,43 @@ static const char *truncate_prompt(const char *prompt, size_t max_len) {
 }
 
 const char *stream_next_message(connection_t *conn, size_t *len) {
+    /* If streaming LLM response, chunk the accumulated content */
+    if (conn->use_llm_response) {
+        size_t remaining = conn->handoff_len - conn->llm_response_pos;
+        if (remaining == 0) {
+            /* Done streaming LLM response */
+            *len = 0;
+            return NULL;
+        }
+
+        /* Determine chunk size - try to break on word boundaries */
+        size_t chunk_size = remaining < LLM_CHUNK_TARGET_SIZE ? remaining : LLM_CHUNK_TARGET_SIZE;
+
+        /* If not at end, try to find a word boundary */
+        if (chunk_size < remaining) {
+            const char *start = conn->handoff_buf + conn->llm_response_pos;
+            size_t i = chunk_size;
+            /* Look backward for a space */
+            while (i > 0 && start[i] != ' ' && start[i] != '\n') {
+                i--;
+            }
+            /* Use word boundary if found, otherwise use full chunk */
+            if (i > 0) {
+                chunk_size = i + 1; /* Include the space */
+            }
+        }
+
+        /* Copy chunk to buffer */
+        memcpy(llm_chunk_buf, conn->handoff_buf + conn->llm_response_pos, chunk_size);
+        llm_chunk_buf[chunk_size] = '\0';
+
+        conn->llm_response_pos += chunk_size;
+        conn->stream_index++;
+        *len = chunk_size;
+        return llm_chunk_buf;
+    }
+
+    /* Demo mode: use static messages */
     int index = conn->stream_index;
 
     if (index == 0) {

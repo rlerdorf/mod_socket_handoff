@@ -25,21 +25,23 @@ declare(strict_types=1);
 // Disable memory limit to match Go/Rust/Python behavior
 ini_set('memory_limit', '-1');
 
-// Reduce fiber stack size for high concurrency (default is ~8MB virtual per fiber)
-// 64KB is sufficient for simple streaming - reduces memory pressure significantly
-ini_set('fiber.stack_size', '64k');
+// Note: fiber.stack_size is set in php.ini (64k) - cannot be changed at runtime
+// zend.max_allowed_stack_size is also set in php.ini (-1 to disable limit)
 
 require __DIR__ . '/vendor/autoload.php';
 
 use Amp\DeferredCancellation;
+use Amp\Socket\ConnectContext;
 use Revolt\EventLoop;
 use function Amp\async;
 use function Amp\delay;
+use function Amp\Socket\connect;
 
 const DEFAULT_SOCKET_PATH = '/var/run/streaming-daemon-amp.sock';
 const DEFAULT_SOCKET_MODE = 0660;
 const DEFAULT_SSE_DELAY_MS = 50;
 const MAX_HANDOFF_DATA_SIZE = 65536;  // 64KB - matches Go daemon
+const DEFAULT_MAX_CONNECTIONS = 50000; // Limit concurrent connections to prevent OOM
 
 // MSG_TRUNC and MSG_CTRUNC may not be defined on all platforms
 if (!defined('MSG_TRUNC')) {
@@ -77,7 +79,7 @@ const STATIC_MESSAGES = [
 ];
 
 // Parse command line arguments
-$options = getopt('s:m:d:hb', ['socket:', 'mode:', 'delay:', 'help', 'benchmark']);
+$options = getopt('s:m:d:hb', ['socket:', 'mode:', 'delay:', 'help', 'benchmark', 'backend:', 'openai-base:', 'openai-socket:', 'max-connections:']);
 
 if (isset($options['h']) || isset($options['help'])) {
     echo <<<HELP
@@ -89,6 +91,12 @@ Options:
   -s, --socket PATH    Unix socket path (default: /var/run/streaming-daemon-amp.sock)
   -m, --mode MODE      Socket permissions in octal (default: 0660)
   -d, --delay MS       Delay between SSE messages in ms (default: 50, use 3333 for 30s streams)
+  --backend TYPE       Backend type: 'mock' (demo messages) or 'openai' (HTTP streaming API)
+  --openai-base URL    OpenAI API base URL (default: OPENAI_API_BASE env or http://localhost:8080)
+  --openai-socket PATH Unix socket for OpenAI API (eliminates ephemeral port limits)
+                       When set, connects via Unix socket instead of TCP
+  --max-connections N  Max concurrent connections (default: 50000). When limit is reached,
+                       new connections queue in kernel backlog until capacity is available.
   -b, --benchmark      Enable benchmark mode: quieter output, print summary on shutdown
   -h, --help           Show this help
 
@@ -101,6 +109,11 @@ $socketMode = octdec($options['m'] ?? $options['mode'] ?? '0660');
 $sseDelayMs = (int)($options['d'] ?? $options['delay'] ?? DEFAULT_SSE_DELAY_MS);
 $sseDelaySeconds = $sseDelayMs / 1000;  // Pre-calculate once
 $benchmarkMode = isset($options['b']) || isset($options['benchmark']);
+$backendType = $options['backend'] ?? 'mock';
+$openaiBase = $options['openai-base'] ?? getenv('OPENAI_API_BASE') ?: 'http://127.0.0.1:8080';
+$openaiSocket = $options['openai-socket'] ?? getenv('OPENAI_API_SOCKET') ?: null;
+$openaiKey = getenv('OPENAI_API_KEY') ?: 'benchmark-test';
+$maxConnections = (int)($options['max-connections'] ?? getenv('MAX_CONNECTIONS') ?: DEFAULT_MAX_CONNECTIONS);
 
 // Check for required extensions
 if (!extension_loaded('sockets')) {
@@ -108,12 +121,20 @@ if (!extension_loaded('sockets')) {
 }
 
 // Increase file descriptor limit to handle many concurrent connections
+// With OpenAI backend, each connection uses ~3 fds (apache + client + api socket)
+// So 100k connections need ~300k fds. Set high limit for headroom.
 if (function_exists('posix_setrlimit')) {
-    $desiredLimit = 100000;
+    $desiredLimit = 500000;
     if (posix_setrlimit(POSIX_RLIMIT_NOFILE, $desiredLimit, $desiredLimit)) {
         echo "Increased fd limit to $desiredLimit\n";
     } else {
-        echo "Warning: could not increase fd limit\n";
+        // Try lower limit if 500k fails
+        $desiredLimit = 100000;
+        if (posix_setrlimit(POSIX_RLIMIT_NOFILE, $desiredLimit, $desiredLimit)) {
+            echo "Increased fd limit to $desiredLimit (500k not available)\n";
+        } else {
+            echo "Warning: could not increase fd limit\n";
+        }
     }
 }
 
@@ -234,6 +255,157 @@ function writeAll($stream, string $data): int|false
 }
 
 /**
+ * Stream response from OpenAI-compatible API using async I/O.
+ * Returns [success, bytesSent].
+ *
+ * Uses Amp's async socket to avoid blocking the event loop, enabling
+ * concurrent API requests across multiple client connections.
+ *
+ * @param mixed $stream Client stream to write SSE chunks to
+ * @param array $handoffData Request data from the handoff
+ * @param string $openaiBase API base URL (used for HTTP path)
+ * @param string $openaiKey API key
+ * @param string|null $openaiSocket Unix socket path (if set, uses Unix socket instead of TCP)
+ */
+function streamFromOpenAI(mixed $stream, array $handoffData, string $openaiBase, string $openaiKey, ?string $openaiSocket = null): array
+{
+    global $benchmarkMode;
+    $bytesSent = 0;
+
+    $prompt = $handoffData['prompt'] ?? 'Hello';
+    $model = $handoffData['model'] ?? 'gpt-4o-mini';
+
+    // Build request body
+    $body = json_encode([
+        'model' => $model,
+        'messages' => [['role' => 'user', 'content' => $prompt]],
+        'stream' => true,
+    ]);
+
+    // Parse URL for HTTP request path
+    $url = parse_url($openaiBase . '/chat/completions');
+    $host = $url['host'] ?? 'localhost';
+    $port = $url['port'] ?? 80;
+    $path = $url['path'] ?? '/chat/completions';
+
+    try {
+        // Connect using Amp's async socket (non-blocking)
+        $context = (new ConnectContext())->withConnectTimeout(10);
+
+        if ($openaiSocket !== null) {
+            // Use Unix socket for high-concurrency (no ephemeral port limits)
+            $apiSocket = connect("unix://{$openaiSocket}", $context);
+        } else {
+            // Use TCP
+            $apiSocket = connect("tcp://{$host}:{$port}", $context);
+        }
+    } catch (\Exception $e) {
+        if (!$benchmarkMode) {
+            echo "OpenAI connect failed: " . $e->getMessage() . "\n";
+        }
+        return [false, $bytesSent];
+    }
+
+    try {
+        // Build and send HTTP request
+        $request = "POST {$path} HTTP/1.1\r\n";
+        $request .= "Host: {$host}\r\n";
+        $request .= "Content-Type: application/json\r\n";
+        $request .= "Authorization: Bearer {$openaiKey}\r\n";
+        $request .= "Content-Length: " . strlen($body) . "\r\n";
+        $request .= "Connection: close\r\n";
+        $request .= "\r\n";
+        $request .= $body;
+
+        $apiSocket->write($request);
+
+        // Read response (headers + body) in chunks
+        $buffer = '';
+        $headersComplete = false;
+
+        while (($chunk = $apiSocket->read()) !== null) {
+            $buffer .= $chunk;
+
+            // Process complete lines from buffer
+            while (($pos = strpos($buffer, "\n")) !== false) {
+                $line = substr($buffer, 0, $pos);
+                $buffer = substr($buffer, $pos + 1);
+
+                // Strip \r if present
+                $line = rtrim($line, "\r");
+
+                // Skip headers until we see empty line
+                if (!$headersComplete) {
+                    if ($line === '') {
+                        $headersComplete = true;
+                    }
+                    continue;
+                }
+
+                // Skip empty lines in body
+                if ($line === '') continue;
+
+                // Check for data: prefix (SSE format)
+                if (!str_starts_with($line, 'data: ')) continue;
+
+                $data = substr($line, 6);
+
+                // Check for [DONE] marker
+                if ($data === '[DONE]') {
+                    // Send [DONE] to client before closing
+                    $doneData = json_encode(['content' => '[DONE]']);
+                    $doneMsg = "data: {$doneData}\n\n";
+                    $written = writeAll($stream, $doneMsg);
+                    if ($written !== false) {
+                        $bytesSent += $written;
+                    }
+                    $apiSocket->close();
+                    return [true, $bytesSent];
+                }
+
+                // Parse JSON chunk
+                $chunk = json_decode($data, true);
+                if (!$chunk) continue;
+
+                // Extract content
+                $content = $chunk['choices'][0]['delta']['content'] ?? null;
+                if ($content !== null && $content !== '') {
+                    // Forward as SSE to client
+                    $sseData = json_encode(['content' => $content]);
+                    $sseMsg = "data: {$sseData}\n\n";
+                    $written = writeAll($stream, $sseMsg);
+                    if ($written === false) {
+                        $apiSocket->close();
+                        return [false, $bytesSent];
+                    }
+                    $bytesSent += $written;
+                }
+            }
+        }
+
+        // API stream ended without [DONE] marker - send one to client
+        $doneData = json_encode(['content' => '[DONE]']);
+        $doneMsg = "data: {$doneData}\n\n";
+        $written = writeAll($stream, $doneMsg);
+        if ($written !== false) {
+            $bytesSent += $written;
+        }
+
+        $apiSocket->close();
+        unset($apiSocket, $buffer, $request);
+        return [true, $bytesSent];
+
+    } catch (\Exception $e) {
+        if (!$benchmarkMode) {
+            echo "OpenAI streaming error: " . $e->getMessage() . "\n";
+        }
+        try { $apiSocket->close(); } catch (\Exception $e) {}
+        unset($apiSocket, $buffer, $request);
+        return [false, $bytesSent];
+    }
+}
+
+/**
  * Stream an SSE response to the client using async I/O.
  */
 function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats $stats): void
@@ -272,51 +444,62 @@ function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats 
         }
         $bytesSent += $written;
 
-        // Send dynamic messages first (3 messages with per-connection data)
-        $userId = $handoffData['user_id'] ?? 0;
-        $prompt = $handoffData['prompt'] ?? 'unknown';
-        $promptDisplay = strlen($prompt) > 50 ? substr($prompt, 0, 50) . '...' : $prompt;
+        global $backendType, $openaiBase, $openaiKey, $openaiSocket, $sseDelaySeconds;
 
-        $dynamicLines = [
-            "Connection $connId: Hello from AMPHP async daemon!",
-            "User ID: $userId",
-            "Prompt: $promptDisplay",
-        ];
-
-        $index = 0;
-        global $sseDelaySeconds;
-
-        // Send dynamic messages (3 messages with per-connection data)
-        foreach ($dynamicLines as $line) {
-            $data = json_encode(['content' => $line, 'index' => $index]);
-            $sseMsg = "data: {$data}\n\n";
-
-            $written = writeAll($stream, $sseMsg);
-            if ($written === false) {
-                throw new RuntimeException("Write failed");
+        if ($backendType === 'openai') {
+            // Use OpenAI backend (via Unix socket if configured, otherwise TCP)
+            [$success, $apiBytes] = streamFromOpenAI($stream, $handoffData, $openaiBase, $openaiKey, $openaiSocket);
+            $bytesSent += $apiBytes;
+            if (!$success) {
+                throw new RuntimeException("OpenAI streaming failed");
             }
-            $bytesSent += $written;
-            $index++;
+        } else {
+            // Send dynamic messages first (3 messages with per-connection data)
+            $userId = $handoffData['user_id'] ?? 0;
+            $prompt = $handoffData['prompt'] ?? 'unknown';
+            $promptDisplay = strlen($prompt) > 50 ? substr($prompt, 0, 50) . '...' : $prompt;
 
-            delay($sseDelaySeconds);
-        }
+            $dynamicLines = [
+                "Connection $connId: Hello from AMPHP async daemon!",
+                "User ID: $userId",
+                "Prompt: $promptDisplay",
+            ];
 
-        // Send static messages (15 messages from constant array)
-        foreach (STATIC_MESSAGES as $line) {
-            $data = json_encode(['content' => $line, 'index' => $index]);
-            $sseMsg = "data: {$data}\n\n";
+            $index = 0;
 
-            $written = writeAll($stream, $sseMsg);
-            if ($written === false) {
-                break;
+            // Send dynamic messages (3 messages with per-connection data)
+            foreach ($dynamicLines as $line) {
+                $data = json_encode(['content' => $line, 'index' => $index]);
+                $sseMsg = "data: {$data}\n\n";
+
+                $written = writeAll($stream, $sseMsg);
+                if ($written === false) {
+                    throw new RuntimeException("Write failed");
+                }
+                $bytesSent += $written;
+                $index++;
+
+                delay($sseDelaySeconds);
             }
-            $bytesSent += $written;
-            $index++;
 
-            delay($sseDelaySeconds);
+            // Send static messages (15 messages from constant array)
+            foreach (STATIC_MESSAGES as $line) {
+                $data = json_encode(['content' => $line, 'index' => $index]);
+                $sseMsg = "data: {$data}\n\n";
+
+                $written = writeAll($stream, $sseMsg);
+                if ($written === false) {
+                    break;
+                }
+                $bytesSent += $written;
+                $index++;
+
+                delay($sseDelaySeconds);
+            }
         }
 
         fclose($stream);
+        unset($stream);
         $success = true;
 
     } catch (Throwable $e) {
@@ -342,6 +525,11 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
         // Receive fd (blocking, but quick)
         [$clientFd, $data] = receiveFd($apacheConn);
 
+        // Close Apache connection immediately - we have the fd and data now
+        // This is critical for high concurrency: don't hold the Apache socket
+        // open during the entire streaming response (which can be 10-30+ seconds)
+        socket_close($apacheConn);
+
         if ($clientFd === null) {
             throw new RuntimeException("No file descriptor received");
         }
@@ -364,8 +552,6 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
         }
         // Note: Don't call streamEnd() here - streamStart() is only called
         // inside streamResponse(), so calling streamEnd() here would unbalance counters
-    } finally {
-        socket_close($apacheConn);
     }
 }
 
@@ -374,15 +560,30 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
  */
 function main(string $socketPath, int $socketMode): void
 {
-    global $stats, $benchmarkMode;
+    global $stats, $benchmarkMode, $maxConnections;
+
+    global $backendType, $openaiBase, $openaiSocket;
 
     echo "AMPHP Async Streaming Daemon starting\n";
     echo "PHP " . PHP_VERSION . "\n";
     echo "Event loop: " . get_class(EventLoop::getDriver()) . "\n";
     echo "Socket: $socketPath\n";
+    echo "Backend: $backendType\n";
+    if ($backendType === 'openai') {
+        echo "OpenAI base: $openaiBase\n";
+        if ($openaiSocket) {
+            echo "OpenAI socket: $openaiSocket (Unix socket, no port limits)\n";
+        }
+    }
+    echo "Max connections: $maxConnections\n";
     if ($benchmarkMode) {
         echo "Benchmark mode enabled: quieter output, will print summary on shutdown\n";
     }
+
+    // Connection counter for limiting concurrent connections
+    // This prevents OOM by capping concurrent connections - excess connections
+    // queue in the kernel backlog (up to somaxconn) until capacity is available
+    $activeConnections = 0;
 
     // Remove stale socket
     if (file_exists($socketPath)) {
@@ -439,24 +640,52 @@ function main(string $socketPath, int $socketMode): void
     });
 
     // Accept loop using event loop
-    EventLoop::onReadable(socket_export_stream($server), function ($id, $serverStream) use (&$connId, $server, $stats, &$running) {
+    // Use greedy accept pattern: drain ALL pending connections per readable event
+    // This prevents backlog buildup under high connection rates
+    $acceptPaused = false;
+    $acceptCallbackId = null;  // Will be set after registration
+    $acceptCallbackId = EventLoop::onReadable(socket_export_stream($server), function ($id, $serverStream) use (&$connId, $server, $stats, &$running, &$activeConnections, $maxConnections, &$acceptPaused, &$acceptCallbackId) {
         if (!$running) {
             return;
         }
 
-        // Accept connection (non-blocking)
-        $apacheConn = @socket_accept($server);
-        if ($apacheConn === false) {
-            return; // No connection ready
+        // Greedy accept: drain all pending connections before returning to event loop
+        while (true) {
+            // Check connection limit
+            if ($activeConnections >= $maxConnections) {
+                // At capacity - PAUSE accepting to avoid busy-wait loop
+                // Will be resumed when a connection completes
+                $acceptPaused = true;
+                EventLoop::disable($acceptCallbackId);
+                return;
+            }
+
+            $apacheConn = @socket_accept($server);
+            if ($apacheConn === false) {
+                return; // EAGAIN/EWOULDBLOCK - no more pending connections
+            }
+
+            $connId++;
+            $currentConnId = $connId;
+            $activeConnections++;
+
+            // Handle connection in a new fiber (async)
+            // Capture callback ID by value to break potential reference cycles
+            $cbId = $acceptCallbackId;
+            async(function () use ($apacheConn, $currentConnId, $stats, &$activeConnections, &$acceptPaused, $cbId) {
+                try {
+                    handleConnection($apacheConn, $currentConnId, $stats);
+                } finally {
+                    $activeConnections--;
+                    if ($acceptPaused) {
+                        $acceptPaused = false;
+                        EventLoop::enable($cbId);
+                    }
+                    // Break cyclic references in AMPHP connect() - prevents memory explosion
+                    gc_collect_cycles();
+                }
+            });
         }
-
-        $connId++;
-        $currentConnId = $connId;
-
-        // Handle connection in a new fiber (async)
-        async(function () use ($apacheConn, $currentConnId, $stats) {
-            handleConnection($apacheConn, $currentConnId, $stats);
-        });
     });
 
     echo "Ready, accepting connections...\n";
