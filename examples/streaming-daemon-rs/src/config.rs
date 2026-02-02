@@ -119,10 +119,15 @@ pub struct OpenAIConfig {
     /// When set, all HTTP connections to the API use this Unix socket.
     /// The api_base URL is still used for the HTTP path, but the connection
     /// goes through the Unix socket.
+    /// Note: Only used when HTTP/2 is disabled (HTTP/1.1 mode).
+    /// With HTTP/2, multiplexing happens at the protocol layer over TCP.
     pub api_socket: Option<String>,
 
     /// Maximum idle connections per host in pool.
     pub pool_max_idle_per_host: usize,
+
+    /// HTTP/2 configuration for upstream API connections.
+    pub http2: Http2Config,
 }
 
 impl Default for OpenAIConfig {
@@ -132,6 +137,56 @@ impl Default for OpenAIConfig {
             api_base: "https://api.openai.com/v1".to_string(),
             api_socket: None,
             pool_max_idle_per_host: 100,
+            http2: Http2Config::default(),
+        }
+    }
+}
+
+/// HTTP/2 configuration for upstream API connections.
+///
+/// HTTP/2 multiplexing allows ~100 concurrent streams to share a single TCP
+/// connection, dramatically reducing connection overhead for high-concurrency
+/// scenarios (100k streams can share ~1000 connections instead of 100k).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Http2Config {
+    /// Enable HTTP/2 for upstream connections (default: true).
+    /// Set to false to force HTTP/1.1 for compatibility or debugging.
+    /// Can be overridden with OPENAI_HTTP2_ENABLED=false environment variable.
+    pub enabled: bool,
+
+    /// Initial stream-level flow control window size in KB (default: 64).
+    /// Larger values allow more buffering per stream before flow control kicks in.
+    pub initial_stream_window_kb: u32,
+
+    /// Initial connection-level flow control window size in KB (default: 1024).
+    /// Should be >= stream_window * expected_concurrent_streams.
+    /// For 100 concurrent streams with 64KB windows, 1024KB is the minimum.
+    pub initial_connection_window_kb: u32,
+
+    /// Enable adaptive flow control (default: true).
+    /// Allows dynamic adjustment of window sizes based on actual throughput,
+    /// which helps with bursty LLM streaming patterns.
+    pub adaptive_window: bool,
+
+    /// Keep-alive ping interval in seconds (default: 20, 0 = disabled).
+    /// Sends HTTP/2 PING frames to keep connections alive and detect stale ones.
+    pub keep_alive_interval_secs: u64,
+
+    /// Keep-alive timeout in seconds (default: 40).
+    /// How long to wait for a PING response before considering the connection dead.
+    pub keep_alive_timeout_secs: u64,
+}
+
+impl Default for Http2Config {
+    fn default() -> Self {
+        Self {
+            enabled: true, // HTTP/2 is default
+            initial_stream_window_kb: 64,
+            initial_connection_window_kb: 1024,
+            adaptive_window: true,
+            keep_alive_interval_secs: 20,
+            keep_alive_timeout_secs: 40,
         }
     }
 }
@@ -271,6 +326,10 @@ impl Config {
         if let Ok(v) = std::env::var("OPENAI_API_SOCKET") {
             self.backend.openai.api_socket = Some(v);
         }
+        // HTTP/2 overrides
+        if let Ok(v) = std::env::var("OPENAI_HTTP2_ENABLED") {
+            self.backend.openai.http2.enabled = v != "false" && v != "0";
+        }
 
         // Metrics overrides
         if let Ok(v) = std::env::var("DAEMON_METRICS_ENABLED") {
@@ -332,6 +391,17 @@ mod tests {
     }
 
     #[test]
+    fn test_default_http2_config() {
+        let config = Http2Config::default();
+        assert!(config.enabled);
+        assert_eq!(config.initial_stream_window_kb, 64);
+        assert_eq!(config.initial_connection_window_kb, 1024);
+        assert!(config.adaptive_window);
+        assert_eq!(config.keep_alive_interval_secs, 20);
+        assert_eq!(config.keep_alive_timeout_secs, 40);
+    }
+
+    #[test]
     fn test_parse_toml() {
         let toml = r#"
             [server]
@@ -346,5 +416,29 @@ mod tests {
         assert_eq!(config.server.socket_path, "/tmp/test.sock");
         assert_eq!(config.server.max_connections, 5000);
         assert_eq!(config.backend.provider, "openai");
+    }
+
+    #[test]
+    fn test_parse_http2_config() {
+        let toml = r#"
+            [backend]
+            provider = "openai"
+
+            [backend.openai.http2]
+            enabled = false
+            initial_stream_window_kb = 128
+            initial_connection_window_kb = 2048
+            adaptive_window = false
+            keep_alive_interval_secs = 30
+            keep_alive_timeout_secs = 60
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.backend.openai.http2.enabled);
+        assert_eq!(config.backend.openai.http2.initial_stream_window_kb, 128);
+        assert_eq!(config.backend.openai.http2.initial_connection_window_kb, 2048);
+        assert!(!config.backend.openai.http2.adaptive_window);
+        assert_eq!(config.backend.openai.http2.keep_alive_interval_secs, 30);
+        assert_eq!(config.backend.openai.http2.keep_alive_timeout_secs, 60);
     }
 }

@@ -1,6 +1,7 @@
 //! OpenAI streaming backend.
 //!
 //! Uses the OpenAI Chat Completions API with streaming.
+//! Supports HTTP/2 multiplexing for high-concurrency scenarios.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -13,6 +14,7 @@ use std::time::Duration;
 use super::traits::{
     ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend,
 };
+use crate::config::Http2Config;
 use crate::error::BackendError;
 
 /// OpenAI streaming backend.
@@ -26,8 +28,12 @@ pub struct OpenAIBackend {
 impl OpenAIBackend {
     /// Create a new OpenAI backend.
     ///
-    /// If `api_socket` is provided, all connections will use the Unix socket
-    /// instead of TCP, eliminating ephemeral port limits for high-concurrency scenarios.
+    /// When HTTP/2 is enabled (default), connections use HTTP/2 multiplexing over TCP,
+    /// allowing ~100 concurrent streams per connection. This dramatically reduces
+    /// connection overhead for high-concurrency scenarios.
+    ///
+    /// When HTTP/2 is disabled, falls back to HTTP/1.1 mode where `api_socket` can be
+    /// used to route connections through a Unix socket for connection pooling.
     pub fn new(
         api_key: String,
         api_base: String,
@@ -35,16 +41,71 @@ impl OpenAIBackend {
         timeout: Duration,
         pool_max_idle_per_host: usize,
         api_socket: Option<String>,
+        http2_config: &Http2Config,
     ) -> Result<Self, BackendError> {
         let mut builder = Client::builder()
             .timeout(timeout)
             .pool_max_idle_per_host(pool_max_idle_per_host);
 
-        // Use Unix socket if configured (eliminates ephemeral port limits)
-        #[cfg(unix)]
-        if let Some(socket_path) = api_socket {
-            tracing::info!(socket = %socket_path, "Using Unix socket for API connections");
-            builder = builder.unix_socket(socket_path);
+        // Determine if this is an HTTP (not HTTPS) endpoint
+        let is_plaintext = api_base.starts_with("http://");
+
+        // Configure HTTP version
+        if http2_config.enabled {
+            if is_plaintext {
+                // For http:// endpoints, use prior knowledge to skip upgrade negotiation.
+                // This enables h2c (HTTP/2 over cleartext) directly.
+                builder = builder.http2_prior_knowledge();
+                tracing::info!("HTTP/2 with prior knowledge (h2c) enabled for plaintext endpoint");
+            } else {
+                // For https:// endpoints, use ALPN negotiation during TLS handshake.
+                // Cannot use prior_knowledge with TLS - let TLS negotiate h2.
+                tracing::info!("HTTP/2 via ALPN negotiation enabled for TLS endpoint");
+            }
+
+            // Flow control tuning for high concurrency
+            builder = builder
+                .http2_initial_stream_window_size(http2_config.initial_stream_window_kb * 1024)
+                .http2_initial_connection_window_size(
+                    http2_config.initial_connection_window_kb * 1024,
+                );
+
+            if http2_config.adaptive_window {
+                builder = builder.http2_adaptive_window(true);
+            }
+
+            // Keep-alive for connection health
+            if http2_config.keep_alive_interval_secs > 0 {
+                builder = builder
+                    .http2_keep_alive_interval(Duration::from_secs(
+                        http2_config.keep_alive_interval_secs,
+                    ))
+                    .http2_keep_alive_timeout(Duration::from_secs(
+                        http2_config.keep_alive_timeout_secs,
+                    ))
+                    .http2_keep_alive_while_idle(true);
+            }
+
+            tracing::info!(
+                stream_window_kb = http2_config.initial_stream_window_kb,
+                conn_window_kb = http2_config.initial_connection_window_kb,
+                adaptive = http2_config.adaptive_window,
+                keep_alive_secs = http2_config.keep_alive_interval_secs,
+                "HTTP/2 flow control configured"
+            );
+        } else {
+            // HTTP/1.1 fallback mode
+            builder = builder.http1_only();
+            tracing::info!("HTTP/1.1 mode (HTTP/2 disabled)");
+
+            // Unix socket only makes sense for HTTP/1.1 connection pooling.
+            // With HTTP/2, multiplexing happens at the protocol layer over TCP,
+            // so we use TCP connections instead.
+            #[cfg(unix)]
+            if let Some(socket_path) = api_socket {
+                tracing::info!(socket = %socket_path, "Using Unix socket for API connections");
+                builder = builder.unix_socket(socket_path);
+            }
         }
 
         let client = builder
