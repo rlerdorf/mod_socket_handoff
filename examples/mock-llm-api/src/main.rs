@@ -36,10 +36,11 @@ impl Http2Settings {
     fn from_config(config: &Config) -> Self {
         // Only configure keep-alive settings when enabled (h2_keepalive_secs > 0)
         let (keep_alive_interval, keep_alive_timeout) = if config.h2_keepalive_secs > 0 {
-            (
-                Some(Duration::from_secs(config.h2_keepalive_secs)),
-                Some(Duration::from_secs(config.h2_keepalive_secs)),
-            )
+            let interval = Duration::from_secs(config.h2_keepalive_secs);
+            // Use a longer timeout than interval (2x) to allow for network delays
+            // and processing time, avoiding premature connection closure.
+            let timeout = Duration::from_secs(config.h2_keepalive_secs.saturating_mul(2));
+            (Some(interval), Some(timeout))
         } else {
             (None, None)
         };
@@ -59,11 +60,10 @@ impl Http2Settings {
         builder.initial_stream_window_size(self.initial_stream_window_size);
         builder.initial_connection_window_size(self.initial_connection_window_size);
         builder.adaptive_window(true);
-        // Keep the HTTP/2 max frame size at the RFC 7540 default (16 KiB).
+        // Rely on the HTTP/2 max frame size RFC 7540 default (16 KiB).
         // Larger frames can increase memory pressure and cause interoperability
         // issues with some clients and intermediaries, so we intentionally do
         // not expose this as a user-tunable CLI option.
-        builder.max_frame_size(16 * 1024);
         builder.max_send_buf_size(self.max_send_buffer_size);
 
         // Keep-alive requires a timer for scheduling pings

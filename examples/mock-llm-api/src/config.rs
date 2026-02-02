@@ -34,7 +34,7 @@ pub struct Config {
     // HTTP/2 tuning options for high-concurrency scenarios
 
     /// Max concurrent streams per HTTP/2 connection.
-    /// For 100k streams across 1k connections, use 100.
+    /// Default is 100 (e.g., 100k streams across 1k connections); adjust for other workloads as needed.
     #[arg(long, default_value = "100")]
     pub h2_max_streams: u32,
 
