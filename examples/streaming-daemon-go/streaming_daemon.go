@@ -80,6 +80,9 @@ const (
 	scannerMaxBufferSize     = 65536 // Maximum buffer for bufio.Scanner (64KB)
 )
 
+// Package-level byte slices to avoid allocation in hot paths
+var contentFieldPattern = []byte(`"content":"`)
+
 // Command-line flags
 var (
 	socketPath = flag.String("socket", DaemonSocket,
@@ -307,12 +310,12 @@ func main() {
 		}
 
 		// Create HTTP transport based on configuration
-		var transport http.RoundTripper
+		var roundTripper http.RoundTripper
 
 		if useHTTP2 && strings.HasPrefix(openaiAPIBase, "http://") {
 			// HTTP/2 with h2c (prior knowledge) for http:// endpoints
 			// HTTP/2 requires TCP, so ignore Unix socket setting
-			transport = &http2.Transport{
+			roundTripper = &http2.Transport{
 				AllowHTTP:          true,
 				DisableCompression: true, // Reduce CPU overhead in high-throughput streaming scenarios
 				ReadIdleTimeout:    30 * time.Second,
@@ -331,7 +334,7 @@ func main() {
 			log.Printf("OpenAI backend: %s (HTTP/2 h2c)", openaiAPIBase)
 		} else if useHTTP2 && strings.HasPrefix(openaiAPIBase, "https://") {
 			// HTTP/2 with ALPN negotiation for https:// endpoints
-			transport = &http.Transport{
+			roundTripper = &http.Transport{
 				ForceAttemptHTTP2:   true,
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
@@ -340,7 +343,7 @@ func main() {
 			log.Printf("OpenAI backend: %s (HTTP/2 ALPN)", openaiAPIBase)
 		} else if socketPath != "" {
 			// HTTP/1.1 with Unix socket for high-concurrency (no ephemeral port limits)
-			transport = &http.Transport{
+			roundTripper = &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return net.Dial("unix", socketPath)
 				},
@@ -351,7 +354,7 @@ func main() {
 			log.Printf("OpenAI backend: %s (HTTP/1.1 via unix:%s)", openaiAPIBase, socketPath)
 		} else {
 			// HTTP/1.1 with TCP
-			transport = &http.Transport{
+			roundTripper = &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
@@ -362,7 +365,7 @@ func main() {
 		// Create HTTP client with connection pooling
 		httpClient = &http.Client{
 			Timeout:   2 * time.Minute,
-			Transport: transport,
+			Transport: roundTripper,
 		}
 	}
 
@@ -1130,15 +1133,14 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 //   - Empty content ("content":""): returns empty string (valid)
 //   - Missing closing quote: returns content up to buffer end
 func extractContentFast(data []byte) string {
-	// Look for "content":" pattern
-	pattern := []byte(`"content":"`)
-	idx := bytes.Index(data, pattern)
+	// Look for "content":" pattern (uses package-level var to avoid allocation)
+	idx := bytes.Index(data, contentFieldPattern)
 	if idx < 0 {
 		return ""
 	}
 
 	// Find the start of the content value
-	start := idx + len(pattern)
+	start := idx + len(contentFieldPattern)
 	if start >= len(data) {
 		return ""
 	}
@@ -1221,8 +1223,8 @@ func unescapeJSON(b []byte) string {
 				result = append(result, b[i])
 			case 'u':
 				// Unicode escape \uXXXX - decode to UTF-8 using standard library.
-				// Need 4 hex digits (b[i+1] through b[i+4]), so require i+4 < len(b).
-				if i+4 < len(b) {
+				// Need 4 hex digits (b[i+1] through b[i+4]), so require i+5 <= len(b).
+				if i+5 <= len(b) {
 					hexStr := string(b[i+1 : i+5])
 					if codepoint, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
 						// Encode rune as UTF-8 using standard library
