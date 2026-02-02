@@ -307,7 +307,8 @@ func main() {
 				PingTimeout:        15 * time.Second,
 				// DialTLSContext is used by http2.Transport for ALL connections, not just TLS.
 				// For h2c (HTTP/2 cleartext), we dial plain TCP without TLS.
-				// The name is misleading but this is the correct approach per the http2 package docs.
+				// The name is misleading but this is the correct approach per the http2.Transport docs:
+				// https://pkg.go.dev/golang.org/x/net/http2#Transport
 				DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 					d := net.Dialer{
 						KeepAlive: 30 * time.Second,
@@ -1061,6 +1062,9 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 			continue
 		}
 
+		// Note: line and data reference scanner's internal buffer which is reused
+		// on next Scan(). This is safe because extractContentFast returns a string
+		// (copy), and we don't retain line/data references across iterations.
 		data := line[6:] // Skip "data: " prefix
 
 		// Check for [DONE] marker using bytes comparison (no allocation)
@@ -1070,6 +1074,7 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 
 		// Fast-path content extraction without full JSON parsing.
 		// Look for "content":" pattern and extract the value.
+		// Returns a string (copy), so safe even though data is from reused buffer.
 		content := extractContentFast(data)
 		if content != "" {
 			n, err := sendSSE(conn, content)
@@ -1124,8 +1129,21 @@ func extractContentFast(data []byte) string {
 	// Check for escape sequence first, then closing quote
 	end := start
 	for end < len(data) {
-		if data[end] == '\\' && end+1 < len(data) {
-			end += 2 // Skip escaped character (e.g., \", \\, \n)
+		if data[end] == '\\' {
+			// Handle incomplete escape at end of buffer
+			if end+1 >= len(data) {
+				break
+			}
+			next := data[end+1]
+			// Validate common JSON escape sequences: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+			if next == '"' || next == '\\' || next == '/' ||
+				next == 'b' || next == 'f' || next == 'n' ||
+				next == 'r' || next == 't' || next == 'u' {
+				end += 2 // Skip valid escaped character
+				continue
+			}
+			// Invalid escape sequence; treat backslash as normal character
+			end++
 			continue
 		}
 		if data[end] == '"' {
@@ -1134,7 +1152,8 @@ func extractContentFast(data []byte) string {
 		end++
 	}
 
-	if end <= start {
+	// end < start shouldn't happen; end == start means empty string which is valid
+	if end < start {
 		return ""
 	}
 
@@ -1188,7 +1207,8 @@ func unescapeJSON(b []byte) string {
 	return string(result)
 }
 
-// decodeHex4 decodes 4 hex digits to an integer. Returns -1 on error.
+// decodeHex4 decodes 4 hex digits (e.g., "0041" -> 65) to an integer.
+// Returns -1 if input is too short or contains invalid hex characters.
 func decodeHex4(b []byte) int {
 	if len(b) < 4 {
 		return -1
