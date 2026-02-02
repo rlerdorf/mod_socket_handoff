@@ -86,10 +86,15 @@ async fn run_server(config: Config) {
     let tcp_app = app.clone();
     let tcp_task = tokio::spawn(async move {
         loop {
-            let (stream, _) = tcp_listener
-                .accept()
-                .await
-                .expect("Failed to accept TCP connection");
+            let (stream, _) = match tcp_listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::error!("Failed to accept TCP connection: {}", e);
+                    // Brief backoff on error to avoid busy loop
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let app = tcp_app.clone();
 
             tokio::spawn(async move {

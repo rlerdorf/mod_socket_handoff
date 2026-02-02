@@ -89,6 +89,26 @@ int write_buffer_append(write_buffer_t *wb, const void *data, size_t len) {
             }
             wb->head = pending;
             wb->tail = 0;
+
+            /* After compacting, check if we have enough space.
+             * If not, grow the buffer.
+             */
+            if (pending + len > wb->capacity) {
+                size_t new_cap = wb->capacity * 2;
+                if (new_cap < pending + len) {
+                    new_cap = pending + len;
+                }
+                if (new_cap > WRITE_BUFFER_MAX_SIZE) {
+                    return -2;  /* Would exceed max size */
+                }
+
+                char *new_buf = realloc(wb->buffer, new_cap);
+                if (!new_buf) {
+                    return -1;  /* Allocation failure */
+                }
+                wb->buffer = new_buf;
+                wb->capacity = new_cap;
+            }
         }
     }
 

@@ -350,9 +350,11 @@ static void try_immediate_write(curl_request_t *req) {
     if (ring_submit_write(ctx, conn, data, len) < 0) {
         return;  /* Will be retried by flush_streaming_connections */
     }
-    if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
-        return;
-    }
+
+    /* Try to add linked timeout - if it fails, the write still proceeds
+     * but without timeout protection (less robust but still correct).
+     */
+    ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms);
 
     write_buffer_set_pending(wb, true);
 
@@ -686,9 +688,11 @@ void curl_manager_check_completions(curl_manager_t *mgr) {
             /* Queue [DONE] marker */
             write_buffer_t *wb = (write_buffer_t *)conn->async_write_buf;
             if (wb) {
-                write_buffer_append(wb, SSE_DONE, strlen(SSE_DONE));
-                /* Mark connection as having pending data for efficient flush */
-                daemon_mark_connection_dirty(mgr->ctx, conn);
+                if (write_buffer_append(wb, SSE_DONE, strlen(SSE_DONE)) == 0) {
+                    /* Mark connection as having pending data for efficient flush */
+                    daemon_mark_connection_dirty(mgr->ctx, conn);
+                }
+                /* If append fails (buffer full), we still close - client will see incomplete stream */
             }
 
             /* Move to CLOSING state - [DONE] is the last data to send */
