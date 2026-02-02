@@ -98,8 +98,11 @@ int server_create_listener(daemon_ctx_t *ctx) {
         /* Non-fatal - continue anyway */
     }
 
-    /* Listen with large backlog for high concurrency */
-    if (listen(fd, 4096) < 0) {
+    /* Listen with large backlog for high concurrency.
+     * Use 65535 to match net.core.somaxconn limit set by benchmark script.
+     * The kernel will cap this to somaxconn if needed.
+     */
+    if (listen(fd, 65535) < 0) {
         perror("listen");
         close(fd);
         unlink(ctx->socket_path);

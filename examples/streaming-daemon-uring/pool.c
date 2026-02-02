@@ -234,12 +234,17 @@ static void *worker_thread(void *arg) {
             connection_t *conn = work->conn;
             free(work);
 
-            /* Process the LLM API call (blocking) */
+            /* Process the LLM API call (blocking)
+             * Returns: 0 = start io_uring streaming, 1 = streaming done directly, <0 = error
+             */
             int result = backend_process(conn);
 
             /* Update state based on result */
             if (result == 0) {
                 conn_set_state(conn, CONN_STATE_STREAMING);
+            } else if (result > 0) {
+                /* Real-time streaming completed directly in backend */
+                conn_set_state(conn, CONN_STATE_STREAMED);
             } else {
                 conn_set_state(conn, CONN_STATE_CLOSING);
             }

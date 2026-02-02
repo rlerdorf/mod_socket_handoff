@@ -8,12 +8,18 @@ this can handle thousands of concurrent connections in a single process.
 
 Usage:
     sudo python3 streaming_daemon_async.py [-s /var/run/streaming-daemon.sock] [-w 50]
+    sudo python3 streaming_daemon_async.py --backend openai --openai-socket /tmp/api.sock
+
+Environment variables (for OpenAI backend):
+    OPENAI_API_KEY      - Required. API key for authentication
+    OPENAI_API_BASE     - Optional. Base URL (default: https://api.openai.com/v1)
+    OPENAI_API_SOCKET   - Optional. Unix socket path for API connections
 
 The daemon will:
 1. Listen on a Unix socket
 2. Receive client socket fds via SCM_RIGHTS (in thread pool due to blocking recvmsg)
 3. Spawn a coroutine per connection for concurrent handling
-4. Stream SSE responses to clients
+4. Stream SSE responses to clients (from OpenAI API or mock messages)
 
 Performance characteristics:
 - Single process, single thread event loop
@@ -46,6 +52,12 @@ except ImportError:
 # Default configuration
 DEFAULT_SOCKET_PATH = "/var/run/streaming-daemon-py.sock"
 DEFAULT_SOCKET_MODE = 0o660
+
+# OpenAI backend configuration (set from args/env)
+openai_backend = False
+openai_api_base = None
+openai_api_key = None
+openai_api_socket = None
 
 
 class Stats:
@@ -185,6 +197,156 @@ def recv_fd_blocking(conn: socket.socket) -> Tuple[int, bytes]:
     return fd, msg
 
 
+async def stream_from_openai(
+    client_writer: asyncio.StreamWriter,
+    handoff_data: dict,
+    conn_id: int,
+) -> Tuple[int, bool]:
+    """
+    Stream response from OpenAI API to the client.
+
+    Connects to OpenAI API (via Unix socket if configured), sends a streaming
+    chat completion request, and forwards SSE chunks to the client.
+
+    Uses asyncio StreamWriter for non-blocking client writes.
+
+    NOTE: This has issues under high load (100+ concurrent connections) due to
+    difficulties wrapping an SCM_RIGHTS-received fd in asyncio streams.
+    Works for small-scale testing but not production benchmarks.
+    Use Go/Rust/PHP daemons for production workloads.
+
+    Returns (bytes_sent, success) tuple.
+    """
+    bytes_sent = 0
+    success = False
+
+    try:
+        # Build the request
+        prompt = handoff_data.get("prompt", "Hello")
+        model = handoff_data.get("model", "gpt-4o-mini")
+        max_tokens = handoff_data.get("max_tokens", 1024)
+
+        request_body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "stream": True
+        })
+
+        # Parse API base URL
+        from urllib.parse import urlparse
+        parsed = urlparse(openai_api_base)
+        host = parsed.netloc or "localhost"
+        path = parsed.path or ""
+        if not path.endswith("/"):
+            path += "/"
+        path += "chat/completions"
+
+        # Connect to API (Unix socket or TCP)
+        if openai_api_socket:
+            reader, api_writer = await asyncio.open_unix_connection(openai_api_socket)
+        else:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            hostname = parsed.hostname or "localhost"
+            if parsed.scheme == "https":
+                import ssl
+                ssl_context = ssl.create_default_context()
+                reader, api_writer = await asyncio.open_connection(
+                    hostname, port, ssl=ssl_context
+                )
+            else:
+                reader, api_writer = await asyncio.open_connection(hostname, port)
+
+        # Send HTTP request
+        request = (
+            f"POST {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Authorization: Bearer {openai_api_key}\r\n"
+            f"Content-Length: {len(request_body)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+            f"{request_body}"
+        )
+        api_writer.write(request.encode())
+        await api_writer.drain()
+
+        # Read HTTP response status line
+        status_line = await reader.readline()
+        if not status_line:
+            raise RuntimeError("No response from API")
+
+        # Skip response headers
+        while True:
+            header_line = await reader.readline()
+            if header_line in (b"\r\n", b"\n", b""):
+                break
+
+        # Send SSE headers to client (non-blocking)
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "\r\n"
+        )
+        header_bytes = headers.encode("utf-8")
+        client_writer.write(header_bytes)
+        await client_writer.drain()
+        bytes_sent += len(header_bytes)
+
+        # Read and forward SSE chunks
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+
+            line_str = line.decode("utf-8", errors="replace").strip()
+            if not line_str:
+                continue
+
+            if not line_str.startswith("data: "):
+                continue
+
+            json_str = line_str[6:]  # Skip "data: "
+            if json_str == "[DONE]":
+                break
+
+            # Parse JSON and extract content
+            try:
+                chunk = json.loads(json_str)
+                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if content:
+                    # Forward as SSE to client (non-blocking)
+                    sse_data = json.dumps({"content": content})
+                    sse_msg = f"data: {sse_data}\n\n"
+                    msg_bytes = sse_msg.encode("utf-8")
+                    client_writer.write(msg_bytes)
+                    await client_writer.drain()
+                    bytes_sent += len(msg_bytes)
+            except json.JSONDecodeError:
+                continue
+
+        # Send [DONE] marker
+        done_data = json.dumps({"content": "[DONE]"})
+        done_msg = f"data: {done_data}\n\n"
+        done_bytes = done_msg.encode("utf-8")
+        client_writer.write(done_bytes)
+        await client_writer.drain()
+        bytes_sent += len(done_bytes)
+
+        api_writer.close()
+        await api_writer.wait_closed()
+        success = True
+
+    except Exception as e:
+        if not benchmark_mode:
+            print(f"[{conn_id}] OpenAI stream error: {e}", file=sys.stderr)
+
+    return bytes_sent, success
+
+
 async def stream_response(
     client_fd: int,
     handoff_data: dict,
@@ -196,77 +358,94 @@ async def stream_response(
     Stream an SSE response to the client.
 
     Uses asyncio for non-blocking writes and delays.
+    If OpenAI backend is enabled, streams from the API instead of mock messages.
     """
     stats.stream_start()
     bytes_sent = 0
     success = False
     writer_file = None
+    client_writer = None
 
     try:
-        # Wrap fd in file object for writing (takes ownership of fd)
-        writer_file = os.fdopen(client_fd, "wb", buffering=0)
+        # Use OpenAI backend if configured
+        if openai_backend:
+            # Create asyncio StreamWriter from fd for non-blocking I/O
+            # Create a socket from the fd
+            client_sock = socket.socket(fileno=client_fd)
+            client_sock.setblocking(False)
+            # Open asyncio stream connection from the socket
+            _, client_writer = await asyncio.open_connection(sock=client_sock)
 
-        # Send HTTP response headers
-        headers = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: close\r\n"
-            "X-Accel-Buffering: no\r\n"
-            "\r\n"
-        )
+            bytes_sent, success = await stream_from_openai(
+                client_writer, handoff_data, conn_id
+            )
 
-        header_bytes = headers.encode("utf-8")
-        # Direct write - with buffering=0, this goes straight to kernel buffer
-        # and completes immediately for local/fast clients
-        writer_file.write(header_bytes)
-        bytes_sent += len(header_bytes)
+            # Close the writer (which closes the socket)
+            client_writer.close()
+            await client_writer.wait_closed()
+        else:
+            # Mock backend with hardcoded messages
+            # Wrap fd in file object for writing (takes ownership of fd)
+            writer_file = os.fdopen(client_fd, "wb", buffering=0)
 
-        # Prepare response content
-        user_id = handoff_data.get("user_id", 0)
-        prompt = handoff_data.get("prompt", "unknown")
-        prompt_display = prompt[:100] + "..." if len(prompt) > 100 else prompt
+            # Send HTTP response headers
+            headers = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/event-stream\r\n"
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n"
+                "X-Accel-Buffering: no\r\n"
+                "\r\n"
+            )
 
-        lines = [
-            f"Connection {conn_id}: Hello from async Python daemon!",
-            f"User ID: {user_id}",
-            f"Prompt: {prompt_display[:50]}",
-            "This daemon uses asyncio for concurrent connection handling.",
-            "Each connection runs as a lightweight coroutine.",
-            "Expected capacity: 10,000+ concurrent connections.",
-            "Memory per connection: ~1-5 KB.",
-            "The Apache worker was freed immediately after handoff.",
-            "Python's asyncio provides cooperative multitasking.",
-            "The event loop schedules coroutines efficiently.",
-            "Non-blocking I/O allows high concurrency.",
-            "This is similar to Node.js or Go's concurrency model.",
-            "This is message 13 of 18.",
-            "This is message 14 of 18.",
-            "This is message 15 of 18.",
-            "This is message 16 of 18.",
-            "This is message 17 of 18.",
-            "[DONE]",
-        ]
+            header_bytes = headers.encode("utf-8")
+            writer_file.write(header_bytes)
+            bytes_sent += len(header_bytes)
 
-        # Stream each line with simulated delay
-        last_tick = await ticker.get_tick()
-        for index, line in enumerate(lines):
-            data = json.dumps({"content": line, "index": index})
-            sse_msg = f"data: {data}\n\n"
-            msg_bytes = sse_msg.encode("utf-8")
+            # Prepare response content
+            user_id = handoff_data.get("user_id", 0)
+            prompt = handoff_data.get("prompt", "unknown")
+            prompt_display = prompt[:100] + "..." if len(prompt) > 100 else prompt
 
-            try:
-                # Direct write - with buffering=0, this goes straight to kernel buffer
-                writer_file.write(msg_bytes)
-                bytes_sent += len(msg_bytes)
-            except (BrokenPipeError, OSError):
-                break
+            lines = [
+                f"Connection {conn_id}: Hello from async Python daemon!",
+                f"User ID: {user_id}",
+                f"Prompt: {prompt_display[:50]}",
+                "This daemon uses asyncio for concurrent connection handling.",
+                "Each connection runs as a lightweight coroutine.",
+                "Expected capacity: 10,000+ concurrent connections.",
+                "Memory per connection: ~1-5 KB.",
+                "The Apache worker was freed immediately after handoff.",
+                "Python's asyncio provides cooperative multitasking.",
+                "The event loop schedules coroutines efficiently.",
+                "Non-blocking I/O allows high concurrency.",
+                "This is similar to Node.js or Go's concurrency model.",
+                "This is message 13 of 18.",
+                "This is message 14 of 18.",
+                "This is message 15 of 18.",
+                "This is message 16 of 18.",
+                "This is message 17 of 18.",
+                "[DONE]",
+            ]
 
-            # Shared ticker to reduce per-connection timers under heavy load
-            if write_delay > 0:
-                last_tick = await ticker.wait_for_next(last_tick)
+            # Stream each line with simulated delay
+            last_tick = await ticker.get_tick()
+            for index, line in enumerate(lines):
+                data = json.dumps({"content": line, "index": index})
+                sse_msg = f"data: {data}\n\n"
+                msg_bytes = sse_msg.encode("utf-8")
 
-        success = True
+                try:
+                    writer_file.write(msg_bytes)
+                    bytes_sent += len(msg_bytes)
+                except (BrokenPipeError, OSError):
+                    break
+
+                # Shared ticker to reduce per-connection timers under heavy load
+                if write_delay > 0:
+                    last_tick = await ticker.wait_for_next(last_tick)
+
+            success = True
 
     except Exception as e:
         if not benchmark_mode:
@@ -304,24 +483,27 @@ async def handle_handoff(
         client_fd, data = await loop.run_in_executor(
             executor, recv_fd_blocking, apache_conn
         )
-
-        # Parse handoff data
-        try:
-            handoff_data = json.loads(data.decode("utf-8", errors="replace").strip("\x00")) if data else {}
-        except json.JSONDecodeError:
-            handoff_data = {"raw": data.decode("utf-8", errors="replace")}
-
-        # Stream response as a coroutine (non-blocking)
-        await stream_response(client_fd, handoff_data, conn_id, ticker, write_delay)
-
     except Exception as e:
         if not benchmark_mode:
             print(f"[{conn_id}] Handoff error: {e}", file=sys.stderr)
         # Note: Don't call stats.stream_end() here - stream_start() is only called
         # inside stream_response(), so calling stream_end() here would unbalance counters
-
+        return
     finally:
+        # Close Apache connection immediately after receiving fd.
+        # The Apache socket is only needed for the brief SCM_RIGHTS handoff.
+        # Keeping it open during streaming (10-30+ seconds) wastes file descriptors
+        # and can cause fd exhaustion under high concurrency.
         apache_conn.close()
+
+    # Parse handoff data
+    try:
+        handoff_data = json.loads(data.decode("utf-8", errors="replace").strip("\x00")) if data else {}
+    except json.JSONDecodeError:
+        handoff_data = {"raw": data.decode("utf-8", errors="replace")}
+
+    # Stream response as a coroutine (non-blocking)
+    await stream_response(client_fd, handoff_data, conn_id, ticker, write_delay)
 
 
 async def accept_loop(
@@ -497,11 +679,48 @@ def main():
         action="store_true",
         help="Enable benchmark mode: quieter output, print summary on shutdown",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["mock", "openai"],
+        default="mock",
+        help="Backend to use: 'mock' for hardcoded messages, 'openai' for LLM API (default: mock)",
+    )
+    parser.add_argument(
+        "--openai-base",
+        default=os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1"),
+        help="OpenAI API base URL (default: $OPENAI_API_BASE or https://api.openai.com/v1)",
+    )
+    parser.add_argument(
+        "--openai-socket",
+        default=os.environ.get("OPENAI_API_SOCKET"),
+        help="Unix socket path for OpenAI API (default: $OPENAI_API_SOCKET)",
+    )
+    parser.add_argument(
+        "--openai-key",
+        default=os.environ.get("OPENAI_API_KEY"),
+        help="OpenAI API key (default: $OPENAI_API_KEY)",
+    )
 
     args = parser.parse_args()
 
-    global benchmark_mode
+    global benchmark_mode, openai_backend, openai_api_base, openai_api_key, openai_api_socket
     benchmark_mode = args.benchmark
+
+    # Configure OpenAI backend
+    if args.backend == "openai":
+        openai_backend = True
+        openai_api_base = args.openai_base
+        openai_api_key = args.openai_key
+        openai_api_socket = args.openai_socket
+
+        if not openai_api_key:
+            print("Error: --openai-key or OPENAI_API_KEY required for openai backend", file=sys.stderr)
+            sys.exit(1)
+
+        if openai_api_socket:
+            print(f"OpenAI backend: {openai_api_base} (via unix:{openai_api_socket})")
+        else:
+            print(f"OpenAI backend: {openai_api_base}")
 
     # Increase file descriptor limit to handle many concurrent connections
     try:

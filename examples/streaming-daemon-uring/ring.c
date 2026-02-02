@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <poll.h>
 
 int ring_init(daemon_ctx_t *ctx, unsigned entries) {
     struct io_uring_params params = {0};
@@ -148,6 +149,69 @@ int ring_submit_eventfd_read(daemon_ctx_t *ctx, int eventfd) {
 
     io_uring_prep_read(sqe, eventfd, &eventfd_buf, sizeof(eventfd_buf), 0);
     io_uring_sqe_set_data64(sqe, ring_pack_data(OP_EVENTFD, 0));
+
+    return 0;
+}
+
+int ring_submit_poll_add(daemon_ctx_t *ctx, int sockfd, int poll_mask) {
+    struct io_uring_sqe *sqe = ring_get_sqe_flush(ctx);
+    if (!sqe) {
+        return -EAGAIN;
+    }
+
+    /* Use multishot poll so we continue receiving events without re-arming.
+     * curl_multi doesn't call socket_callback if the poll state is unchanged,
+     * so we can't rely on curl to re-arm the poll after each event.
+     * IORING_POLL_ADD_MULTI flag makes the poll continue to fire.
+     */
+    io_uring_prep_poll_add(sqe, sockfd, poll_mask);
+    sqe->len |= IORING_POLL_ADD_MULTI;
+    /* Pack socket fd in the conn_id field for identification */
+    io_uring_sqe_set_data64(sqe, ring_pack_data(OP_CURL_POLL, (uint32_t)sockfd));
+
+    return 0;
+}
+
+int ring_submit_poll_cancel(daemon_ctx_t *ctx, int sockfd) {
+    struct io_uring_sqe *sqe = ring_get_sqe_flush(ctx);
+    if (!sqe) {
+        return -EAGAIN;
+    }
+
+    /* Cancel all operations on this fd */
+    io_uring_prep_cancel_fd(sqe, sockfd, 0);
+    io_uring_sqe_set_data64(sqe, ring_pack_data(OP_POLL_CANCEL, (uint32_t)sockfd));
+
+    return 0;
+}
+
+/* Static timeout spec for curl timer */
+static struct __kernel_timespec curl_timeout_spec;
+
+int ring_submit_curl_timeout(daemon_ctx_t *ctx, int timeout_ms, uint32_t timer_id) {
+    struct io_uring_sqe *sqe = ring_get_sqe_flush(ctx);
+    if (!sqe) {
+        return -EAGAIN;
+    }
+
+    curl_timeout_spec.tv_sec = timeout_ms / 1000;
+    curl_timeout_spec.tv_nsec = (timeout_ms % 1000) * 1000000L;
+
+    io_uring_prep_timeout(sqe, &curl_timeout_spec, 0, 0);
+    io_uring_sqe_set_data64(sqe, ring_pack_data(OP_CURL_TIMEOUT, timer_id));
+
+    return 0;
+}
+
+int ring_cancel_curl_timeout(daemon_ctx_t *ctx, uint32_t timer_id) {
+    struct io_uring_sqe *sqe = ring_get_sqe_flush(ctx);
+    if (!sqe) {
+        return -EAGAIN;
+    }
+
+    /* Cancel by user_data match */
+    io_uring_prep_timeout_remove(sqe, ring_pack_data(OP_CURL_TIMEOUT, timer_id), 0);
+    io_uring_sqe_set_data64(sqe, ring_pack_data(OP_CANCEL, timer_id));
 
     return 0;
 }

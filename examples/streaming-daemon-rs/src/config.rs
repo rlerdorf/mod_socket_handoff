@@ -115,6 +115,12 @@ pub struct OpenAIConfig {
     /// API base URL.
     pub api_base: String,
 
+    /// Unix socket path for API connections (eliminates ephemeral port limits).
+    /// When set, all HTTP connections to the API use this Unix socket.
+    /// The api_base URL is still used for the HTTP path, but the connection
+    /// goes through the Unix socket.
+    pub api_socket: Option<String>,
+
     /// Maximum idle connections per host in pool.
     pub pool_max_idle_per_host: usize,
 }
@@ -124,6 +130,7 @@ impl Default for OpenAIConfig {
         Self {
             api_key: None,
             api_base: "https://api.openai.com/v1".to_string(),
+            api_socket: None,
             pool_max_idle_per_host: 100,
         }
     }
@@ -260,6 +267,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("OPENAI_API_BASE") {
             self.backend.openai.api_base = v;
+        }
+        if let Ok(v) = std::env::var("OPENAI_API_SOCKET") {
+            self.backend.openai.api_socket = Some(v);
         }
 
         // Metrics overrides

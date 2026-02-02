@@ -34,6 +34,32 @@ int ring_submit_cancel(daemon_ctx_t *ctx, connection_t *conn);
 /* Submit a read on eventfd (for thread pool completion notification) */
 int ring_submit_eventfd_read(daemon_ctx_t *ctx, int eventfd);
 
+/*
+ * Submit a multishot poll for curl socket events.
+ * poll_mask: POLLIN, POLLOUT, or both
+ * Returns 0 on success, negative on error.
+ */
+int ring_submit_poll_add(daemon_ctx_t *ctx, int sockfd, int poll_mask);
+
+/*
+ * Cancel an active poll on a socket.
+ * Returns 0 on success, negative on error.
+ */
+int ring_submit_poll_cancel(daemon_ctx_t *ctx, int sockfd);
+
+/*
+ * Submit a timeout for curl timer events.
+ * timeout_ms: timeout in milliseconds (0 = immediate, -1 = cancel)
+ * timer_id: identifier for this timer (used in user_data)
+ * Returns 0 on success, negative on error.
+ */
+int ring_submit_curl_timeout(daemon_ctx_t *ctx, int timeout_ms, uint32_t timer_id);
+
+/*
+ * Cancel the curl timer.
+ */
+int ring_cancel_curl_timeout(daemon_ctx_t *ctx, uint32_t timer_id);
+
 /* Wait for and process completions */
 int ring_wait_cqe(daemon_ctx_t *ctx, struct io_uring_cqe **cqe,
                   unsigned int timeout_ms);

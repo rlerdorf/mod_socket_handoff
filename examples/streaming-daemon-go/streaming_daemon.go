@@ -17,12 +17,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -30,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -70,6 +73,8 @@ const (
 
 // Command-line flags
 var (
+	socketPath = flag.String("socket", DaemonSocket,
+		"Unix socket path for daemon")
 	metricsAddr = flag.String("metrics-addr", DefaultMetricsAddr,
 		"Address for Prometheus metrics server (empty to disable)")
 	socketMode = flag.Uint("socket-mode", DefaultSocketMode,
@@ -82,6 +87,12 @@ var (
 		"Delay between SSE messages (for benchmarking, e.g., 3333ms for 30s streams)")
 	benchmarkMode = flag.Bool("benchmark", false,
 		"Enable benchmark mode: skip Prometheus updates, print summary on shutdown")
+	backendType = flag.String("backend", "mock",
+		"Backend type: 'mock' (demo messages) or 'openai' (HTTP streaming API)")
+	openaiBase = flag.String("openai-base", "",
+		"OpenAI API base URL (default: OPENAI_API_BASE env or https://api.openai.com/v1)")
+	openaiSocket = flag.String("openai-socket", "",
+		"Unix socket for OpenAI API (eliminates ephemeral port limits for high concurrency)")
 )
 
 // Benchmark stats (only updated in benchmark mode)
@@ -130,6 +141,15 @@ func (b *BenchmarkStats) print() {
 	fmt.Printf("Total bytes sent: %d\n", b.totalBytes)
 	fmt.Println("=========================")
 }
+
+// HTTP client for OpenAI API with connection pooling
+var httpClient *http.Client
+
+// OpenAI configuration
+var (
+	openaiAPIBase string
+	openaiAPIKey  string
+)
 
 // Prometheus metrics
 var (
@@ -224,6 +244,59 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 
+	// Initialize OpenAI backend if selected
+	if *backendType == "openai" {
+		// Configure API base URL
+		openaiAPIBase = *openaiBase
+		if openaiAPIBase == "" {
+			openaiAPIBase = os.Getenv("OPENAI_API_BASE")
+		}
+		if openaiAPIBase == "" {
+			openaiAPIBase = "https://api.openai.com/v1"
+		}
+
+		// Check for Unix socket (from flag or env)
+		socketPath := *openaiSocket
+		if socketPath == "" {
+			socketPath = os.Getenv("OPENAI_API_SOCKET")
+		}
+
+		// Get API key
+		openaiAPIKey = os.Getenv("OPENAI_API_KEY")
+		if openaiAPIKey == "" {
+			log.Println("Warning: OPENAI_API_KEY not set, API calls will fail")
+		}
+
+		// Create HTTP transport
+		var transport *http.Transport
+		if socketPath != "" {
+			// Use Unix socket for high-concurrency (no ephemeral port limits)
+			transport = &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return net.Dial("unix", socketPath)
+				},
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			}
+			log.Printf("OpenAI backend: %s (via unix:%s)", openaiAPIBase, socketPath)
+		} else {
+			// Use TCP
+			transport = &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			}
+			log.Printf("OpenAI backend: %s", openaiAPIBase)
+		}
+
+		// Create HTTP client with connection pooling
+		httpClient = &http.Client{
+			Timeout:   2 * time.Minute,
+			Transport: transport,
+		}
+	}
+
 	// Increase file descriptor limit to handle many concurrent connections.
 	// Each connection needs ~3 fds (client socket, apache conn, internal).
 	// We request 2x max-connections plus some headroom.
@@ -271,18 +344,18 @@ func main() {
 	}()
 
 	// Handle existing socket file
-	if info, err := os.Lstat(DaemonSocket); err == nil {
+	if info, err := os.Lstat(*socketPath); err == nil {
 		// Path exists - verify it's a socket before doing anything
 		if info.Mode().Type() != os.ModeSocket {
-			log.Fatalf("Path %s exists but is not a socket", DaemonSocket)
+			log.Fatalf("Path %s exists but is not a socket", *socketPath)
 		}
 
 		// Probe to see if another daemon is listening
-		probeConn, probeErr := net.DialTimeout("unix", DaemonSocket, time.Second)
+		probeConn, probeErr := net.DialTimeout("unix", *socketPath, time.Second)
 		if probeErr == nil {
 			// Connection succeeded - another daemon is running
 			probeConn.Close()
-			log.Fatalf("Socket %s is already in use by another process", DaemonSocket)
+			log.Fatalf("Socket %s is already in use by another process", *socketPath)
 		}
 
 		// Check if the error indicates a stale socket or benign race condition
@@ -291,23 +364,23 @@ func main() {
 		if isConnectionRefused(probeErr) {
 			// Socket is stale - safe to remove
 			// Ignore NotFound errors (race with another process removing it)
-			if err := os.Remove(DaemonSocket); err != nil && !os.IsNotExist(err) {
-				log.Fatalf("Failed to remove stale socket %s: %v", DaemonSocket, err)
+			if err := os.Remove(*socketPath); err != nil && !os.IsNotExist(err) {
+				log.Fatalf("Failed to remove stale socket %s: %v", *socketPath, err)
 			}
-			log.Printf("Removed stale socket file %s", DaemonSocket)
+			log.Printf("Removed stale socket file %s", *socketPath)
 		} else if isNotExist(probeErr) {
 			// Socket was removed between Lstat and Dial - safe to proceed
-			log.Printf("Socket file %s was removed (race), proceeding", DaemonSocket)
+			log.Printf("Socket file %s was removed (race), proceeding", *socketPath)
 		} else {
 			// Other error (permission denied, etc.) - can't determine if socket is in use
-			log.Fatalf("Cannot determine if socket %s is in use: %v", DaemonSocket, probeErr)
+			log.Fatalf("Cannot determine if socket %s is in use: %v", *socketPath, probeErr)
 		}
 	}
 
 	// Create Unix socket listener
-	listener, err := net.Listen("unix", DaemonSocket)
+	listener, err := net.Listen("unix", *socketPath)
 	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", DaemonSocket, err)
+		log.Fatalf("Failed to listen on %s: %v", *socketPath, err)
 	}
 	// Ensure listener is closed on exit (backup for panics); also closed explicitly
 	// after ctx.Done() during graceful shutdown to unblock the accept loop.
@@ -316,11 +389,11 @@ func main() {
 	// Set socket permissions. Default is 0660 (owner + group only).
 	// Apache (www-data) must be in the daemon's group to connect.
 	// Use -socket-mode=0666 only for testing, never in production.
-	if err := os.Chmod(DaemonSocket, os.FileMode(*socketMode)); err != nil {
+	if err := os.Chmod(*socketPath, os.FileMode(*socketMode)); err != nil {
 		log.Printf("Warning: Could not chmod socket: %v", err)
 	}
 
-	log.Printf("Streaming daemon listening on %s (max %d connections)", DaemonSocket, *maxConnections)
+	log.Printf("Streaming daemon listening on %s (max %d connections)", *socketPath, *maxConnections)
 
 	// Start Prometheus metrics server
 	if *metricsAddr != "" {
@@ -450,7 +523,7 @@ func main() {
 	}
 
 	// Cleanup
-	os.Remove(DaemonSocket)
+	os.Remove(*socketPath)
 	log.Println("Daemon stopped")
 }
 
@@ -468,16 +541,19 @@ func safeHandleConnection(ctx context.Context, conn net.Conn) {
 }
 
 func handleConnection(ctx context.Context, conn net.Conn) {
-	defer func() {
-		if err := conn.Close(); err != nil {
-			log.Printf("Error closing connection: %v", err)
-		}
-	}()
-
 	// Receive file descriptor and handoff data from Apache
 	handoffStart := time.Now()
 	clientFd, data, err := receiveFd(conn)
 	handoffDuration := time.Since(handoffStart).Seconds()
+
+	// Close Apache connection immediately after receiving fd.
+	// The Apache socket is only needed for the brief SCM_RIGHTS handoff.
+	// Keeping it open during streaming (10-30+ seconds) wastes file descriptors
+	// and can cause fd exhaustion under high concurrency.
+	if closeErr := conn.Close(); closeErr != nil {
+		log.Printf("Error closing Apache connection: %v", closeErr)
+	}
+
 	if err != nil {
 		if !*benchmarkMode {
 			metricHandoffErrors.WithLabelValues(classifyError(err)).Inc()
@@ -740,9 +816,14 @@ func streamToClient(ctx context.Context, clientFile *os.File, handoff HandoffDat
 	default:
 	}
 
-	// Stream the response (sendSSE resets write deadline after each successful write)
-	// TODO: Replace this with your LLM API call
-	bodyBytes, err := streamDemoResponse(ctx, conn, handoff)
+	// Stream the response based on backend type
+	var bodyBytes int64
+	if *backendType == "openai" {
+		bodyBytes, err = streamFromOpenAI(ctx, conn, handoff)
+	} else {
+		// sendSSE resets write deadline after each successful write
+		bodyBytes, err = streamDemoResponse(ctx, conn, handoff)
+	}
 	totalBytes += bodyBytes
 	return totalBytes, err
 }
@@ -822,6 +903,128 @@ func streamDemoResponse(ctx context.Context, conn net.Conn, handoff HandoffData)
 	if err != nil {
 		return totalBytes, fmt.Errorf("write failed: %w", err)
 	}
+	return totalBytes, nil
+}
+
+// OpenAI API request/response types
+type openAIRequest struct {
+	Model    string          `json:"model"`
+	Messages []openAIMessage `json:"messages"`
+	Stream   bool            `json:"stream"`
+}
+
+type openAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openAIChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+// streamFromOpenAI streams a response from an OpenAI-compatible API.
+func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
+	var totalBytes int64
+
+	// Build request body
+	prompt := handoff.Prompt
+	if prompt == "" {
+		prompt = "Hello"
+	}
+	model := handoff.Model
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+
+	reqBody := openAIRequest{
+		Model: model,
+		Messages: []openAIMessage{
+			{Role: "user", Content: prompt},
+		},
+		Stream: true,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Create HTTP request
+	url := openaiAPIBase + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+openaiAPIKey)
+
+	// Make request
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse SSE stream and forward to client
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip empty lines
+		if line == "" {
+			continue
+		}
+
+		// Check for data: prefix
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+
+		// Check for [DONE] marker
+		if data == "[DONE]" {
+			break
+		}
+
+		// Parse JSON chunk
+		var chunk openAIChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // Skip malformed chunks
+		}
+
+		// Extract content and forward
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			n, err := sendSSE(conn, chunk.Choices[0].Delta.Content)
+			totalBytes += int64(n)
+			if err != nil {
+				return totalBytes, err
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return totalBytes, fmt.Errorf("read stream: %w", err)
+	}
+
+	// Send completion marker
+	doneMsg := []byte("data: [DONE]\n\n")
+	n, err := conn.Write(doneMsg)
+	totalBytes += int64(n)
+	if err != nil {
+		return totalBytes, fmt.Errorf("write done: %w", err)
+	}
+
 	return totalBytes, nil
 }
 

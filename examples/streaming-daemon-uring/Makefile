@@ -21,12 +21,19 @@ LDFLAGS = -luring -lpthread
 BACKEND ?= mock
 
 # Core source files (excluding backend)
-CORE_SRCS = daemon.c ring.c server.c handoff.c connection.c streaming.c json.c pool.c metrics.c config.c
+CORE_SRCS = daemon.c ring.c server.c handoff.c connection.c streaming.c json.c pool.c metrics.c config.c write_buffer.c
 
 # Backend-specific configuration
 ifeq ($(BACKEND),openai)
-    BACKEND_SRC = backend_openai.c
-    LDFLAGS += -lcurl
+    BACKEND_SRC = backend_openai.c curl_manager.c
+    # Use the newer libcurl.so.4 (OpenSSL/8.14.1) which has working HTTP/2 multiplexing
+    # The older libcurl-nss (7.88.1) has a bug with h2c multiplexing
+    CURL_LIB ?= $(shell test -f /lib/x86_64-linux-gnu/libcurl.so.4 && echo "/lib/x86_64-linux-gnu/libcurl.so.4" || echo "-lcurl")
+    ifeq ($(CURL_LIB),-lcurl)
+        LDFLAGS += -lcurl
+    else
+        LDFLAGS += $(CURL_LIB)
+    endif
     CFLAGS += -DBACKEND_OPENAI
 else
     BACKEND_SRC = backend_mock.c

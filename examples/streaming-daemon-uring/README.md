@@ -193,25 +193,51 @@ streaming_daemon_info                  - Daemon version and config
 
 ## Performance
 
-Expected performance characteristics:
+### Benchmark Results (OpenAI Backend with curl_multi)
+
+Tested with mock LLM API, 50ms chunk delay, 18 chunks per response:
+
+| Connections | TTFB p50 | TTFB p99 | Timeouts |
+|-------------|----------|----------|----------|
+| 2,000 | 2.6ms | 33ms | 0 |
+| 5,000 | 1.5ms | 48ms | 0 |
+| 10,000 | 46ms | 2.6s | 1 |
+
+### Scaling Limitations
+
+At high concurrency (10,000+ connections), TTFB degrades due to HTTP/2 multiplexing overhead:
+
+- **HTTP/2 stream scheduling**: curl_multi uses ~100 streams per connection (default).
+  With 10,000 requests, this creates ~100 TCP connections each multiplexing 100 streams.
+  Stream scheduling delays accumulate, causing p99 TTFB to exceed acceptable thresholds.
+
+- **Practical limit for sub-100ms p99 TTFB**: ~5,000 concurrent connections
+
+- **Total capacity**: 10,000+ connections work correctly but with degraded tail latency
+
+Future optimizations to consider:
+- Reduce streams per connection to spread load across more TCP connections
+- Tune curl_multi event processing for high concurrency
+- Profile kernel TCP buffer contention
+
+### Memory Characteristics
 
 | Metric | Value |
 |--------|-------|
 | Baseline memory | ~3 MB |
-| Memory per active connection | ~68 KB (64KB handoff + 4KB write buffer) |
-| Max connections | 100,000+ |
+| Memory per active connection | ~12 KB typical |
+| Max connections | 10,000 (configurable) |
 | Syscalls per message | ~1 (batched) |
 | Event loop | Single-threaded |
-| LLM workers | Configurable (default 8 threads) |
 
 Memory breakdown per connection:
-- 64 KB handoff buffer (allocated on-demand, supports large prompts)
-- 4 KB write buffer (allocated on-demand)
+- 4-64 KB handoff buffer (tiered: 4KB → 16KB → 64KB as needed)
+- 8 KB write buffer (linear buffer, grows to 1MB max under backpressure)
 - 256 bytes control message buffer
 - ~200 bytes connection struct
 
+Write buffers use a linear design with reset-on-drain to avoid malloc on the hot path.
 Memory is allocated dynamically - idle connections use minimal memory.
-For 10K concurrent active connections: ~700 MB RSS.
 
 ## Kernel Compatibility
 
@@ -250,6 +276,8 @@ make check-kernel
 | backend.h | Backend interface |
 | backend_mock.c | Mock backend for testing/benchmarks |
 | backend_openai.c | OpenAI API backend with libcurl |
+| curl_manager.c/h | Async curl_multi integration with io_uring |
+| write_buffer.c/h | Per-connection linear write buffer |
 | json.c/h | JSON parsing helpers |
 | jsmn.h | Vendored JSON tokenizer |
 | streaming-daemon.toml.example | Example configuration file |

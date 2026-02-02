@@ -3,6 +3,7 @@
     "require": {
         "amphp/amp": "^3.0",
         "amphp/socket": "^2.0",
-        "amphp/byte-stream": "^2.0"
+        "amphp/byte-stream": "^2.0",
+        "amphp/sync": "^2.0"
     }
 }

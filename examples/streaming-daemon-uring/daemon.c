@@ -15,6 +15,10 @@
 #include "backend.h"
 #include "metrics.h"
 #include "config.h"
+#include "write_buffer.h"
+#ifdef BACKEND_OPENAI
+#include "curl_manager.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,12 +29,18 @@
 #include <getopt.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <poll.h>
 
 /* Global daemon context for signal handler */
 daemon_ctx_t *g_ctx = NULL;
 
-/* Thread pool context */
+/* Thread pool context (for legacy mode) */
 static pool_ctx_t g_pool;
+
+#ifdef BACKEND_OPENAI
+/* Curl manager for async mode */
+static curl_manager_t g_curl_mgr;
+#endif
 
 /* Per-connection msghdr storage for io_uring recvmsg */
 typedef struct {
@@ -86,6 +96,75 @@ static void increase_fd_limit(int max_connections) {
     }
 }
 
+/*
+ * Add connection to the dirty list (has pending write data).
+ * O(1) operation - connections on the list will be flushed.
+ */
+void daemon_mark_connection_dirty(daemon_ctx_t *ctx, connection_t *conn) {
+    if (conn->on_dirty_list) {
+        return;  /* Already on list */
+    }
+
+    conn->on_dirty_list = true;
+    conn->dirty_next = NULL;
+
+    if (ctx->dirty_tail) {
+        ctx->dirty_tail->dirty_next = conn;
+        ctx->dirty_tail = conn;
+    } else {
+        ctx->dirty_head = conn;
+        ctx->dirty_tail = conn;
+    }
+}
+
+/*
+ * Remove connection from the dirty list.
+ * Called when connection is freed or fully flushed.
+ */
+void daemon_unmark_connection_dirty(daemon_ctx_t *ctx, connection_t *conn) {
+    if (!conn->on_dirty_list) {
+        return;
+    }
+
+    /* Find and remove from list - O(n) but called rarely (on connection close) */
+    connection_t *prev = NULL;
+    connection_t *curr = ctx->dirty_head;
+
+    while (curr) {
+        if (curr == conn) {
+            if (prev) {
+                prev->dirty_next = curr->dirty_next;
+            } else {
+                ctx->dirty_head = curr->dirty_next;
+            }
+            if (curr == ctx->dirty_tail) {
+                ctx->dirty_tail = prev;
+            }
+            break;
+        }
+        prev = curr;
+        curr = curr->dirty_next;
+    }
+
+    conn->on_dirty_list = false;
+    conn->dirty_next = NULL;
+}
+
+/*
+ * Cleanup a connection, cancelling any active curl request first.
+ * This prevents EBADF errors from curl trying to access a freed connection.
+ */
+static void cleanup_connection(daemon_ctx_t *ctx, connection_t *conn) {
+#ifdef BACKEND_OPENAI
+    if (ctx->use_curl_multi && conn->curl_easy) {
+        curl_manager_cancel_request(ctx->curl_mgr, conn);
+    }
+#endif
+    /* Remove from dirty list before freeing */
+    daemon_unmark_connection_dirty(ctx, conn);
+    conn_free(ctx, conn);
+}
+
 static void print_usage(const char *prog) {
     fprintf(stderr, "Usage: %s [options]\n\n", prog);
     fprintf(stderr, "Options:\n");
@@ -98,7 +177,12 @@ static void print_usage(const char *prog) {
             DEFAULT_MESSAGE_DELAY_MS);
     fprintf(stderr, "  --pool-size N       Thread pool size (default: %d)\n",
             DEFAULT_POOL_SIZE);
-    fprintf(stderr, "  --thread-pool       Enable thread pool for LLM calls\n");
+#ifdef BACKEND_OPENAI
+    fprintf(stderr, "  --thread-pool       Use blocking thread pool (overrides default async mode)\n");
+    fprintf(stderr, "  --curl-multi        Use async curl_multi (default for OpenAI backend)\n");
+#else
+    fprintf(stderr, "  --thread-pool       Enable thread pool for LLM calls (blocking)\n");
+#endif
     fprintf(stderr, "  --sqpoll            Enable SQPOLL (kernel polling, requires root)\n");
     fprintf(stderr, "  --metrics PORT      Enable Prometheus metrics on PORT\n");
     fprintf(stderr, "  --config FILE       Load configuration from TOML file\n");
@@ -119,6 +203,7 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
         {"delay",           required_argument, NULL, 'd'},
         {"pool-size",       required_argument, NULL, 'p'},
         {"thread-pool",     no_argument,       NULL, 't'},
+        {"curl-multi",      no_argument,       NULL, 'a'},  /* async */
         {"sqpoll",          no_argument,       NULL, 'q'},
         {"metrics",         required_argument, NULL, 'M'},
         {"config",          required_argument, NULL, 'C'},
@@ -134,7 +219,7 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
     int saved_optind = optind;
     int opt;
     int found_config = 0;
-    while ((opt = getopt_long(argc, argv, "s:m:c:d:p:tqM:C:bhv", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:m:c:d:p:taqM:C:bhv", long_options, NULL)) != -1) {
         if (opt == 'C') {
             if (config_load(ctx, optarg) < 0) {
                 return -1;
@@ -149,7 +234,7 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
     optind = saved_optind; /* Reset for second pass */
 
     /* Second pass: process all CLI args (overriding config file) */
-    while ((opt = getopt_long(argc, argv, "s:m:c:d:p:tqM:C:bhv", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:m:c:d:p:taqM:C:bhv", long_options, NULL)) != -1) {
         switch (opt) {
         case 's':
             free(ctx->socket_path);
@@ -177,6 +262,11 @@ static int parse_args(int argc, char **argv, daemon_ctx_t *ctx) {
             break;
         case 't':
             ctx->use_thread_pool = true;
+            ctx->use_curl_multi = false;  /* Thread pool overrides curl_multi */
+            break;
+        case 'a':
+            ctx->use_curl_multi = true;
+            ctx->use_thread_pool = false; /* curl_multi overrides thread pool */
             break;
         case 'q':
             ctx->use_sqpoll = true;
@@ -219,7 +309,12 @@ void daemon_init(daemon_ctx_t *ctx) {
     ctx->shutdown_timeout_s = DEFAULT_SHUTDOWN_TIMEOUT_S;
     ctx->message_delay_ms = DEFAULT_MESSAGE_DELAY_MS;
     ctx->pool_size = DEFAULT_POOL_SIZE;
-    ctx->use_thread_pool = false;  /* Disabled by default for Phase 1 compat */
+    ctx->use_thread_pool = false;
+#ifdef BACKEND_OPENAI
+    ctx->use_curl_multi = true;    /* Default to async curl_multi for OpenAI backend */
+#else
+    ctx->use_curl_multi = false;
+#endif
     ctx->listen_fd = -1;
     atomic_store(&ctx->shutdown_requested, false);
     atomic_store(&ctx->active_connections, 0);
@@ -232,10 +327,17 @@ void daemon_init(daemon_ctx_t *ctx) {
 
 void daemon_cleanup(daemon_ctx_t *ctx) {
     metrics_stop();
+#ifdef BACKEND_OPENAI
+    if (ctx->use_curl_multi && ctx->curl_mgr) {
+        curl_manager_cleanup(ctx->curl_mgr);
+    }
+#endif
     if (ctx->use_thread_pool && ctx->pool) {
         pool_cleanup(ctx->pool);
     }
-    backend_cleanup();
+    if (!ctx->use_curl_multi) {
+        backend_cleanup();
+    }
     ring_cleanup(ctx);
     conn_pool_cleanup(ctx);
     server_close_listener(ctx);
@@ -292,16 +394,16 @@ static void handle_accept(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
         atomic_fetch_add(&ctx->total_started, 1);
     }
 
-    /* Prepare recvmsg for SCM_RIGHTS */
+    /* Prepare recvmsg for SCM_RIGHTS using tiered buffer capacity */
     recv_ctx_t *rctx = &recv_contexts[conn->id];
     handoff_prepare_msghdr(&rctx->msg, &rctx->iov,
-                           conn->handoff_buf, MAX_HANDOFF_DATA_SIZE,
+                           conn->handoff_buf, conn->handoff_cap,
                            rctx->ctrl_buf, sizeof(rctx->ctrl_buf));
 
     /* Submit recvmsg */
     if (ring_submit_recvmsg(ctx, conn, &rctx->msg) < 0) {
         fprintf(stderr, "Failed to submit recvmsg\n");
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 }
@@ -317,7 +419,7 @@ static void start_streaming(daemon_ctx_t *ctx, connection_t *conn) {
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -327,7 +429,7 @@ static void start_streaming(daemon_ctx_t *ctx, connection_t *conn) {
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 }
@@ -342,7 +444,7 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -356,7 +458,7 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -372,7 +474,7 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -380,6 +482,19 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
     atomic_store(&conn->state, CONN_STATE_PARSING);
     handoff_parse_data(conn->handoff_buf, conn->handoff_len, &conn->data);
 
+#ifdef BACKEND_OPENAI
+    if (ctx->use_curl_multi) {
+        /* Submit to async curl_multi for LLM processing */
+        if (curl_manager_start_request(ctx->curl_mgr, conn) < 0) {
+            fprintf(stderr, "Failed to start curl request\n");
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_failed, 1);
+            }
+            cleanup_connection(ctx, conn);
+        }
+        return;
+    }
+#endif
     if (ctx->use_thread_pool) {
         /* Submit to thread pool for LLM processing */
         atomic_store(&conn->state, CONN_STATE_LLM_QUEUED);
@@ -388,7 +503,7 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
         }
     } else {
         /* Direct streaming (Phase 1 mode) */
@@ -397,6 +512,179 @@ static void handle_recv_fd(daemon_ctx_t *ctx, connection_t *conn,
         start_streaming(ctx, conn);
     }
 }
+
+/* Start flushing the async write buffer for a connection */
+static void start_async_write(daemon_ctx_t *ctx, connection_t *conn) {
+    write_buffer_t *wb = (write_buffer_t *)conn->async_write_buf;
+    if (!wb || !write_buffer_has_data(wb) || write_buffer_is_busy(wb)) {
+        return;
+    }
+
+    size_t len;
+    const char *data = write_buffer_get_next(wb, &len);
+    if (!data || len == 0) {
+        return;
+    }
+
+    /* Submit write */
+    if (ring_submit_write(ctx, conn, data, len) < 0) {
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_failed, 1);
+        }
+        cleanup_connection(ctx, conn);
+        return;
+    }
+    if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_failed, 1);
+        }
+        cleanup_connection(ctx, conn);
+        return;
+    }
+
+    write_buffer_set_pending(wb, true);
+
+    /* Submit immediately for lowest latency */
+    ring_submit(ctx);
+}
+
+/* Handle async write completion (curl_multi mode) */
+static void handle_async_write(daemon_ctx_t *ctx, connection_t *conn,
+                               struct io_uring_cqe *cqe) {
+    write_buffer_t *wb = (write_buffer_t *)conn->async_write_buf;
+
+    if (cqe->res < 0) {
+        if (cqe->res != -ECANCELED && cqe->res != -ETIMEDOUT &&
+            cqe->res != -EPIPE && cqe->res != -ECONNRESET) {
+            fprintf(stderr, "Async write error: %s\n", strerror(-cqe->res));
+        }
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_failed, 1);
+        }
+        cleanup_connection(ctx, conn);
+        return;
+    }
+
+    conn->bytes_sent += cqe->res;
+
+    /* Consume written bytes from buffer */
+    if (wb) {
+        write_buffer_consume(wb, cqe->res);
+        write_buffer_set_pending(wb, false);
+    }
+
+    /* Check if more data to write */
+    if (wb && write_buffer_has_data(wb)) {
+        start_async_write(ctx, conn);
+        return;
+    }
+
+    /* No more data - check if we're done */
+    conn_state_t state = atomic_load(&conn->state);
+    if (state == CONN_STATE_CLOSING) {
+        /* All data flushed, connection complete */
+        if (ctx->benchmark_mode) {
+            atomic_fetch_add(&ctx->total_completed, 1);
+            atomic_fetch_add(&ctx->total_bytes, conn->bytes_sent);
+        }
+        cleanup_connection(ctx, conn);
+    }
+    /* Otherwise, more data may arrive from curl - stay in STREAMING state */
+}
+
+#ifdef BACKEND_OPENAI
+/* Forward declaration */
+static void flush_streaming_connections(daemon_ctx_t *ctx);
+
+/* Handle curl poll completion */
+static void handle_curl_poll(daemon_ctx_t *ctx, int sockfd, int res) {
+    if (!ctx->curl_mgr) return;
+
+    /* Convert poll result to curl events */
+    int events = 0;
+    if (res > 0) {
+        if (res & POLLIN) events |= POLLIN;
+        if (res & POLLOUT) events |= POLLOUT;
+        if (res & (POLLERR | POLLHUP)) events |= POLLERR;
+    }
+
+    /* Notify curl of socket activity - this triggers write_callback which
+     * queues data to write buffers. We flush immediately after to start
+     * streaming to clients with minimal latency.
+     */
+    curl_manager_socket_action(ctx->curl_mgr, sockfd, events);
+    curl_manager_check_completions(ctx->curl_mgr);
+
+    /* Flush immediately after socket action to minimize TTFB */
+    flush_streaming_connections(ctx);
+}
+
+/* Handle curl timeout */
+static void handle_curl_timeout(daemon_ctx_t *ctx) {
+    if (!ctx->curl_mgr) return;
+
+    curl_manager_timeout_action(ctx->curl_mgr);
+    curl_manager_check_completions(ctx->curl_mgr);
+
+    /* Flush immediately after timeout action to minimize TTFB */
+    flush_streaming_connections(ctx);
+}
+
+/* Flush write buffers for connections on the dirty list.
+ * O(dirty) instead of O(n) - only iterates connections with pending data.
+ */
+static void flush_streaming_connections(daemon_ctx_t *ctx) {
+    connection_t *conn = ctx->dirty_head;
+    connection_t *prev = NULL;
+
+    while (conn) {
+        connection_t *next = conn->dirty_next;
+        conn_state_t state = atomic_load(&conn->state);
+
+        /* Skip if in wrong state (shouldn't happen but be safe) */
+        if (state != CONN_STATE_STREAMING && state != CONN_STATE_CURL_ACTIVE &&
+            state != CONN_STATE_CLOSING) {
+            /* Remove from dirty list - state changed unexpectedly */
+            if (prev) {
+                prev->dirty_next = next;
+            } else {
+                ctx->dirty_head = next;
+            }
+            if (conn == ctx->dirty_tail) {
+                ctx->dirty_tail = prev;
+            }
+            conn->on_dirty_list = false;
+            conn->dirty_next = NULL;
+            conn = next;
+            continue;
+        }
+
+        write_buffer_t *wb = (write_buffer_t *)conn->async_write_buf;
+        if (wb && write_buffer_has_data(wb) && !write_buffer_is_busy(wb)) {
+            start_async_write(ctx, conn);
+        }
+
+        /* If buffer is now empty and not busy, remove from dirty list */
+        if (wb && !write_buffer_has_data(wb) && !write_buffer_is_busy(wb)) {
+            if (prev) {
+                prev->dirty_next = next;
+            } else {
+                ctx->dirty_head = next;
+            }
+            if (conn == ctx->dirty_tail) {
+                ctx->dirty_tail = prev;
+            }
+            conn->on_dirty_list = false;
+            conn->dirty_next = NULL;
+            /* Don't update prev - we removed current */
+        } else {
+            prev = conn;
+        }
+
+        conn = next;
+    }
+}
+#endif
 
 /* Handle eventfd signal from thread pool */
 static void handle_eventfd(daemon_ctx_t *ctx) {
@@ -411,12 +699,19 @@ static void handle_eventfd(daemon_ctx_t *ctx) {
         conn_state_t state = atomic_load(&conn->state);
         if (state == CONN_STATE_STREAMING) {
             start_streaming(ctx, conn);
+        } else if (state == CONN_STATE_STREAMED) {
+            /* Real-time streaming completed directly in backend */
+            if (ctx->benchmark_mode) {
+                atomic_fetch_add(&ctx->total_completed, 1);
+                atomic_fetch_add(&ctx->total_bytes, conn->bytes_sent);
+            }
+            cleanup_connection(ctx, conn);
         } else if (state == CONN_STATE_CLOSING) {
             /* Backend failed */
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
         }
     }
 }
@@ -434,7 +729,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -454,7 +749,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
             return;
         }
 
@@ -463,14 +758,14 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
             return;
         }
         if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
             return;
         }
         return; /* Wait for next completion */
@@ -491,7 +786,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
             atomic_fetch_add(&ctx->total_completed, 1);
             atomic_fetch_add(&ctx->total_bytes, conn->bytes_sent);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -513,14 +808,14 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
                 atomic_fetch_add(&ctx->total_completed, 1);
                 atomic_fetch_add(&ctx->total_bytes, conn->bytes_sent);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
             return;
         }
         if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
             if (ctx->benchmark_mode) {
                 atomic_fetch_add(&ctx->total_failed, 1);
             }
-            conn_free(ctx, conn);
+            cleanup_connection(ctx, conn);
             return;
         }
         return;
@@ -532,7 +827,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -541,7 +836,7 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 
@@ -562,14 +857,14 @@ static void handle_write(daemon_ctx_t *ctx, connection_t *conn,
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
     if (ring_submit_linked_timeout(ctx, conn, ctx->write_timeout_ms) < 0) {
         if (ctx->benchmark_mode) {
             atomic_fetch_add(&ctx->total_failed, 1);
         }
-        conn_free(ctx, conn);
+        cleanup_connection(ctx, conn);
         return;
     }
 }
@@ -596,8 +891,15 @@ static void process_cqe(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
     case OP_WRITE: {
         connection_t *conn = conn_get(ctx, conn_id);
         conn_state_t state = conn ? atomic_load(&conn->state) : CONN_STATE_UNUSED;
-        if (conn && (state == CONN_STATE_STREAMING ||
-                     state == CONN_STATE_CLOSING)) {
+        if (!conn) break;
+
+        /* Check if this is async write mode */
+        if (conn->async_write_buf) {
+            if (state == CONN_STATE_STREAMING || state == CONN_STATE_CURL_ACTIVE ||
+                state == CONN_STATE_CLOSING) {
+                handle_async_write(ctx, conn, cqe);
+            }
+        } else if (state == CONN_STATE_STREAMING || state == CONN_STATE_CLOSING) {
             handle_write(ctx, conn, cqe);
         }
         break;
@@ -617,6 +919,23 @@ static void process_cqe(daemon_ctx_t *ctx, struct io_uring_cqe *cqe) {
         if (ctx->use_thread_pool && !atomic_load(&ctx->shutdown_requested)) {
             ring_submit_eventfd_read(ctx, pool_get_eventfd(ctx->pool));
         }
+        break;
+
+    case OP_CURL_POLL:
+#ifdef BACKEND_OPENAI
+        /* conn_id contains the socket fd for curl polls */
+        handle_curl_poll(ctx, (int)conn_id, cqe->res);
+#endif
+        break;
+
+    case OP_CURL_TIMEOUT:
+#ifdef BACKEND_OPENAI
+        handle_curl_timeout(ctx);
+#endif
+        break;
+
+    case OP_POLL_CANCEL:
+        /* Poll cancel completed */
         break;
     }
 }
@@ -666,6 +985,13 @@ int daemon_run(daemon_ctx_t *ctx) {
             count++;
         }
         io_uring_cq_advance(&ctx->ring, count);
+
+#ifdef BACKEND_OPENAI
+        /* Flush write buffers for connections that have pending data */
+        if (ctx->use_curl_multi) {
+            flush_streaming_connections(ctx);
+        }
+#endif
 
         /* Submit any pending operations */
         ring_submit(ctx);
@@ -750,15 +1076,28 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Initialize backend */
-    if (backend_init() < 0) {
-        fprintf(stderr, "Failed to initialize backend\n");
-        daemon_cleanup(&ctx);
-        return 1;
+    /* Initialize backend or curl manager */
+#ifdef BACKEND_OPENAI
+    if (ctx.use_curl_multi) {
+        ctx.curl_mgr = &g_curl_mgr;
+        if (curl_manager_init(&g_curl_mgr, &ctx) < 0) {
+            fprintf(stderr, "Failed to initialize curl manager\n");
+            daemon_cleanup(&ctx);
+            return 1;
+        }
+        fprintf(stderr, "Async curl_multi mode enabled (50k+ scale)\n");
+    } else
+#endif
+    {
+        if (backend_init() < 0) {
+            fprintf(stderr, "Failed to initialize backend\n");
+            daemon_cleanup(&ctx);
+            return 1;
+        }
     }
 
-    /* Initialize thread pool if enabled */
-    if (ctx.use_thread_pool) {
+    /* Initialize thread pool if enabled (and not using curl_multi) */
+    if (ctx.use_thread_pool && !ctx.use_curl_multi) {
         ctx.pool = &g_pool;
         if (pool_init(&g_pool, &ctx, ctx.pool_size) < 0) {
             fprintf(stderr, "Failed to initialize thread pool\n");
