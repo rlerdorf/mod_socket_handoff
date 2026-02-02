@@ -206,7 +206,7 @@ build_mock_api() {
 # Start mock LLM API server with specified chunk delay
 # Usage: start_mock_api [chunk_delay_ms]
 # Uses a single instance with dual listeners (both HTTP/2 h2c):
-# - Unix socket: Used by HTTP/1.1 daemons (reqwest upgrades to HTTP/2 via ALPN)
+# - Unix socket: Serves HTTP/2 with prior knowledge (h2c); HTTP/1.1 daemons disable HTTP/2 (e.g. reqwest http1_only())
 # - TCP: Used by HTTP/2 daemons with prior knowledge (h2c multiplexing)
 start_mock_api() {
     local chunk_delay=${1:-706}
@@ -222,13 +222,16 @@ start_mock_api() {
         --chunk-delay-ms "$chunk_delay" --chunk-count 18 --quiet &
     MOCK_API_PID=$!
 
-    # Wait for both endpoints to be ready
-    # Note: Mock API uses HTTP/2 (h2c) on both endpoints
+    # Wait for both endpoints to be ready.
+    # Note: Mock API speaks HTTP/2 (h2c) on both the Unix socket and TCP listener.
+    #       Some daemons may disable HTTP/2 on their *client* side, but the Unix
+    #       socket itself still serves HTTP/2, which is why we use
+    #       --http2-prior-knowledge for this health check.
     local tries=0
     local socket_ready=false
     local tcp_ready=false
     while [ $tries -lt 50 ]; do
-        # Check Unix socket (HTTP/2 prior knowledge required)
+        # Check Unix socket (serves HTTP/2; HTTP/2 prior knowledge required)
         if [ -S "$MOCK_API_SOCKET" ] && ! $socket_ready; then
             if curl -s --http2-prior-knowledge --unix-socket "$MOCK_API_SOCKET" http://localhost/health > /dev/null 2>&1; then
                 socket_ready=true
