@@ -315,7 +315,7 @@ fi
 # Test Go (HTTP/2 with TCP h2c multiplexing)
 if should_run go-http2; then
     if [ "$BACKEND_MODE" != "llm-api" ]; then
-        echo -e "${YELLOW}Skipping go-http2 (only available with --backend llm-api)${NC}"
+        echo -e "${YELLOW}Skipping go-http2: HTTP/2 requires TCP (llm-api backend), not Unix sockets used by delay backend${NC}"
     else
         test_daemon "go-http2" \
             "$(get_go_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2")" \

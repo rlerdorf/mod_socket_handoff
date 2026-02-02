@@ -73,6 +73,11 @@ const (
 	// 0660 restricts access to owner and group only. Apache (www-data) must be
 	// in the same group as the daemon, or run the daemon as www-data.
 	DefaultSocketMode = 0660
+
+	// SSE scanner buffer sizes for parsing upstream API responses.
+	// Initial size should handle typical SSE lines; max handles large JSON chunks.
+	scannerInitialBufferSize = 4096  // Initial buffer for bufio.Scanner
+	scannerMaxBufferSize     = 65536 // Maximum buffer for bufio.Scanner (64KB)
 )
 
 // Command-line flags
@@ -304,7 +309,7 @@ func main() {
 			// HTTP/2 requires TCP, so ignore Unix socket setting
 			transport = &http2.Transport{
 				AllowHTTP:          true,
-				DisableCompression: true, // Skip compression overhead for local mock API
+				DisableCompression: true, // Skip compression overhead for HTTP/2 cleartext connections
 				ReadIdleTimeout:    30 * time.Second,
 				PingTimeout:        15 * time.Second,
 				// DialTLSContext is used by http2.Transport for ALL connections, not just TLS.
@@ -1044,7 +1049,7 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	// Parse SSE stream and forward to client
 	// Use a larger buffer to reduce syscalls
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 4096), 65536)
+	scanner.Buffer(make([]byte, scannerInitialBufferSize), scannerMaxBufferSize)
 
 	// Pre-allocate byte slices for comparisons to avoid allocations
 	dataPrefix := []byte("data: ")
@@ -1150,9 +1155,19 @@ func extractContentFast(data []byte) string {
 				end += 2 // Skip valid escaped character
 				continue
 			}
-			// Invalid escape sequence; log warning and treat backslash as normal character
-			// This could indicate malformed JSON from the API
-			log.Printf("Warning: invalid JSON escape sequence '\\%c' in content field", next)
+			// Invalid escape sequence; log warning with position and context.
+			// This could indicate malformed JSON from the API.
+			snippetStart := end
+			if snippetStart > 10 {
+				snippetStart -= 10
+			} else {
+				snippetStart = 0
+			}
+			snippetEnd := end + 10
+			if snippetEnd > len(data) {
+				snippetEnd = len(data)
+			}
+			log.Printf("Warning: invalid JSON escape sequence '\\%c' at byte %d (context: %q)", next, end, data[snippetStart:snippetEnd])
 			end++
 			continue
 		}
@@ -1277,7 +1292,8 @@ func appendJSONEscaped(buf []byte, s string) []byte {
 			buf = append(buf, '\\', 't')
 		default:
 			if c < 0x20 {
-				// Control character - use \uXXXX format
+				// Control characters (0x00-0x1F) must be escaped as \uXXXX.
+				// First two hex digits are always '0' since c < 0x20 (max 0x1F).
 				buf = append(buf, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
 			} else {
 				buf = append(buf, c)
