@@ -309,7 +309,7 @@ func main() {
 			// HTTP/2 requires TCP, so ignore Unix socket setting
 			transport = &http2.Transport{
 				AllowHTTP:          true,
-				DisableCompression: true, // Skip compression overhead for HTTP/2 cleartext connections
+				DisableCompression: true, // Reduce CPU overhead in high-throughput streaming scenarios
 				ReadIdleTimeout:    30 * time.Second,
 				PingTimeout:        15 * time.Second,
 				// DialTLSContext is used by http2.Transport for ALL connections, not just TLS.
@@ -1216,7 +1216,8 @@ func unescapeJSON(b []byte) string {
 				result = append(result, b[i])
 			case 'u':
 				// Unicode escape \uXXXX - decode to UTF-8 using standard library
-				if i+4 < len(b) {
+				// Need 4 hex digits after 'u', so check i+5 <= len(b) for slice b[i+1:i+5]
+				if i+5 <= len(b) {
 					hexStr := string(b[i+1 : i+5])
 					if codepoint, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
 						// Encode rune as UTF-8 using standard library
