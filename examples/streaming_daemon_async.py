@@ -370,7 +370,6 @@ async def stream_response(
         # Use OpenAI backend if configured
         if openai_backend:
             # Create asyncio StreamWriter from fd for non-blocking I/O
-            loop = asyncio.get_event_loop()
             # Create a socket from the fd
             client_sock = socket.socket(fileno=client_fd)
             client_sock.setblocking(False)

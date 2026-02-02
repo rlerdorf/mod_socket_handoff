@@ -706,17 +706,13 @@ void curl_manager_check_completions(curl_manager_t *mgr) {
         /* Clear connection's curl handle reference */
         conn->curl_easy = NULL;
 
-        /* Cleanup request - NOTE: we defer curl_easy_cleanup to avoid
-         * breaking HTTP/2 connection state. The easy handle cleanup is
-         * deferred until the connection is actually closed.
+        /* Cleanup request and curl easy handle.
+         * The handle has been removed from multi above, so it's safe to clean up.
          */
         curl_slist_free_all(req->headers);
         free(req->post_data);
         free(req);
-        /* TODO: For now, leak the easy handle for testing.
-         * curl_easy_cleanup(easy) breaks HTTP/2 multiplexing.
-         */
-        (void)easy;
+        curl_easy_cleanup(easy);
     }
 }
 
