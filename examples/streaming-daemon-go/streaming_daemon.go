@@ -613,7 +613,8 @@ func safeHandleConnection(ctx context.Context, conn net.Conn) {
 }
 
 func handleConnection(ctx context.Context, conn net.Conn) {
-	// Receive file descriptor and handoff data from Apache
+	// Receive file descriptor and handoff data from Apache.
+	// Timing includes receiveFd() and conn.Close() to measure full handoff latency.
 	handoffStart := time.Now()
 	clientFd, data, err := receiveFd(conn)
 
@@ -1078,8 +1079,9 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		}
 
 		// Note: line and data reference scanner's internal buffer which is reused
-		// on next Scan(). This is safe because extractContentFast returns a string
-		// (copy), and we don't retain line/data references across iterations.
+		// on next Scan(). This is safe because extractContentFast always returns a
+		// string copy (via string() conversion), and we don't retain line/data
+		// references across iterations.
 		data := line[6:] // Skip "data: " prefix
 
 		// Check for [DONE] marker using bytes comparison (no allocation)
@@ -1302,6 +1304,7 @@ func appendJSONEscaped(buf []byte, s string) []byte {
 			if c < 0x20 {
 				// Control characters (0x00-0x1F) must be escaped as \uXXXX.
 				// First two hex digits are always '0' since c < 0x20 (max 0x1F).
+				// c>>4 selects the high nibble (0-1), c&0xf selects the low nibble (0-F).
 				buf = append(buf, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
 			} else {
 				buf = append(buf, c)
