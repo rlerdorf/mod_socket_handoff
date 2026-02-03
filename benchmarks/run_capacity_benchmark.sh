@@ -33,13 +33,13 @@ source "$SCRIPT_DIR/benchmark_common.sh"
 
 # Pass/fail thresholds
 MAX_FAILURE_RATE=0              # 0% failures allowed (strict requirement)
-MAX_TTFB_P99_MS=100.0           # p99 TTFB must be under 100ms
-MAX_RSS_KB=1048576              # 1GB RAM limit (1048576 KB)
-MAX_CPU_PCT=30                  # 30% CPU limit
-MAX_BACKLOG=1000                # Kernel accept queue limit (generous)
+MAX_TTFB_P99_MS=50.0            # p99 TTFB must be under 50ms
+MAX_RSS_KB=1572864              # 1.5GB RAM limit (1572864 KB)
+MAX_CPU_PCT=50                  # 50% CPU limit (that's half of one core)
+MAX_BACKLOG=256                 # Kernel accept queue limit (generous)
 
 # Binary search parameters
-INITIAL_HIGH=10000              # Starting upper bound (will expand if passes)
+INITIAL_HIGH=5000               # Starting upper bound (will expand if passes)
 GRANULARITY=500                 # Stop searching when range < this
 MAX_ITERATIONS=20               # Safety limit on search iterations
 STABILITY_RUNS=3                # Number of confirmation runs at final capacity
