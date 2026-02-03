@@ -309,6 +309,10 @@ if should_run go || should_run go-http2; then
     build_go_daemon
 fi
 
+if should_run rust || should_run rust-http2; then
+    build_rust_daemon
+fi
+
 cleanup
 
 echo "Starting benchmark at $(date)"

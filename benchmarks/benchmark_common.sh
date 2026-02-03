@@ -534,6 +534,30 @@ build_go_daemon() {
     fi
 }
 
+# Build Rust daemon if needed (with staleness check)
+build_rust_daemon() {
+    local daemon_dir="$EXAMPLES_DIR/streaming-daemon-rs"
+    local daemon_path="$daemon_dir/target/release/streaming-daemon-rs"
+    local needs_build=false
+
+    if [ ! -x "$daemon_path" ]; then
+        needs_build=true
+    elif is_rust_binary_stale "$daemon_path" "$daemon_dir"; then
+        echo "Rust daemon binary is stale, rebuilding..."
+        needs_build=true
+    fi
+
+    if $needs_build; then
+        if [ -z "$CARGO_BIN" ]; then
+            echo -e "${RED}ERROR: cargo not found. Please build Rust daemon first:${NC}"
+            echo "  cd $daemon_dir && cargo build --release"
+            exit 1
+        fi
+        echo "Building Rust daemon..."
+        (cd "$daemon_dir" && "$CARGO_BIN" build --release)
+    fi
+}
+
 # Build uring daemon if needed (with staleness check)
 # Usage: build_uring_daemon <backend>  (backend: mock or openai)
 build_uring_daemon() {
