@@ -122,16 +122,29 @@ func (r *Reporter) reportTAPSummary(summary TestSummary) {
 
 // JSON format
 func (r *Reporter) reportJSON(summary TestSummary) {
+	// Convert results to use string durations for consistent JSON output
+	jsonResults := make([]map[string]interface{}, len(summary.Results))
+	for i, result := range summary.Results {
+		jsonResults[i] = map[string]interface{}{
+			"scenario":   result.Scenario,
+			"category":   result.Category,
+			"passed":     result.Passed,
+			"duration":   result.Duration.String(),
+			"assertions": result.Assertions,
+			"error":      result.Error,
+		}
+	}
+
 	output := map[string]interface{}{
-		"version":      "1.0",
-		"daemon":       summary.DaemonName,
-		"backend_url":  summary.BackendURL,
-		"total_tests":  summary.TotalTests,
-		"passed":       summary.PassedTests,
-		"failed":       summary.FailedTests,
-		"total_time":   summary.TotalTime.String(),
-		"success":      summary.FailedTests == 0,
-		"results":      summary.Results,
+		"version":     "1.0",
+		"daemon":      summary.DaemonName,
+		"backend_url": summary.BackendURL,
+		"total_tests": summary.TotalTests,
+		"passed":      summary.PassedTests,
+		"failed":      summary.FailedTests,
+		"total_time":  summary.TotalTime.String(),
+		"success":     summary.FailedTests == 0,
+		"results":     jsonResults,
 	}
 
 	enc := json.NewEncoder(r.output)

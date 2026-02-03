@@ -60,9 +60,8 @@ fi
 
 log_info "Swow daemon running (PID $DAEMON_PID)"
 
-# Run tests
-run_tests "swow" "$FORMAT" "$CATEGORY"
-EXIT_CODE=$?
+# Run tests (capture exit code even with set -e)
+run_tests "swow" "$FORMAT" "$CATEGORY" && EXIT_CODE=0 || EXIT_CODE=$?
 
 log_info "Tests complete (exit code: $EXIT_CODE)"
 exit $EXIT_CODE

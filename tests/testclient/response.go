@@ -120,11 +120,12 @@ func ReadResponse(conn net.Conn) *Response {
 			break // End of headers
 		}
 
-		// Parse header
+		// Parse header (normalize key to canonical form for case-insensitive matching)
 		if idx := strings.Index(line, ":"); idx > 0 {
 			key := strings.TrimSpace(line[:idx])
 			value := strings.TrimSpace(line[idx+1:])
-			resp.Headers[key] = value
+			// Use canonical HTTP header casing (e.g., "content-type" -> "Content-Type")
+			resp.Headers[canonicalHeaderKey(key)] = value
 		}
 	}
 
@@ -213,6 +214,19 @@ func parseStatusCode(statusLine string) int {
 	var code int
 	fmt.Sscanf(parts[1], "%d", &code)
 	return code
+}
+
+// canonicalHeaderKey converts a header key to canonical HTTP format.
+// For example: "content-type" -> "Content-Type", "CONTENT-TYPE" -> "Content-Type"
+func canonicalHeaderKey(key string) string {
+	// Split by hyphen and capitalize first letter of each word
+	parts := strings.Split(strings.ToLower(key), "-")
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, "-")
 }
 
 // ContentChunks returns only the content chunks (not [DONE] marker).
