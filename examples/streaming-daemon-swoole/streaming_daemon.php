@@ -988,15 +988,22 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
             $handoffData = json_decode($trimmedData, true) ?? [];
         }
 
-        // Convert the received file descriptor into a \Socket instance
-        $clientStream = @fopen("php://fd/{$clientFd}", 'r+');
-        if ($clientStream === false) {
-            throw new RuntimeException("Failed to open stream for client file descriptor {$clientFd}");
-        }
-        $clientSocket = socket_import_stream($clientStream);
-        if ($clientSocket === false) {
-            fclose($clientStream);
-            throw new RuntimeException("Failed to import stream as socket for fd {$clientFd}");
+        // In PHP 8+, SCM_RIGHTS returns Socket directly; in older PHP, it's an int fd
+        if ($clientFd instanceof \Socket) {
+            $clientSocket = $clientFd;
+        } elseif (is_int($clientFd)) {
+            // Convert integer fd to Socket instance
+            $clientStream = @fopen("php://fd/{$clientFd}", 'r+');
+            if ($clientStream === false) {
+                throw new RuntimeException("Failed to open stream for client file descriptor {$clientFd}");
+            }
+            $clientSocket = socket_import_stream($clientStream);
+            if ($clientSocket === false) {
+                fclose($clientStream);
+                throw new RuntimeException("Failed to import stream as socket for fd {$clientFd}");
+            }
+        } else {
+            throw new RuntimeException("Unknown client fd type: " . gettype($clientFd));
         }
 
         streamResponse($clientSocket, $handoffData, $connId, $stats);
