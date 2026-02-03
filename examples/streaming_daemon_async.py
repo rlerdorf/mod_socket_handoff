@@ -725,12 +725,15 @@ async def stream_response(
                 client_sock.setblocking(False)
                 # Open asyncio stream connection from the socket
                 _, client_writer = await asyncio.open_connection(sock=client_sock)
+                # Detach socket to transfer ownership to asyncio transport
+                # This prevents double-close when client_sock is garbage collected
+                client_sock.detach()
 
                 bytes_sent, success = await stream_from_openai(
                     client_writer, handoff_data, conn_id
                 )
 
-                # Close the writer (which closes the socket)
+                # Close the writer (which closes the underlying fd)
                 client_writer.close()
                 await client_writer.wait_closed()
         else:

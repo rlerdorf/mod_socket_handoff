@@ -63,8 +63,8 @@ pub struct Config {
     #[arg(long)]
     pub tls: bool,
 
-    /// TLS certificate file (PEM format). If not specified with --tls,
-    /// a self-signed certificate is auto-generated at startup.
+    /// TLS certificate file (PEM format). When --tls is set and this is not provided,
+    /// a self-signed certificate is auto-generated at startup (along with a key).
     #[arg(long)]
     pub tls_cert: Option<String>,
 

@@ -988,7 +988,18 @@ function handleConnection(\Socket $apacheConn, int $connId, Stats $stats): void
             $handoffData = json_decode($trimmedData, true) ?? [];
         }
 
-        streamResponse($clientFd, $handoffData, $connId, $stats);
+        // Convert the received file descriptor into a \Socket instance
+        $clientStream = @fopen("php://fd/{$clientFd}", 'r+');
+        if ($clientStream === false) {
+            throw new RuntimeException("Failed to open stream for client file descriptor {$clientFd}");
+        }
+        $clientSocket = socket_import_stream($clientStream);
+        if ($clientSocket === false) {
+            fclose($clientStream);
+            throw new RuntimeException("Failed to import stream as socket for fd {$clientFd}");
+        }
+
+        streamResponse($clientSocket, $handoffData, $connId, $stats);
 
     } catch (Throwable $e) {
         // Always show the first few errors for debugging

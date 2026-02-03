@@ -86,6 +86,17 @@ impl Http2Settings {
 fn create_tls_config(config: &Config) -> Arc<ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+    // Validate that cert and key are either both provided or both absent
+    match (&config.tls_cert, &config.tls_key) {
+        (Some(_), None) => {
+            panic!("--tls-cert was provided but --tls-key is missing. Both must be specified together.");
+        }
+        (None, Some(_)) => {
+            panic!("--tls-key was provided but --tls-cert is missing. Both must be specified together.");
+        }
+        _ => {}
+    }
+
     let (certs, key) =
         if let (Some(cert_path), Some(key_path)) = (&config.tls_cert, &config.tls_key) {
             // Load from files
