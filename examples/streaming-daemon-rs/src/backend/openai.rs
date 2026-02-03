@@ -34,6 +34,7 @@ impl OpenAIBackend {
     ///
     /// When HTTP/2 is disabled, falls back to HTTP/1.1 mode where `api_socket` can be
     /// used to route connections through a Unix socket for connection pooling.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_key: String,
         api_base: String,

@@ -86,36 +86,35 @@ impl Http2Settings {
 fn create_tls_config(config: &Config) -> Arc<ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-    let (certs, key) = if let (Some(cert_path), Some(key_path)) =
-        (&config.tls_cert, &config.tls_key)
-    {
-        // Load from files
-        let cert_pem = std::fs::read(cert_path).expect("Failed to read TLS cert file");
-        let key_pem = std::fs::read(key_path).expect("Failed to read TLS key file");
+    let (certs, key) =
+        if let (Some(cert_path), Some(key_path)) = (&config.tls_cert, &config.tls_key) {
+            // Load from files
+            let cert_pem = std::fs::read(cert_path).expect("Failed to read TLS cert file");
+            let key_pem = std::fs::read(key_path).expect("Failed to read TLS key file");
 
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
-            .map(|r| r.expect("Failed to parse certificate"))
-            .collect();
+            let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+                .map(|r| r.expect("Failed to parse certificate"))
+                .collect();
 
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
-            .expect("Failed to parse private key")
-            .expect("No private key found");
+            let key = rustls_pemfile::private_key(&mut &key_pem[..])
+                .expect("Failed to parse private key")
+                .expect("No private key found");
 
-        (certs, key)
-    } else {
-        // Generate self-signed certificate at startup
-        info!("Generating self-signed TLS certificate...");
-        let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+            (certs, key)
+        } else {
+            // Generate self-signed certificate at startup
+            info!("Generating self-signed TLS certificate...");
+            let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
 
-        let cert = rcgen::generate_simple_self_signed(subject_alt_names)
-            .expect("Failed to generate self-signed certificate");
+            let cert = rcgen::generate_simple_self_signed(subject_alt_names)
+                .expect("Failed to generate self-signed certificate");
 
-        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-        let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
-            .expect("Failed to serialize private key");
+            let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+            let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+                .expect("Failed to serialize private key");
 
-        (vec![cert_der], key_der)
-    };
+            (vec![cert_der], key_der)
+        };
 
     // Configure TLS with performance-optimized settings:
     // - TLS 1.3 only (fastest handshake, 1-RTT)
@@ -146,7 +145,8 @@ fn main() {
     let filter = if config.quiet {
         EnvFilter::new("warn,h2=error,rustls=error")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,h2=error,rustls=error"))
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,h2=error,rustls=error"))
     };
 
     tracing_subscriber::fmt()

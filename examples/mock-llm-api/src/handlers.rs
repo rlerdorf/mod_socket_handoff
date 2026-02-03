@@ -36,9 +36,7 @@ pub async fn chat_completions(
     let delay = state.chunk_delay;
 
     // Check for X-Test-Pattern header
-    let pattern_header = headers
-        .get("X-Test-Pattern")
-        .and_then(|v| v.to_str().ok());
+    let pattern_header = headers.get("X-Test-Pattern").and_then(|v| v.to_str().ok());
     let pattern = TestPattern::parse(pattern_header);
 
     // If test pattern is specified, use test response chunks

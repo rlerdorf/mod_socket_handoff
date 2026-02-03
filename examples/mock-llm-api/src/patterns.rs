@@ -161,10 +161,17 @@ impl TestResponseChunks {
 
     /// Custom finish_reason.
     fn finish_reason_chunks(reason: &str) -> Self {
-        let chunks: Vec<Bytes> = ["Test", " response", " with", " custom", " finish_reason", "."]
-            .iter()
-            .map(|s| Self::make_chunk(s))
-            .collect();
+        let chunks: Vec<Bytes> = [
+            "Test",
+            " response",
+            " with",
+            " custom",
+            " finish_reason",
+            ".",
+        ]
+        .iter()
+        .map(|s| Self::make_chunk(s))
+        .collect();
 
         Self {
             chunks,

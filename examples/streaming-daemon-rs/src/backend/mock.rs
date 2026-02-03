@@ -125,6 +125,7 @@ mod tests {
             system: None,
             user_id: None,
             request_id: "test-1".to_string(),
+            test_pattern: None,
         };
 
         let mut stream = backend.stream(request).await.unwrap();
