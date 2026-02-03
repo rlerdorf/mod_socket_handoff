@@ -1521,6 +1521,7 @@ dependencies = [
  "nix",
  "reqwest",
  "reqwest-eventsource",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

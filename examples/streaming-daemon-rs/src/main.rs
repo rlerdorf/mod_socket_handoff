@@ -61,6 +61,13 @@ struct Args {
 // Configure tokio runtime with larger blocking thread pool for high concurrency
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider for TLS support.
+    // Required for rustls 0.23+ when using reqwest with rustls-tls feature.
+    // Must be done before any TLS connections are made.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let args = Args::parse();
 
     // Set benchmark mode if requested
