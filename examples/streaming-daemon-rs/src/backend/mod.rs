@@ -40,6 +40,7 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 config.openai.pool_max_idle_per_host,
                 config.openai.api_socket.clone(),
                 &config.openai.http2,
+                config.openai.insecure_ssl,
             )?))
         }
         other => Err(BackendError::Config(format!(

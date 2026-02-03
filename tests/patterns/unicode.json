@@ -1,0 +1,25 @@
+{
+  "name": "unicode",
+  "description": "Unicode content including emoji, CJK, and 4-byte UTF-8 characters",
+  "expected_content": {
+    "emoji": ["😀", "💡", "❤", "🚀", "🎉", "👍", "✨", "🔥", "🌟", "🎯"],
+    "cjk": ["中", "文", "字", "符", "测", "试", "日", "本", "語", "韓"],
+    "four_byte": ["𝐀", "𝐁", "𝐂", "𐍈", "😀", "💻", "🧑", "🌈"],
+    "mixed": [
+      "Hello 世界! 🌍",
+      "Test 测试 🧪",
+      "Code 代码 💻",
+      "Math: 𝐀𝐁𝐂",
+      "日本語テスト 🎌",
+      "한국어 테스트 🇰🇷",
+      "Emoji mix: 🚀✨🔥"
+    ]
+  },
+  "assertions": [
+    {"type": "http_status", "expected": 200},
+    {"type": "sse_format"},
+    {"type": "utf8_valid"},
+    {"type": "done_marker"},
+    {"type": "finish_reason", "expected": "stop"}
+  ]
+}

@@ -162,8 +162,9 @@ var httpClient *http.Client
 
 // OpenAI configuration
 var (
-	openaiAPIBase string
-	openaiAPIKey  string
+	openaiAPIBase    string
+	openaiAPIKey     string
+	openaiInsecure   bool
 )
 
 // Prometheus metrics
@@ -229,11 +230,12 @@ var (
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
 // Customize this struct to match your application's needs.
 type HandoffData struct {
-	UserID    int64  `json:"user_id"`
-	Prompt    string `json:"prompt"`
-	Model     string `json:"model,omitempty"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
-	Timestamp int64  `json:"timestamp,omitempty"`
+	UserID      int64  `json:"user_id"`
+	Prompt      string `json:"prompt"`
+	Model       string `json:"model,omitempty"`
+	MaxTokens   int    `json:"max_tokens,omitempty"`
+	Timestamp   int64  `json:"timestamp,omitempty"`
+	TestPattern string `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
 }
 
 // Connection tracking for graceful shutdown
@@ -309,6 +311,15 @@ func main() {
 			useHTTP2 = !isFalse
 		}
 
+		// Check for insecure SSL mode (for testing with self-signed certificates)
+		if envVal := os.Getenv("OPENAI_INSECURE_SSL"); envVal != "" {
+			openaiInsecure = strings.EqualFold(envVal, "true") ||
+				strings.EqualFold(envVal, "1")
+		}
+		if openaiInsecure {
+			log.Println("Warning: TLS certificate verification disabled (OPENAI_INSECURE_SSL=true)")
+		}
+
 		// Create HTTP transport based on configuration
 		var roundTripper http.RoundTripper
 
@@ -334,7 +345,12 @@ func main() {
 			log.Printf("OpenAI backend: %s (HTTP/2 h2c)", openaiAPIBase)
 		} else if useHTTP2 && strings.HasPrefix(openaiAPIBase, "https://") {
 			// HTTP/2 with ALPN negotiation for https:// endpoints
+			tlsConfig := &tls.Config{}
+			if openaiInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			}
 			roundTripper = &http.Transport{
+				TLSClientConfig:     tlsConfig,
 				ForceAttemptHTTP2:   true,
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
@@ -358,11 +374,16 @@ func main() {
 			log.Printf("OpenAI backend: %s (HTTP/1.1 via unix:%s)", openaiAPIBase, socketPath)
 		} else {
 			// HTTP/1.1 with TCP
-			roundTripper = &http.Transport{
+			transport := &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
 			}
+			// Apply TLS config for HTTPS endpoints
+			if strings.HasPrefix(openaiAPIBase, "https://") && openaiInsecure {
+				transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			}
+			roundTripper = transport
 			log.Printf("OpenAI backend: %s (HTTP/1.1)", openaiAPIBase)
 		}
 
@@ -1036,6 +1057,11 @@ func streamFromOpenAI(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+openaiAPIKey)
+
+	// Add test pattern header if present (for validation testing)
+	if handoff.TestPattern != "" {
+		req.Header.Set("X-Test-Pattern", handoff.TestPattern)
+	}
 
 	// Make request
 	resp, err := httpClient.Do(req)

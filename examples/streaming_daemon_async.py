@@ -11,9 +11,11 @@ Usage:
     sudo python3 streaming_daemon_async.py --backend openai --openai-socket /tmp/api.sock
 
 Environment variables (for OpenAI backend):
-    OPENAI_API_KEY      - Required. API key for authentication
-    OPENAI_API_BASE     - Optional. Base URL (default: https://api.openai.com/v1)
-    OPENAI_API_SOCKET   - Optional. Unix socket path for API connections
+    OPENAI_API_KEY        - Required. API key for authentication
+    OPENAI_API_BASE       - Optional. Base URL (default: https://api.openai.com/v1)
+    OPENAI_API_SOCKET     - Optional. Unix socket path for API connections
+    OPENAI_HTTP2_ENABLED  - Optional. Enable HTTP/2 multiplexing (default: true)
+    OPENAI_INSECURE_SSL   - Optional. Skip SSL verification for self-signed certs (default: false)
 
 The daemon will:
 1. Listen on a Unix socket
@@ -58,6 +60,50 @@ openai_backend = False
 openai_api_base = None
 openai_api_key = None
 openai_api_socket = None
+openai_http2_enabled = True  # Default on, like Go/Rust daemons
+openai_insecure_ssl = False  # Skip SSL verification (for self-signed certs)
+
+# HTTP/2 support (optional, loaded on demand)
+PYCURL_HTTP2_AVAILABLE = False
+AsyncCurlMulti = None
+
+
+def is_http2_enabled() -> bool:
+    """Check if HTTP/2 is enabled via environment variable."""
+    val = os.environ.get("OPENAI_HTTP2_ENABLED", "true").lower()
+    return val not in ("false", "0", "no", "off")
+
+
+def is_insecure_ssl() -> bool:
+    """Check if SSL verification should be skipped (for self-signed certs)."""
+    val = os.environ.get("OPENAI_INSECURE_SSL", "false").lower()
+    return val in ("true", "1", "yes", "on")
+
+
+def check_pycurl_http2(quiet: bool = False) -> bool:
+    """
+    Check if PycURL is available with HTTP/2 support.
+
+    Args:
+        quiet: If True, suppress warning messages (for benchmark mode).
+
+    Returns True if pycurl is installed and libcurl has HTTP/2 support.
+    """
+    global PYCURL_HTTP2_AVAILABLE, AsyncCurlMulti
+    try:
+        from pycurl_http2 import AsyncCurlMulti as _AsyncCurlMulti, check_http2_support
+        if check_http2_support():
+            AsyncCurlMulti = _AsyncCurlMulti
+            PYCURL_HTTP2_AVAILABLE = True
+            return True
+        else:
+            if not quiet:
+                print("Warning: pycurl available but libcurl lacks HTTP/2 support", file=sys.stderr)
+            return False
+    except ImportError as e:
+        if not quiet:
+            print(f"Note: HTTP/2 not available ({e})", file=sys.stderr)
+        return False
 
 
 class Stats:
@@ -347,12 +393,311 @@ async def stream_from_openai(
     return bytes_sent, success
 
 
+async def async_writer_task(
+    client_fd: int,
+    context: "StreamContext",
+    conn_id: int,
+) -> Tuple[int, bool]:
+    """
+    Async task that writes queued chunks to the client.
+
+    Consumes chunks from the StreamContext queue and writes them to the
+    client socket using asyncio's non-blocking I/O. This decouples client
+    writes from the curl callback, enabling HTTP/2 multiplexing.
+
+    Args:
+        client_fd: File descriptor for the client socket
+        context: StreamContext with chunk queue
+        conn_id: Connection ID for logging
+
+    Returns:
+        (bytes_sent, success) tuple
+    """
+    bytes_sent = 0
+    success = False
+    transport = None
+    protocol = None
+
+    try:
+        # Create socket from fd and make it non-blocking.
+        # IMPORTANT: We use detach() to transfer fd ownership to a new socket
+        # that will be owned by the transport. This prevents double-close:
+        # - Without detach: client_sock owns fd, transport.close() closes fd,
+        #   then client_sock.__del__ tries to close fd again = double-close bug
+        # - With detach: client_sock releases fd, new socket owns it, transport
+        #   takes ownership of new socket, single clean close path
+        temp_sock = socket.socket(fileno=client_fd)
+        temp_sock.setblocking(False)
+        fd = temp_sock.detach()  # Transfer ownership - temp_sock no longer owns fd
+
+        # Create new socket for asyncio transport
+        client_sock = socket.socket(fileno=fd)
+        client_sock.setblocking(False)
+
+        # Get the currently running event loop
+        loop = asyncio.get_running_loop()
+
+        # Create a protocol for the socket (needed for asyncio transport)
+        # Use a simple protocol that just tracks connection state
+        class ClientProtocol(asyncio.Protocol):
+            def __init__(self):
+                self.connected = True
+
+            def connection_lost(self, exc):
+                self.connected = False
+
+        # Create transport and protocol from socket
+        # Transport now owns client_sock and will close it properly
+        transport, protocol = await loop.create_connection(
+            ClientProtocol,
+            sock=client_sock,
+        )
+
+        # Send HTTP response headers first
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "\r\n"
+        )
+        header_bytes = headers.encode("utf-8")
+        transport.write(header_bytes)
+        bytes_sent += len(header_bytes)
+
+        # Wait for headers to drain before continuing
+        # Check write buffer - if too large, wait for it to drain
+        write_buffer_limit = 65536  # 64KB
+        while transport.get_write_buffer_size() > write_buffer_limit:
+            await asyncio.sleep(0.001)
+            if not protocol.connected:
+                context.abort("client disconnected")
+                return bytes_sent, False
+
+        # Consume chunks from queue and write to client.
+        # Use done_event with timeout for reliable completion detection,
+        # since queue.put_nowait(None) can fail silently if queue is full.
+        while True:
+            # Check if done_event is set (stream complete or aborted)
+            if context.done_event.is_set():
+                # Drain any remaining queued chunks before exiting
+                while True:
+                    try:
+                        chunk = context.queue.get_nowait()
+                        if chunk is None:
+                            break
+                        # Process remaining chunk (same logic as below)
+                        if chunk == b"[DONE]":
+                            sse_msg = b"data: [DONE]\n\n"
+                            transport.write(sse_msg)
+                            bytes_sent += len(sse_msg)
+                        else:
+                            try:
+                                chunk_data = json.loads(chunk.decode("utf-8"))
+                                content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    sse_data = json.dumps({"content": content})
+                                    sse_msg = f"data: {sse_data}\n\n".encode("utf-8")
+                                    transport.write(sse_msg)
+                                    bytes_sent += len(sse_msg)
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                pass
+                    except asyncio.QueueEmpty:
+                        break
+                # Stream complete - check if it was successful or aborted
+                success = not context.aborted
+                break
+
+            try:
+                # Wait for next chunk with short timeout, then check done_event
+                chunk = await asyncio.wait_for(context.queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Short timeout - loop back to check done_event
+                continue
+
+            if chunk is None:
+                # Sentinel - stream complete
+                success = True
+                break
+
+            if not protocol.connected:
+                context.abort("client disconnected")
+                break
+
+            # Process the chunk - it's SSE data from the API
+            if chunk == b"[DONE]":
+                # Forward [DONE] marker
+                sse_msg = b"data: [DONE]\n\n"
+                transport.write(sse_msg)
+                bytes_sent += len(sse_msg)
+            else:
+                # Parse JSON and extract content
+                try:
+                    chunk_data = json.loads(chunk.decode("utf-8"))
+                    content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    if content:
+                        sse_data = json.dumps({"content": content})
+                        sse_msg = f"data: {sse_data}\n\n".encode("utf-8")
+                        transport.write(sse_msg)
+                        bytes_sent += len(sse_msg)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+
+            # Apply backpressure if write buffer is getting too large
+            while transport.get_write_buffer_size() > write_buffer_limit:
+                await asyncio.sleep(0.001)
+                if not protocol.connected:
+                    context.abort("client disconnected during backpressure")
+                    break
+
+    except Exception as e:
+        if not benchmark_mode:
+            print(f"[{conn_id}] Writer task error: {e}", file=sys.stderr)
+        context.abort(str(e))
+
+    finally:
+        # Drain any remaining queue items to free memory and prevent leaks.
+        # This is critical: if we exit early due to error/timeout, orphaned
+        # queue items hold memory indefinitely.
+        while True:
+            try:
+                context.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                # Intentionally ignore errors when closing the transport during cleanup.
+                # The connection may already be closed by the client or network.
+                pass
+
+    return bytes_sent, success
+
+
+async def stream_from_openai_http2(
+    client_fd: int,
+    handoff_data: dict,
+    conn_id: int,
+    curl_multi: "AsyncCurlMulti",
+) -> Tuple[int, bool]:
+    """
+    Stream response from OpenAI API using HTTP/2 multiplexing via PycURL.
+
+    Uses queue-based decoupling to enable true HTTP/2 multiplexing:
+    1. Curl callback queues chunks (returns immediately, non-blocking)
+    2. Separate writer task consumes queue and writes to client asynchronously
+    3. Bounded queue provides backpressure for slow clients
+
+    This fixes the serialization bottleneck where blocking client writes
+    in the curl callback prevented all HTTP/2 streams from making progress.
+
+    Args:
+        client_fd: File descriptor for the client socket
+        handoff_data: Parsed JSON from X-Handoff-Data header
+        conn_id: Connection ID for logging
+        curl_multi: The shared AsyncCurlMulti instance
+
+    Returns:
+        (bytes_sent, success) tuple
+    """
+    import pycurl
+    from pycurl_http2 import StreamContext, StreamingRequestQueued, configure_http2
+
+    # Create stream context with bounded queue for backpressure
+    loop = asyncio.get_event_loop()
+    context = StreamContext(loop, maxsize=100)
+
+    # Start writer task first - it will handle client writes asynchronously
+    # while curl populates the queue
+    writer_task = asyncio.create_task(
+        async_writer_task(client_fd, context, conn_id)
+    )
+
+    try:
+        # Build the request
+        prompt = handoff_data.get("prompt", "Hello")
+        model = handoff_data.get("model", "gpt-4o-mini")
+        max_tokens = handoff_data.get("max_tokens", 1024)
+        test_pattern = handoff_data.get("test_pattern", "")
+
+        request_body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "stream": True
+        })
+
+        # Determine URL
+        url = openai_api_base.rstrip("/") + "/chat/completions"
+
+        # Create curl handle with queued request
+        curl = pycurl.Curl()
+        request = StreamingRequestQueued(curl, context)
+
+        # Configure request
+        curl.setopt(pycurl.URL, url)
+        curl.setopt(pycurl.POST, 1)
+        curl.setopt(pycurl.POSTFIELDS, request_body)
+        curl.setopt(pycurl.WRITEFUNCTION, request.write_callback)
+        curl.setopt(pycurl.HEADERFUNCTION, request.header_callback)
+
+        # Headers
+        http_headers = [
+            "Content-Type: application/json",
+            f"Authorization: Bearer {openai_api_key}",
+        ]
+        if test_pattern:
+            http_headers.append(f"X-Test-Pattern: {test_pattern}")
+        curl.setopt(pycurl.HTTPHEADER, http_headers)
+
+        # Configure HTTP/2
+        configure_http2(curl, url, insecure=openai_insecure_ssl)
+
+        # Perform curl request asynchronously
+        # This populates the queue via write_callback (non-blocking)
+        await curl_multi.perform(curl, request)
+
+        # Signal that curl transfer is complete
+        context.signal_done()
+
+        # Check HTTP status
+        http_code = context.http_code
+        if http_code != 200 and not benchmark_mode:
+            print(f"[{conn_id}] HTTP/2 API returned {http_code}", file=sys.stderr)
+
+        # Clean up curl handle
+        curl.close()
+
+    except Exception as e:
+        if not benchmark_mode:
+            print(f"[{conn_id}] HTTP/2 curl error: {e}", file=sys.stderr)
+        context.abort(str(e))
+
+    # Wait for writer task to complete and get its results
+    try:
+        bytes_sent, success = await writer_task
+    except Exception as e:
+        if not benchmark_mode:
+            print(f"[{conn_id}] Writer task failed: {e}", file=sys.stderr)
+        bytes_sent, success = 0, False
+
+    # Success requires both curl success (HTTP 200) and writer success
+    if context.http_code != 200:
+        success = False
+
+    return bytes_sent, success
+
+
 async def stream_response(
     client_fd: int,
     handoff_data: dict,
     conn_id: int,
     ticker: SharedTicker,
     write_delay: float = 0.05,
+    curl_multi: "AsyncCurlMulti" = None,
 ) -> None:
     """
     Stream an SSE response to the client.
@@ -369,20 +714,30 @@ async def stream_response(
     try:
         # Use OpenAI backend if configured
         if openai_backend:
-            # Create asyncio StreamWriter from fd for non-blocking I/O
-            # Create a socket from the fd
-            client_sock = socket.socket(fileno=client_fd)
-            client_sock.setblocking(False)
-            # Open asyncio stream connection from the socket
-            _, client_writer = await asyncio.open_connection(sock=client_sock)
+            # Use HTTP/2 multiplexing if available and enabled
+            if curl_multi is not None and openai_http2_enabled:
+                bytes_sent, success = await stream_from_openai_http2(
+                    client_fd, handoff_data, conn_id, curl_multi
+                )
+                # HTTP/2 function takes ownership of fd and closes it
+            else:
+                # HTTP/1.1 fallback using asyncio streams
+                # Create asyncio StreamWriter from fd for non-blocking I/O
+                client_sock = socket.socket(fileno=client_fd)
+                client_sock.setblocking(False)
+                # Open asyncio stream connection from the socket
+                _, client_writer = await asyncio.open_connection(sock=client_sock)
+                # Detach socket to transfer ownership to asyncio transport
+                # This prevents double-close when client_sock is garbage collected
+                client_sock.detach()
 
-            bytes_sent, success = await stream_from_openai(
-                client_writer, handoff_data, conn_id
-            )
+                bytes_sent, success = await stream_from_openai(
+                    client_writer, handoff_data, conn_id
+                )
 
-            # Close the writer (which closes the socket)
-            client_writer.close()
-            await client_writer.wait_closed()
+                # Close the writer (which closes the underlying fd)
+                client_writer.close()
+                await client_writer.wait_closed()
         else:
             # Mock backend with hardcoded messages
             # Wrap fd in file object for writing (takes ownership of fd)
@@ -467,6 +822,7 @@ async def handle_handoff(
     executor: ThreadPoolExecutor,
     ticker: SharedTicker,
     write_delay: float,
+    curl_multi: "AsyncCurlMulti" = None,
 ) -> None:
     """
     Handle a single handoff from Apache.
@@ -503,7 +859,7 @@ async def handle_handoff(
         handoff_data = {"raw": data.decode("utf-8", errors="replace")}
 
     # Stream response as a coroutine (non-blocking)
-    await stream_response(client_fd, handoff_data, conn_id, ticker, write_delay)
+    await stream_response(client_fd, handoff_data, conn_id, ticker, write_delay, curl_multi)
 
 
 async def accept_loop(
@@ -511,6 +867,7 @@ async def accept_loop(
     executor: ThreadPoolExecutor,
     ticker: SharedTicker,
     write_delay: float,
+    curl_multi: "AsyncCurlMulti" = None,
 ) -> None:
     """
     Main accept loop using asyncio.
@@ -531,7 +888,7 @@ async def accept_loop(
             while True:
                 conn_id += 1
                 asyncio.create_task(
-                    handle_handoff(apache_conn, conn_id, executor, ticker, write_delay)
+                    handle_handoff(apache_conn, conn_id, executor, ticker, write_delay, curl_multi)
                 )
                 try:
                     apache_conn, _ = server.accept()
@@ -600,9 +957,16 @@ async def main_async(args: argparse.Namespace) -> None:
     ticker = SharedTicker(args.delay / 1000.0)
     ticker_task = asyncio.create_task(ticker.run())
 
+    # Initialize HTTP/2 curl multi handle if enabled and available
+    curl_multi = None
+    if openai_backend and openai_http2_enabled and PYCURL_HTTP2_AVAILABLE:
+        curl_multi = AsyncCurlMulti(loop)
+        if not benchmark_mode:
+            print("HTTP/2 multiplexing enabled via PycURL")
+
     # Start accept loop
     accept_task = asyncio.create_task(
-        accept_loop(server, executor, ticker, args.delay / 1000.0)
+        accept_loop(server, executor, ticker, args.delay / 1000.0, curl_multi)
     )
 
     # Wait for shutdown signal
@@ -622,6 +986,8 @@ async def main_async(args: argparse.Namespace) -> None:
         pass  # Expected: ticker task was cancelled for shutdown
 
     # Cleanup
+    if curl_multi is not None:
+        curl_multi.close()
     executor.shutdown(wait=False)
     server.close()
     try:
@@ -703,7 +1069,7 @@ def main():
 
     args = parser.parse_args()
 
-    global benchmark_mode, openai_backend, openai_api_base, openai_api_key, openai_api_socket
+    global benchmark_mode, openai_backend, openai_api_base, openai_api_key, openai_api_socket, openai_http2_enabled, openai_insecure_ssl
     benchmark_mode = args.benchmark
 
     # Configure OpenAI backend
@@ -712,15 +1078,30 @@ def main():
         openai_api_base = args.openai_base
         openai_api_key = args.openai_key
         openai_api_socket = args.openai_socket
+        openai_insecure_ssl = is_insecure_ssl()
 
         if not openai_api_key:
             print("Error: --openai-key or OPENAI_API_KEY required for openai backend", file=sys.stderr)
             sys.exit(1)
 
+        # Check HTTP/2 configuration
+        openai_http2_enabled = is_http2_enabled()
+        if openai_http2_enabled:
+            # HTTP/2 requires TCP connection (not Unix socket) for multiplexing
+            if openai_api_socket:
+                if not benchmark_mode:
+                    print("Note: HTTP/2 disabled when using Unix socket", file=sys.stderr)
+                openai_http2_enabled = False
+            else:
+                # Check if PycURL with HTTP/2 is available - use return value!
+                if not check_pycurl_http2(quiet=benchmark_mode):
+                    openai_http2_enabled = False
+
         if openai_api_socket:
             print(f"OpenAI backend: {openai_api_base} (via unix:{openai_api_socket})")
         else:
-            print(f"OpenAI backend: {openai_api_base}")
+            http2_status = "HTTP/2" if (openai_http2_enabled and PYCURL_HTTP2_AVAILABLE) else "HTTP/1.1"
+            print(f"OpenAI backend: {openai_api_base} ({http2_status})")
 
     # Increase file descriptor limit to handle many concurrent connections
     try:

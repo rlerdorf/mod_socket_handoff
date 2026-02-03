@@ -126,6 +126,11 @@ pub struct OpenAIConfig {
     /// Maximum idle connections per host in pool.
     pub pool_max_idle_per_host: usize,
 
+    /// Skip TLS certificate verification (for testing with self-signed certs).
+    /// WARNING: Only use in testing environments with trusted self-signed certificates.
+    /// Can be set via OPENAI_INSECURE_SSL=true environment variable.
+    pub insecure_ssl: bool,
+
     /// HTTP/2 configuration for upstream API connections.
     pub http2: Http2Config,
 }
@@ -137,6 +142,7 @@ impl Default for OpenAIConfig {
             api_base: "https://api.openai.com/v1".to_string(),
             api_socket: None,
             pool_max_idle_per_host: 100,
+            insecure_ssl: false,
             http2: Http2Config::default(),
         }
     }
@@ -329,6 +335,10 @@ impl Config {
         // HTTP/2 overrides
         if let Ok(v) = std::env::var("OPENAI_HTTP2_ENABLED") {
             self.backend.openai.http2.enabled = v != "false" && v != "0";
+        }
+        // TLS insecure mode (for testing with self-signed certificates)
+        if let Ok(v) = std::env::var("OPENAI_INSECURE_SSL") {
+            self.backend.openai.insecure_ssl = v.eq_ignore_ascii_case("true") || v == "1";
         }
 
         // Metrics overrides

@@ -36,6 +36,9 @@ pub struct HandoffData {
     pub system: Option<Box<str>>,
     #[serde(default)]
     pub request_id: Option<Box<str>>,
+    /// Test pattern for validation testing (passed to backend as X-Test-Pattern header)
+    #[serde(default)]
+    pub test_pattern: Option<Box<str>>,
 }
 
 /// Result of receiving a handoff from Apache.

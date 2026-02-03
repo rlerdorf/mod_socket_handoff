@@ -17,7 +17,7 @@
 #   sudo ./run_capacity_benchmark.sh go-http2     # Test Go with HTTP/2 multiplexing
 #   sudo ./run_capacity_benchmark.sh --help       # Show help
 #
-# Available daemons: php, go, go-http2, rust, rust-http2, uring
+# Available daemons: php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, python-http2
 #
 
 set -e
@@ -63,12 +63,17 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Arguments:"
             echo "  daemon    One or more daemons to test:"
-            echo "            php, go, go-http2, rust, rust-http2, uring"
+            echo "            php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring"
             echo ""
+            echo "            swoole    - Swoole daemon with HTTP/1.1"
+            echo "            swoole-http2 - Swoole daemon with HTTP/2 multiplexing (HTTPS)"
+            echo "            swow      - Swow daemon with HTTP/1.1"
+            echo "            swow-http2 - Swow daemon with HTTP/2 multiplexing (HTTPS via curl_multi)"
             echo "            go        - Go daemon with HTTP/1.1 (Unix socket to API)"
-            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (HTTPS TLS)"
             echo "            rust      - Rust daemon with HTTP/1.1 (Unix socket to API)"
-            echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (HTTPS TLS)"
+            echo "            python-http2 - Python asyncio daemon with HTTP/2 via PycURL"
             echo ""
             echo "            If not specified, all daemons are tested."
             echo ""
@@ -82,18 +87,21 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  sudo $0              # Test all daemons"
             echo "  sudo $0 rust go      # Test Rust and Go only"
+            echo "  sudo $0 swoole-http2 # Test Swoole with HTTP/2 multiplexing"
+            echo "  sudo $0 swow-http2   # Test Swow with HTTP/2 multiplexing"
             echo "  sudo $0 rust-http2   # Test Rust with HTTP/2 multiplexing"
             echo "  sudo $0 go-http2     # Test Go with HTTP/2 multiplexing"
+            echo "  sudo $0 python-http2 # Test Python with HTTP/2 via PycURL"
             echo ""
             exit 0
             ;;
-        php|go|go-http2|rust|rust-http2|uring)
+        php|swoole|swoole-http2|swow|swow-http2|go|go-http2|rust|rust-http2|uring|uring-http2|python-http2)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, go, go-http2, rust, rust-http2, uring"
+            echo "Valid daemons: php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, uring-http2, python-http2"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -124,7 +132,7 @@ trap 'abort_handler' INT TERM
 
 # Run a single test at N connections and collect metrics
 # Returns JSON file path with results
-# Usage: run_single_test <daemon_name> <start_cmd> <pattern> <connections> <test_id>
+# Usage: run_single_test <daemon_name> <start_cmd> <pattern> <connections> <test_id> [use_tls]
 run_single_test() {
     set +e  # Disable errexit for this function to ensure we always output result path
     local name=$1
@@ -132,6 +140,7 @@ run_single_test() {
     local pattern=$3
     local conns=$4
     local test_id=$5
+    local use_tls=${6:-false}
 
     local result_prefix="$RESULTS_DIR/${name}_${conns}_${test_id}"
     local daemon_log="${result_prefix}_daemon.log"
@@ -146,8 +155,8 @@ run_single_test() {
     local stream_duration_s=$((chunk_delay * 17 / 1000))
     local hold=$((stream_duration_s + 10))
 
-    # Restart mock API with appropriate timing
-    start_mock_api "$chunk_delay"
+    # Restart mock API with appropriate timing (TLS for Swow HTTP/2)
+    start_mock_api "$chunk_delay" "$use_tls"
 
     # Start daemon (explicit subshell to capture all output including kill message)
     ( eval "$start_cmd" ) > "$daemon_log" 2>&1 &
@@ -294,12 +303,13 @@ evaluate_run() {
 #=============================================================================
 
 # Find maximum sustainable connections for a daemon
-# Usage: find_capacity <daemon_name> <start_cmd> <pattern>
+# Usage: find_capacity <daemon_name> <start_cmd> <pattern> [use_tls]
 # Returns the maximum connections that pass all thresholds
 find_capacity() {
     local name=$1
     local start_cmd=$2
     local pattern=$3
+    local use_tls=${4:-false}
 
     echo -e "${CYAN}=========================================="
     echo "Finding capacity for: $name"
@@ -307,7 +317,7 @@ find_capacity() {
 
     # Warmup run
     echo -e "${YELLOW}Running warmup ($WARMUP_CONNECTIONS connections)...${NC}"
-    run_single_test "$name" "$start_cmd" "$pattern" "$WARMUP_CONNECTIONS" "warmup" > /dev/null 2>&1
+    run_single_test "$name" "$start_cmd" "$pattern" "$WARMUP_CONNECTIONS" "warmup" "$use_tls" > /dev/null 2>&1
     cleanup_daemons
     sleep 2
 
@@ -327,7 +337,7 @@ find_capacity() {
         echo -n "  Testing $high connections... "
 
         # Run test and get result path (filter to last line in case of stray output)
-        run_single_test "$name" "$start_cmd" "$pattern" "$high" "expand_$iteration" > "$result_tmp" 2>/dev/null
+        run_single_test "$name" "$start_cmd" "$pattern" "$high" "expand_$iteration" "$use_tls" > "$result_tmp" 2>/dev/null
         local result_json=$(tail -1 "$result_tmp")
         rm -f "$result_tmp"
 
@@ -374,7 +384,7 @@ find_capacity() {
 
         echo -n "  Testing $mid connections... "
 
-        run_single_test "$name" "$start_cmd" "$pattern" "$mid" "search_$iteration" > "$result_tmp" 2>/dev/null
+        run_single_test "$name" "$start_cmd" "$pattern" "$mid" "search_$iteration" "$use_tls" > "$result_tmp" 2>/dev/null
         local result_json=$(tail -1 "$result_tmp")
         rm -f "$result_tmp"
 
@@ -397,7 +407,7 @@ find_capacity() {
         local pass_count=0
         for i in $(seq 1 $STABILITY_RUNS); do
             echo -n "  Confirmation run $i/$STABILITY_RUNS... "
-            run_single_test "$name" "$start_cmd" "$pattern" "$last_pass" "confirm_$i" > "$result_tmp" 2>/dev/null
+            run_single_test "$name" "$start_cmd" "$pattern" "$last_pass" "confirm_$i" "$use_tls" > "$result_tmp" 2>/dev/null
             local result_json=$(tail -1 "$result_tmp")
             rm -f "$result_tmp"
 
@@ -436,7 +446,7 @@ find_capacity() {
 build_load_generator
 build_mock_api
 
-if should_run uring; then
+if should_run uring || should_run uring-http2; then
     build_uring_daemon "openai"
 fi
 
@@ -475,6 +485,36 @@ if should_run php; then
     RESULT_JSONS[php]="$FOUND_JSON"
 fi
 
+if should_run swoole; then
+    find_capacity "swoole" "$(get_swoole_cmd "llm-api" 0 "http1" 50000)" "streaming-daemon-swoole/streaming_daemon.php"
+    CAPACITY_RESULTS[swoole]=$FOUND_CAPACITY
+    LIMITING_FACTORS[swoole]="$LIMITING_FACTOR"
+    RESULT_JSONS[swoole]="$FOUND_JSON"
+fi
+
+if should_run swoole-http2; then
+    # Swoole HTTP/2 uses HTTPS (TLS) for real-world performance testing
+    find_capacity "swoole-http2" "$(get_swoole_cmd "llm-api" 0 "http2" 50000)" "streaming-daemon-swoole/streaming_daemon.php" "true"
+    CAPACITY_RESULTS[swoole-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[swoole-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[swoole-http2]="$FOUND_JSON"
+fi
+
+if should_run swow; then
+    find_capacity "swow" "$(get_swow_cmd "llm-api" 0 "http1" 50000)" "streaming-daemon-swow/streaming_daemon.php"
+    CAPACITY_RESULTS[swow]=$FOUND_CAPACITY
+    LIMITING_FACTORS[swow]="$LIMITING_FACTOR"
+    RESULT_JSONS[swow]="$FOUND_JSON"
+fi
+
+if should_run swow-http2; then
+    # Swow HTTP/2 requires TLS for proper curl_multi connection reuse
+    find_capacity "swow-http2" "$(get_swow_cmd "llm-api" 0 "http2" 50000)" "streaming-daemon-swow/streaming_daemon.php" "true"
+    CAPACITY_RESULTS[swow-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[swow-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[swow-http2]="$FOUND_JSON"
+fi
+
 if should_run go; then
     find_capacity "go" "$(get_go_cmd "llm-api" 0 "http1")" "streaming-daemon-go/streaming-daemon"
     CAPACITY_RESULTS[go]=$FOUND_CAPACITY
@@ -483,7 +523,7 @@ if should_run go; then
 fi
 
 if should_run go-http2; then
-    find_capacity "go-http2" "$(get_go_cmd "llm-api" 0 "http2")" "streaming-daemon-go/streaming-daemon"
+    find_capacity "go-http2" "$(get_go_cmd "llm-api" 0 "http2")" "streaming-daemon-go/streaming-daemon" "true"
     CAPACITY_RESULTS[go-http2]=$FOUND_CAPACITY
     LIMITING_FACTORS[go-http2]="$LIMITING_FACTOR"
     RESULT_JSONS[go-http2]="$FOUND_JSON"
@@ -497,17 +537,33 @@ if should_run rust; then
 fi
 
 if should_run rust-http2; then
-    find_capacity "rust-http2" "$(get_rust_cmd "llm-api" 0 "http2")" "streaming-daemon-rs"
+    find_capacity "rust-http2" "$(get_rust_cmd "llm-api" 0 "http2")" "streaming-daemon-rs" "true"
     CAPACITY_RESULTS[rust-http2]=$FOUND_CAPACITY
     LIMITING_FACTORS[rust-http2]="$LIMITING_FACTOR"
     RESULT_JSONS[rust-http2]="$FOUND_JSON"
 fi
 
 if should_run uring; then
-    find_capacity "uring" "$(get_uring_cmd "llm-api" 0)" "streaming-daemon-uring"
+    find_capacity "uring" "$(get_uring_cmd "llm-api" 0 "http1")" "streaming-daemon-uring"
     CAPACITY_RESULTS[uring]=$FOUND_CAPACITY
     LIMITING_FACTORS[uring]="$LIMITING_FACTOR"
     RESULT_JSONS[uring]="$FOUND_JSON"
+fi
+
+if should_run uring-http2; then
+    # io_uring HTTP/2 uses HTTPS (TLS) for proper HTTP/2 multiplexing
+    find_capacity "uring-http2" "$(get_uring_cmd "llm-api" 0 "http2")" "streaming-daemon-uring" "true"
+    CAPACITY_RESULTS[uring-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[uring-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[uring-http2]="$FOUND_JSON"
+fi
+
+if should_run python-http2; then
+    # Python HTTP/2 requires TLS for proper curl_multi connection reuse
+    find_capacity "python-http2" "$(get_python_http2_cmd "llm-api" 0)" "streaming_daemon_async.py" "true"
+    CAPACITY_RESULTS[python-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[python-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[python-http2]="$FOUND_JSON"
 fi
 
 #=============================================================================
@@ -542,7 +598,7 @@ Generated: $(date)
 |--------|-----------------|----------|----------|----------|---------|-----------------|
 EOF
 
-for daemon in rust rust-http2 go go-http2 uring php; do
+for daemon in rust rust-http2 swoole swoole-http2 swow swow-http2 go go-http2 uring uring-http2 php python-http2; do
     if [ -n "${CAPACITY_RESULTS[$daemon]}" ]; then
         json="${RESULT_JSONS[$daemon]}"
         capacity="${CAPACITY_RESULTS[$daemon]}"
@@ -576,10 +632,17 @@ cat >> "$REPORT_FILE" << 'EOF'
 
 ## HTTP/2 Mode
 
+- **swoole**: Uses HTTP/1.1 with TCP connection to mock API
+- **swoole-http2**: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
+- **swow**: Uses HTTP/1.1 with TCP connection to mock API (via curl)
+- **swow-http2**: Uses HTTP/2 with HTTPS (TLS) via curl_multi (Swow requires TLS for connection reuse)
 - **go**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
-- **go-http2**: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
+- **go-http2**: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
 - **rust**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
-- **rust-http2**: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
+- **rust-http2**: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
+- **uring**: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
+- **uring-http2**: Uses HTTP/2 with HTTPS (TLS) via libcurl multi interface
+- **python-http2**: Uses HTTP/2 with HTTPS (TLS) via PycURL curl_multi integration with asyncio
   - With HTTP/2, ~100 streams share each TCP connection vs 1 stream per connection with HTTP/1.1
   - This reduces connection overhead from 100k to ~1k connections for 100k concurrent streams
 

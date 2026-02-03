@@ -204,12 +204,14 @@ build_mock_api() {
 }
 
 # Start mock LLM API server with specified chunk delay
-# Usage: start_mock_api [chunk_delay_ms]
-# Uses a single instance with dual listeners (both HTTP/2 h2c):
+# Usage: start_mock_api [chunk_delay_ms] [tls]
+# Uses a single instance with dual listeners:
 # - Unix socket: Serves HTTP/2 with prior knowledge (h2c); HTTP/1.1 daemons disable HTTP/2 (e.g. reqwest http1_only())
-# - TCP: Used by HTTP/2 daemons with prior knowledge (h2c multiplexing)
+# - TCP: HTTP/2 with optional TLS (HTTPS for Swow which requires TLS for curl_multi multiplexing,
+#        h2c for Go/Rust/io_uring which support cleartext HTTP/2)
 start_mock_api() {
     local chunk_delay=${1:-706}
+    local use_tls=${2:-false}
 
     # Stop any existing mock API first
     stop_mock_api
@@ -218,14 +220,22 @@ start_mock_api() {
     rm -f "$MOCK_API_SOCKET"
 
     # Start single instance with both Unix socket and TCP listeners
+    local tls_flag=""
+    if [ "$use_tls" = "true" ]; then
+        tls_flag="--tls"
+    fi
     "$MOCK_API_BIN" --socket "$MOCK_API_SOCKET" --listen "$MOCK_API_TCP_ADDR" \
-        --chunk-delay-ms "$chunk_delay" --chunk-count 18 --quiet &
+        $tls_flag --chunk-delay-ms "$chunk_delay" --chunk-count 18 --quiet &
     MOCK_API_PID=$!
 
     # Wait until both Unix socket and TCP health endpoints are ready.
     local tries=0
     local socket_ready=false
     local tcp_ready=false
+    local tcp_scheme="http"
+    if [ "$use_tls" = "true" ]; then
+        tcp_scheme="https"
+    fi
     while [ $tries -lt 50 ]; do
         # Check Unix socket health endpoint
         if [ -S "$MOCK_API_SOCKET" ] && ! $socket_ready; then
@@ -235,12 +245,23 @@ start_mock_api() {
         fi
         # Check TCP health endpoint
         if ! $tcp_ready; then
-            if curl -s --http2-prior-knowledge "http://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
-                tcp_ready=true
+            if [ "$use_tls" = "true" ]; then
+                # Use -k for self-signed cert
+                if curl --http2 -sk "${tcp_scheme}://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
+                    tcp_ready=true
+                fi
+            else
+                if curl -s --http2-prior-knowledge "${tcp_scheme}://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
+                    tcp_ready=true
+                fi
             fi
         fi
         if $socket_ready && $tcp_ready; then
-            echo "Mock API ready (unix:$MOCK_API_SOCKET + tcp:$MOCK_API_TCP_ADDR, ${chunk_delay}ms delay, ~$((chunk_delay * 17 / 1000))s streams)"
+            local tls_note=""
+            if [ "$use_tls" = "true" ]; then
+                tls_note=" [TLS]"
+            fi
+            echo "Mock API ready (unix:$MOCK_API_SOCKET + ${tcp_scheme}:$MOCK_API_TCP_ADDR${tls_note}, ${chunk_delay}ms delay, ~$((chunk_delay * 17 / 1000))s streams)"
             return 0
         fi
         sleep 0.1
@@ -427,7 +448,7 @@ build_uring_daemon() {
 # DAEMON COMMAND GENERATORS
 #=============================================================================
 
-# Generate PHP daemon command
+# Generate PHP daemon command (AMPHP with HTTP/1.1)
 # Usage: get_php_cmd <backend_mode> <message_delay_ms> [max_connections]
 get_php_cmd() {
     local backend_mode=$1
@@ -438,6 +459,23 @@ get_php_cmd() {
 
     if [ "$backend_mode" = "llm-api" ]; then
         echo "$base_cmd --backend openai --openai-base http://localhost/v1 --openai-socket $MOCK_API_SOCKET --benchmark"
+    else
+        echo "$base_cmd -d $message_delay_ms --benchmark"
+    fi
+}
+
+# Generate PHP AMPHP daemon command with HTTP/2
+# Usage: get_amp_http2_cmd <backend_mode> <message_delay_ms> [max_connections]
+get_amp_http2_cmd() {
+    local backend_mode=$1
+    local message_delay_ms=$2
+    local max_conns=${3:-50000}
+
+    local base_cmd="php -n -dextension=ev.so -c $EXAMPLES_DIR/streaming-daemon-amp/php.ini $EXAMPLES_DIR/streaming-daemon-amp/streaming_daemon.php -s $SOCKET -m 0666 --max-connections $max_conns"
+
+    if [ "$backend_mode" = "llm-api" ]; then
+        # Use HTTPS for HTTP/2 connection multiplexing
+        echo "OPENAI_INSECURE_SSL=true OPENAI_HTTP2_ENABLED=true $base_cmd --backend openai --openai-base https://${MOCK_API_TCP_ADDR}/v1 --benchmark"
     else
         echo "$base_cmd -d $message_delay_ms --benchmark"
     fi
@@ -455,8 +493,9 @@ get_go_cmd() {
 
     if [ "$backend_mode" = "llm-api" ]; then
         if [ "$http_mode" = "http2" ]; then
-            # HTTP/2 mode: Use TCP endpoint (not Unix socket) for h2c multiplexing
-            echo "OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=true $base_cmd -backend openai -openai-base http://${MOCK_API_TCP_ADDR}/v1"
+            # HTTP/2 mode: Use HTTPS with TLS for proper HTTP/2 multiplexing
+            # OPENAI_INSECURE_SSL=true to accept self-signed certificates from mock server
+            echo "OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=true OPENAI_INSECURE_SSL=true $base_cmd -backend openai -openai-base https://${MOCK_API_TCP_ADDR}/v1"
         else
             # HTTP/1.1 mode: Use Unix socket for connection pooling
             echo "OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=false $base_cmd -backend openai -openai-base http://localhost/v1 -openai-socket $MOCK_API_SOCKET"
@@ -479,9 +518,9 @@ get_rust_cmd() {
 
     if [ "$backend_mode" = "llm-api" ]; then
         if [ "$http_mode" = "http2" ]; then
-            # HTTP/2 mode: Use TCP endpoint (not Unix socket) for h2c multiplexing
-            # HTTP/2 is enabled by default in the daemon
-            echo "$base_env OPENAI_API_BASE=http://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test $base_cmd -b openai"
+            # HTTP/2 mode: Use HTTPS with TLS for proper HTTP/2 multiplexing
+            # OPENAI_INSECURE_SSL=true to accept self-signed certificates from mock server
+            echo "$base_env OPENAI_API_BASE=https://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test OPENAI_INSECURE_SSL=true $base_cmd -b openai"
         else
             # HTTP/1.1 mode: Use Unix socket for connection pooling
             echo "$base_env OPENAI_HTTP2_ENABLED=false OPENAI_API_BASE=http://localhost/v1 OPENAI_API_SOCKET=$MOCK_API_SOCKET OPENAI_API_KEY=benchmark-test $base_cmd -b openai"
@@ -491,21 +530,107 @@ get_rust_cmd() {
     fi
 }
 
+# Generate Swoole daemon command
+# Usage: get_swoole_cmd <backend_mode> <message_delay_ms> [http_mode] [max_connections]
+# http_mode: "http1" or "http2" (default: http2)
+# Note: HTTP/2 mode uses HTTPS (TLS) for real-world performance testing.
+# Note: Swoole extension is explicitly loaded to avoid conflict with Swow.
+get_swoole_cmd() {
+    local backend_mode=$1
+    local message_delay_ms=$2
+    local http_mode=${3:-http2}
+    local max_conns=${4:-50000}
+
+    # Explicitly load Swoole extension (disabled by default to avoid Swow conflict)
+    local base_cmd="php -d extension=swoole.so $EXAMPLES_DIR/streaming-daemon-swoole/streaming_daemon.php -s $SOCKET -m 0666 --max-connections $max_conns"
+
+    if [ "$backend_mode" = "llm-api" ]; then
+        if [ "$http_mode" = "http2" ]; then
+            # HTTP/2 mode: Use HTTPS for real-world TLS performance testing
+            # OPENAI_INSECURE_SSL=true to accept self-signed certificates from mock server
+            echo "OPENAI_HTTP2_ENABLED=true OPENAI_INSECURE_SSL=true OPENAI_API_KEY=benchmark-test $base_cmd --backend openai --openai-base https://${MOCK_API_TCP_ADDR}/v1 --benchmark"
+        else
+            # HTTP/1.1 mode
+            echo "OPENAI_HTTP2_ENABLED=false OPENAI_API_KEY=benchmark-test $base_cmd --backend openai --openai-base http://${MOCK_API_TCP_ADDR}/v1 --benchmark"
+        fi
+    else
+        echo "$base_cmd -d $message_delay_ms --backend mock --benchmark"
+    fi
+}
+
+# Generate Swow daemon command
+# Usage: get_swow_cmd <backend_mode> <message_delay_ms> [http_mode] [max_connections]
+# http_mode: "http1" or "http2" (default: http2)
+# Note: Swow HTTP/2 requires HTTPS (TLS) for proper curl_multi connection reuse.
+# h2c (cleartext HTTP/2) does not work correctly with Swow's curl hooks.
+# Note: Swow extension is explicitly loaded to avoid conflict with Swoole.
+get_swow_cmd() {
+    local backend_mode=$1
+    local message_delay_ms=$2
+    local http_mode=${3:-http2}
+    local max_conns=${4:-50000}
+
+    # Explicitly load Swow extension (disabled by default to avoid Swoole conflict)
+    local base_cmd="php -d extension=swow.so $EXAMPLES_DIR/streaming-daemon-swow/streaming_daemon.php -s $SOCKET -m 0666 --max-connections $max_conns"
+
+    if [ "$backend_mode" = "llm-api" ]; then
+        if [ "$http_mode" = "http2" ]; then
+            # HTTP/2 mode: Use HTTPS for proper curl_multi multiplexing
+            # Swow's curl hooks require TLS for HTTP/2 connection reuse
+            # Use 100 streams per handle (OpenAI's limit, also stable with Swow)
+            echo "OPENAI_HTTP2_ENABLED=true OPENAI_API_KEY=benchmark-test $base_cmd --backend openai --openai-base https://${MOCK_API_TCP_ADDR}/v1 --benchmark"
+        else
+            # HTTP/1.1 mode
+            echo "OPENAI_HTTP2_ENABLED=false OPENAI_API_KEY=benchmark-test $base_cmd --backend openai --openai-base http://${MOCK_API_TCP_ADDR}/v1 --benchmark"
+        fi
+    else
+        echo "$base_cmd -d $message_delay_ms --backend mock --benchmark"
+    fi
+}
+
 # Generate uring daemon command
-# Usage: get_uring_cmd <backend_mode> <message_delay_ms>
+# Usage: get_uring_cmd <backend_mode> <message_delay_ms> [http_mode]
+# http_mode: "http1" (default, uses h2c) or "http2" (uses HTTPS with TLS multiplexing)
 get_uring_cmd() {
     local backend_mode=$1
     local message_delay_ms=$2
+    local http_mode=${3:-http1}
 
     local uring_max_conns=$((MAX_CONNECTIONS > 110000 ? 110000 : MAX_CONNECTIONS))
     local base_cmd="$EXAMPLES_DIR/streaming-daemon-uring/streaming-daemon-uring --socket $SOCKET --socket-mode 0660 --max-connections ${uring_max_conns} --benchmark"
 
     if [ "$backend_mode" = "llm-api" ]; then
-        # Use TCP for HTTP/2 multiplexing (h2c prior knowledge)
-        echo "OPENAI_API_BASE=http://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test $base_cmd"
+        if [ "$http_mode" = "http2" ]; then
+            # HTTP/2 mode: Use HTTPS with TLS for proper HTTP/2 multiplexing
+            # OPENAI_INSECURE_SSL=true to accept self-signed certificates from mock server
+            echo "OPENAI_API_BASE=https://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test OPENAI_INSECURE_SSL=true OPENAI_HTTP2_ENABLED=true $base_cmd"
+        else
+            # HTTP/1.1 mode: Use Unix socket for connection pooling
+            echo "OPENAI_API_BASE=http://localhost/v1 OPENAI_API_SOCKET=$MOCK_API_SOCKET OPENAI_API_KEY=benchmark-test OPENAI_HTTP2_ENABLED=false $base_cmd"
+        fi
     else
         # Mock backend with no delay (would stall event loop)
         echo "$base_cmd --delay 0"
+    fi
+}
+
+# Generate Python HTTP/2 daemon command
+# Usage: get_python_http2_cmd <backend_mode> <message_delay_ms>
+# Note: HTTP/2 requires pycurl with nghttp2 support
+# Uses HTTPS (TLS) for proper HTTP/2 multiplexing (like swow-http2)
+get_python_http2_cmd() {
+    local backend_mode=$1
+    local message_delay_ms=$2
+
+    local base_cmd="python3 $EXAMPLES_DIR/streaming_daemon_async.py -s $SOCKET -m 0666 -w 500"
+
+    if [ "$backend_mode" = "llm-api" ]; then
+        # HTTP/2 mode: Use HTTPS for proper TLS-based HTTP/2 multiplexing
+        # OPENAI_INSECURE_SSL=true to accept self-signed certificates
+        echo "OPENAI_HTTP2_ENABLED=true OPENAI_INSECURE_SSL=true OPENAI_API_BASE=https://${MOCK_API_TCP_ADDR}/v1 OPENAI_API_KEY=benchmark-test $base_cmd --backend openai --benchmark"
+    else
+        # Mock backend doesn't use HTTP/2
+        echo "$base_cmd -d $message_delay_ms --benchmark"
     fi
 }
 

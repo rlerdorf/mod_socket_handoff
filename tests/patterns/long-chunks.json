@@ -1,0 +1,14 @@
+{
+  "name": "long",
+  "description": "Long (~4KB) SSE chunks for testing large payload handling",
+  "chunk_size": "~4096 bytes",
+  "expected_chunks": 3,
+  "assertions": [
+    {"type": "http_status", "expected": 200},
+    {"type": "sse_format"},
+    {"type": "chunk_count_at_least", "expected": 1},
+    {"type": "utf8_valid"},
+    {"type": "done_marker"}
+  ],
+  "notes": "Large chunks may require multiple TCP segments and test buffer handling"
+}

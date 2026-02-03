@@ -1,0 +1,18 @@
+{
+  "name": "abort",
+  "description": "Abort stream after N chunks (no finish_reason or [DONE])",
+  "pattern_format": "abort:N",
+  "examples": [
+    {"pattern": "abort:5", "chunks": 5},
+    {"pattern": "abort:1", "chunks": 1},
+    {"pattern": "abort:10", "chunks": 10}
+  ],
+  "assertions": [
+    {"type": "http_status", "expected": 200},
+    {"type": "sse_format"},
+    {"type": "chunk_count", "expected": "N"},
+    {"type": "no_done_marker"},
+    {"type": "no_finish_reason"}
+  ],
+  "notes": "Tests daemon handling of incomplete streams (client disconnect, etc.)"
+}

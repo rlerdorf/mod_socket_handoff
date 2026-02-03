@@ -34,6 +34,7 @@ impl OpenAIBackend {
     ///
     /// When HTTP/2 is disabled, falls back to HTTP/1.1 mode where `api_socket` can be
     /// used to route connections through a Unix socket for connection pooling.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_key: String,
         api_base: String,
@@ -42,10 +43,17 @@ impl OpenAIBackend {
         pool_max_idle_per_host: usize,
         api_socket: Option<String>,
         http2_config: &Http2Config,
+        insecure_ssl: bool,
     ) -> Result<Self, BackendError> {
         let mut builder = Client::builder()
             .timeout(timeout)
             .pool_max_idle_per_host(pool_max_idle_per_host);
+
+        // Allow insecure TLS connections (for testing with self-signed certificates)
+        if insecure_ssl {
+            builder = builder.danger_accept_invalid_certs(true);
+            tracing::warn!("TLS certificate verification disabled (OPENAI_INSECURE_SSL=true)");
+        }
 
         // Determine if this is an HTTP (not HTTPS) endpoint
         let is_plaintext = api_base.starts_with("http://");
@@ -156,12 +164,18 @@ impl StreamingBackend for OpenAIBackend {
 
         let url = format!("{}/chat/completions", self.api_base);
 
-        let req = self
+        let mut req = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body);
+            .header("Content-Type", "application/json");
+
+        // Add test pattern header if present (for validation testing)
+        if let Some(test_pattern) = &request.test_pattern {
+            req = req.header("X-Test-Pattern", test_pattern);
+        }
+
+        let req = req.json(&body);
 
         let es = EventSource::new(req).map_err(|e| BackendError::Connection(e.to_string()))?;
 

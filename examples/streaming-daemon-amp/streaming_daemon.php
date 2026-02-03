@@ -32,6 +32,12 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Amp\DeferredCancellation;
 use Amp\Socket\ConnectContext;
+use Amp\Http\Client\HttpClientBuilder;
+use Amp\Http\Client\HttpClient;
+use Amp\Http\Client\Request;
+use Amp\Http\Client\Connection\DefaultConnectionFactory;
+use Amp\Http\Client\Connection\ConnectionLimitingPool;
+use Amp\Socket\ClientTlsContext;
 use Revolt\EventLoop;
 use function Amp\async;
 use function Amp\delay;
@@ -93,12 +99,17 @@ Options:
   -d, --delay MS       Delay between SSE messages in ms (default: 50, use 3333 for 30s streams)
   --backend TYPE       Backend type: 'mock' (demo messages) or 'openai' (HTTP streaming API)
   --openai-base URL    OpenAI API base URL (default: OPENAI_API_BASE env or http://localhost:8080)
+                       Uses HTTP/2 with HTTPS URLs for stream multiplexing
   --openai-socket PATH Unix socket for OpenAI API (eliminates ephemeral port limits)
                        When set, connects via Unix socket instead of TCP
   --max-connections N  Max concurrent connections (default: 50000). When limit is reached,
                        new connections queue in kernel backlog until capacity is available.
   -b, --benchmark      Enable benchmark mode: quieter output, print summary on shutdown
   -h, --help           Show this help
+
+Environment:
+  OPENAI_HTTP2_ENABLED   Set to 'false' to disable HTTP/2 and use HTTP/1.1
+  OPENAI_INSECURE_SSL    Set to 'true' to skip SSL certificate verification (for testing)
 
 HELP;
     exit(0);
@@ -114,6 +125,17 @@ $openaiBase = $options['openai-base'] ?? getenv('OPENAI_API_BASE') ?: 'http://12
 $openaiSocket = $options['openai-socket'] ?? getenv('OPENAI_API_SOCKET') ?: null;
 $openaiKey = getenv('OPENAI_API_KEY') ?: 'benchmark-test';
 $maxConnections = (int)($options['max-connections'] ?? getenv('MAX_CONNECTIONS') ?: DEFAULT_MAX_CONNECTIONS);
+
+// HTTP/2 configuration
+$http2Enabled = true;
+$envVal = getenv('OPENAI_HTTP2_ENABLED');
+if ($envVal !== false) {
+    $http2Enabled = !in_array(strtolower($envVal), ['false', '0', 'no', 'off'], true);
+}
+$sslInsecure = filter_var(getenv('OPENAI_INSECURE_SSL'), FILTER_VALIDATE_BOOLEAN);
+
+/** @var HttpClient|null */
+$httpClient = null;
 
 // Check for required extensions
 if (!extension_loaded('sockets')) {
@@ -255,7 +277,120 @@ function writeAll($stream, string $data): int|false
 }
 
 /**
- * Stream response from OpenAI-compatible API using async I/O.
+ * Stream response from OpenAI-compatible API using HTTP/2 via amphp/http-client.
+ * Returns [success, bytesSent].
+ *
+ * Uses HTTP/2 multiplexing for efficient connection sharing across streams.
+ *
+ * @param mixed $stream Client stream to write SSE chunks to
+ * @param array $handoffData Request data from the handoff
+ * @param string $openaiBase API base URL
+ * @param string $openaiKey API key
+ */
+function streamFromOpenAIHttp2(mixed $stream, array $handoffData, string $openaiBase, string $openaiKey): array
+{
+    global $benchmarkMode, $httpClient;
+    $bytesSent = 0;
+
+    $prompt = $handoffData['prompt'] ?? 'Hello';
+    $model = $handoffData['model'] ?? 'gpt-4o-mini';
+
+    // Build request body
+    $body = json_encode([
+        'model' => $model,
+        'messages' => [['role' => 'user', 'content' => $prompt]],
+        'stream' => true,
+    ]);
+
+    $url = $openaiBase . '/chat/completions';
+
+    try {
+        // Create HTTP request
+        $request = new Request($url, 'POST');
+        $request->setBody($body);
+        $request->setHeader('Content-Type', 'application/json');
+        $request->setHeader('Authorization', 'Bearer ' . $openaiKey);
+        $request->setTransferTimeout(120);
+        $request->setBodySizeLimit(100 * 1024 * 1024); // 100MB for long streams
+
+        // Add test pattern header if present (for validation testing)
+        if (isset($handoffData['test_pattern']) && $handoffData['test_pattern'] !== '') {
+            $request->setHeader('X-Test-Pattern', $handoffData['test_pattern']);
+        }
+
+        // Send request and get streaming response
+        $response = $httpClient->request($request);
+        $responseBody = $response->getBody();
+
+        // Read response body in chunks and process SSE
+        $buffer = '';
+        while (($chunk = $responseBody->read()) !== null) {
+            $buffer .= $chunk;
+
+            // Process complete lines from buffer
+            while (($pos = strpos($buffer, "\n")) !== false) {
+                $line = substr($buffer, 0, $pos);
+                $buffer = substr($buffer, $pos + 1);
+
+                // Strip \r if present
+                $line = rtrim($line, "\r");
+
+                // Skip empty lines
+                if ($line === '') continue;
+
+                // Check for data: prefix (SSE format)
+                if (!str_starts_with($line, 'data: ')) continue;
+
+                $data = substr($line, 6);
+
+                // Check for [DONE] marker
+                if ($data === '[DONE]') {
+                    $doneMsg = "data: [DONE]\n\n";
+                    $written = writeAll($stream, $doneMsg);
+                    if ($written !== false) {
+                        $bytesSent += $written;
+                    }
+                    return [true, $bytesSent];
+                }
+
+                // Parse JSON chunk
+                $parsed = json_decode($data, true);
+                if (!$parsed) continue;
+
+                // Extract content
+                $content = $parsed['choices'][0]['delta']['content'] ?? null;
+                if ($content !== null && $content !== '') {
+                    // Forward as SSE to client
+                    $sseData = json_encode(['content' => $content]);
+                    $sseMsg = "data: {$sseData}\n\n";
+                    $written = writeAll($stream, $sseMsg);
+                    if ($written === false) {
+                        return [false, $bytesSent];
+                    }
+                    $bytesSent += $written;
+                }
+            }
+        }
+
+        // API stream ended without [DONE] marker - send one to client
+        $doneMsg = "data: [DONE]\n\n";
+        $written = writeAll($stream, $doneMsg);
+        if ($written !== false) {
+            $bytesSent += $written;
+        }
+
+        return [true, $bytesSent];
+
+    } catch (\Exception $e) {
+        if (!$benchmarkMode) {
+            echo "HTTP/2 streaming error: " . $e->getMessage() . "\n";
+        }
+        return [false, $bytesSent];
+    }
+}
+
+/**
+ * Stream response from OpenAI-compatible API using HTTP/1.1 async I/O.
  * Returns [success, bytesSent].
  *
  * Uses Amp's async socket to avoid blocking the event loop, enabling
@@ -314,6 +449,10 @@ function streamFromOpenAI(mixed $stream, array $handoffData, string $openaiBase,
         $request .= "Authorization: Bearer {$openaiKey}\r\n";
         $request .= "Content-Length: " . strlen($body) . "\r\n";
         $request .= "Connection: close\r\n";
+        // Add test pattern header if present (for validation testing)
+        if (isset($handoffData['test_pattern']) && $handoffData['test_pattern'] !== '') {
+            $request .= "X-Test-Pattern: " . $handoffData['test_pattern'] . "\r\n";
+        }
         $request .= "\r\n";
         $request .= $body;
 
@@ -352,9 +491,8 @@ function streamFromOpenAI(mixed $stream, array $handoffData, string $openaiBase,
 
                 // Check for [DONE] marker
                 if ($data === '[DONE]') {
-                    // Send [DONE] to client before closing
-                    $doneData = json_encode(['content' => '[DONE]']);
-                    $doneMsg = "data: {$doneData}\n\n";
+                    // Send raw [DONE] marker (not wrapped in JSON)
+                    $doneMsg = "data: [DONE]\n\n";
                     $written = writeAll($stream, $doneMsg);
                     if ($written !== false) {
                         $bytesSent += $written;
@@ -364,11 +502,11 @@ function streamFromOpenAI(mixed $stream, array $handoffData, string $openaiBase,
                 }
 
                 // Parse JSON chunk
-                $chunk = json_decode($data, true);
-                if (!$chunk) continue;
+                $parsed = json_decode($data, true);
+                if (!$parsed) continue;
 
                 // Extract content
-                $content = $chunk['choices'][0]['delta']['content'] ?? null;
+                $content = $parsed['choices'][0]['delta']['content'] ?? null;
                 if ($content !== null && $content !== '') {
                     // Forward as SSE to client
                     $sseData = json_encode(['content' => $content]);
@@ -384,8 +522,7 @@ function streamFromOpenAI(mixed $stream, array $handoffData, string $openaiBase,
         }
 
         // API stream ended without [DONE] marker - send one to client
-        $doneData = json_encode(['content' => '[DONE]']);
-        $doneMsg = "data: {$doneData}\n\n";
+        $doneMsg = "data: [DONE]\n\n";
         $written = writeAll($stream, $doneMsg);
         if ($written !== false) {
             $bytesSent += $written;
@@ -444,11 +581,17 @@ function streamResponse(mixed $clientFd, array $handoffData, int $connId, Stats 
         }
         $bytesSent += $written;
 
-        global $backendType, $openaiBase, $openaiKey, $openaiSocket, $sseDelaySeconds;
+        global $backendType, $openaiBase, $openaiKey, $openaiSocket, $sseDelaySeconds, $http2Enabled, $httpClient;
 
         if ($backendType === 'openai') {
-            // Use OpenAI backend (via Unix socket if configured, otherwise TCP)
-            [$success, $apiBytes] = streamFromOpenAI($stream, $handoffData, $openaiBase, $openaiKey, $openaiSocket);
+            // Use OpenAI backend
+            if ($http2Enabled && $httpClient !== null) {
+                // HTTP/2 with amphp/http-client
+                [$success, $apiBytes] = streamFromOpenAIHttp2($stream, $handoffData, $openaiBase, $openaiKey);
+            } else {
+                // HTTP/1.1 with raw socket (via Unix socket if configured, otherwise TCP)
+                [$success, $apiBytes] = streamFromOpenAI($stream, $handoffData, $openaiBase, $openaiKey, $openaiSocket);
+            }
             $bytesSent += $apiBytes;
             if (!$success) {
                 throw new RuntimeException("OpenAI streaming failed");
@@ -562,7 +705,7 @@ function main(string $socketPath, int $socketMode): void
 {
     global $stats, $benchmarkMode, $maxConnections;
 
-    global $backendType, $openaiBase, $openaiSocket;
+    global $backendType, $openaiBase, $openaiSocket, $http2Enabled, $sslInsecure, $httpClient;
 
     echo "AMPHP Async Streaming Daemon starting\n";
     echo "PHP " . PHP_VERSION . "\n";
@@ -571,6 +714,37 @@ function main(string $socketPath, int $socketMode): void
     echo "Backend: $backendType\n";
     if ($backendType === 'openai') {
         echo "OpenAI base: $openaiBase\n";
+        $url = parse_url($openaiBase);
+        $isHttps = ($url['scheme'] ?? 'http') === 'https';
+
+        if ($http2Enabled && $isHttps) {
+            echo "HTTP mode: HTTP/2 with HTTPS\n";
+
+            // Create HTTP client with TLS configuration
+            $tlsContext = new ClientTlsContext('');
+            if ($sslInsecure) {
+                $tlsContext = $tlsContext->withoutPeerVerification();
+                echo "SSL verification: disabled (insecure mode)\n";
+            }
+
+            $connectContext = (new ConnectContext())->withTlsContext($tlsContext);
+            $connectionFactory = new DefaultConnectionFactory(null, $connectContext);
+            // HTTP/2 multiplexing: ~100 streams per connection (server limit)
+            // Scale connections based on maxConnections: 100k streams / 100 = 1000 connections
+            $h2ConnectionLimit = max(10, (int) ceil($maxConnections / 100));
+            echo "HTTP/2 connection limit: $h2ConnectionLimit (for $maxConnections max streams)\n";
+            $pool = ConnectionLimitingPool::byAuthority($h2ConnectionLimit, $connectionFactory);
+
+            $httpClient = (new HttpClientBuilder())
+                ->usingPool($pool)
+                ->build();
+        } elseif ($http2Enabled) {
+            echo "HTTP mode: HTTP/2 requires HTTPS, falling back to HTTP/1.1\n";
+            $http2Enabled = false;
+        } else {
+            echo "HTTP mode: HTTP/1.1\n";
+        }
+
         if ($openaiSocket) {
             echo "OpenAI socket: $openaiSocket (Unix socket, no port limits)\n";
         }
