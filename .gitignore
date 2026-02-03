@@ -22,9 +22,12 @@
 examples/streaming-daemon
 examples/streaming-daemon-go/streaming-daemon
 benchmarks/load-generator/load-generator
+tests/test-runner
 
 # C build artifacts
 examples/fdrecv
+examples/streaming-daemon-uring/streaming-daemon-uring
+examples/streaming-daemon-uring/.backend
 
 # Rust build artifacts
 examples/streaming-daemon-rs/target/
@@ -41,4 +44,5 @@ examples/streaming-daemon-amp/composer.lock
 # Benchmark results (generated)
 benchmarks/results/
 benchmarks/results-*/
+benchmarks/capacity-results-*/
 benchmarks/BENCHMARK_REPORT.md

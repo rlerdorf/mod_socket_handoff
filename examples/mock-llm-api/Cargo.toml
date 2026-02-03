@@ -18,6 +18,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 futures = "0.3"
 
+# TLS support with rustls (native Rust, no OpenSSL dependency)
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+
 [profile.release]
 lto = true
 codegen-units = 1

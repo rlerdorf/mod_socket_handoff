@@ -10,7 +10,7 @@
 #   sudo ./run_full_benchmark.sh --http2 rust # Test Rust with HTTP/2 multiplexing
 #   sudo ./run_full_benchmark.sh --help       # Show help
 #
-# Available daemons: php, python, go, go-http2, rust, rust-http2, uring
+# Available daemons: php, amp-http2, swoole, swoole-http2, swow, swow-http2, python, go, go-http2, rust, rust-http2, uring
 #
 # Tests daemon implementations at multiple connection levels
 # and measures TTFB, memory, CPU, and peak concurrency.
@@ -31,29 +31,46 @@ MESSAGE_DELAY_MS=5625  # ~96 second streams with 18 messages (17 delays × 5625m
 # PHP max connections (limit to prevent OOM)
 PHP_MAX_CONNECTIONS=${PHP_MAX_CONNECTIONS:-20000}
 
+# Quick mode: only run 10k connections for fast iteration
+QUICK_MODE=false
+
 # Parse arguments
 DAEMONS_TO_RUN=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -q|--quick)
+            QUICK_MODE=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [--backend MODE] [daemon ...]"
             echo ""
             echo "Run benchmarks for streaming daemons."
             echo ""
             echo "Options:"
+            echo "  -q, --quick     Quick mode: only run 10k connections (~30s per daemon)"
             echo "  --backend MODE  Backend mode: 'llm-api' (default) or 'delay'"
             echo "                  llm-api: Uses mock LLM API server for realistic benchmarks"
             echo "                  delay: Uses artificial delays (legacy mode)"
             echo ""
             echo "Arguments:"
             echo "  daemon    One or more daemons to benchmark:"
-            echo "            php, python, go, go-http2, rust, rust-http2, uring"
+            echo "            php, amp-http2, swoole, swoole-http2, swow, swow-http2, python, go, go-http2, rust, rust-http2, uring"
             echo ""
+            echo "            php       - AMPHP daemon with HTTP/1.1"
+            echo "            amp-http2 - AMPHP daemon with HTTP/2 multiplexing (HTTPS)"
+            echo "                        (requires --backend llm-api, skipped otherwise)"
+            echo "            swoole    - Swoole daemon with HTTP/1.1"
+            echo "            swoole-http2 - Swoole daemon with HTTP/2 multiplexing (HTTPS)"
+            echo "                        (requires --backend llm-api, skipped otherwise)"
+            echo "            swow      - Swow daemon with HTTP/1.1"
+            echo "            swow-http2 - Swow daemon with HTTP/2 multiplexing (HTTPS via curl_multi)"
+            echo "                        (requires --backend llm-api, skipped otherwise)"
             echo "            go        - Go daemon with HTTP/1.1 (Unix socket to API)"
-            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "            go-http2  - Go daemon with HTTP/2 multiplexing (HTTPS TLS)"
             echo "                        (requires --backend llm-api, skipped otherwise)"
             echo "            rust      - Rust daemon with HTTP/1.1 (Unix socket to API)"
-            echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (TCP h2c)"
+            echo "            rust-http2 - Rust daemon with HTTP/2 multiplexing (HTTPS TLS)"
             echo "                        (requires --backend llm-api, skipped otherwise)"
             echo ""
             echo "            If not specified, all daemons are benchmarked."
@@ -77,13 +94,13 @@ while [[ $# -gt 0 ]]; do
             BACKEND_MODE="$1"
             shift
             ;;
-        php|python|go|go-http2|rust|rust-http2|uring)
+        php|amp-http2|swoole|swoole-http2|swow|swow-http2|python|python-http2|go|go-http2|rust|rust-http2|uring|uring-http2)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, python, go, go-http2, rust, rust-http2, uring"
+            echo "Valid daemons: php, amp-http2, swoole, swoole-http2, swow, swow-http2, python, python-http2, go, go-http2, rust, rust-http2, uring, uring-http2"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -116,13 +133,24 @@ rm -f "$MOCK_API_SOCKET" "$SOCKET"
 sleep 1
 
 # Connection levels to test
-CONNECTIONS=(100 1000 10000 50000 100000)
+# Can be overridden with CONNECTION_COUNTS env var: CONNECTION_COUNTS="100 1000 10000"
+if [ -n "${CONNECTION_COUNTS:-}" ]; then
+    read -ra CONNECTIONS <<< "$CONNECTION_COUNTS"
+    echo "Custom connection counts: ${CONNECTIONS[*]}"
+elif $QUICK_MODE; then
+    CONNECTIONS=(10000)
+    echo "Quick mode: testing only 10k connections"
+else
+    CONNECTIONS=(100 1000 10000 50000 100000)
+fi
 
 # Function to test a single daemon
+# Usage: test_daemon <name> <start_cmd> <pattern> [use_tls]
 test_daemon() {
     local name=$1
     local start_cmd=$2
     local pattern=$3
+    local use_tls=${4:-false}
 
     echo -e "${YELLOW}=========================================="
     echo "Testing: $name"
@@ -146,7 +174,7 @@ test_daemon() {
             local chunk_delay=$(calculate_chunk_delay $conns)
             local stream_duration_s=$((chunk_delay * 17 / 1000))
             local hold=$((stream_duration_s + 10))
-            start_mock_api "$chunk_delay"
+            start_mock_api "$chunk_delay" "$use_tls"
         else
             # Delay mode: hold time based on MESSAGE_DELAY_MS
             local hold=$((MESSAGE_DELAY_MS * 17 / 1000 + 10))
@@ -267,7 +295,7 @@ if [ "$BACKEND_MODE" = "llm-api" ]; then
     build_mock_api
 fi
 
-if should_run uring; then
+if should_run uring || should_run uring-http2; then
     if [ "$BACKEND_MODE" = "llm-api" ]; then
         build_uring_daemon "openai"
     else
@@ -286,11 +314,63 @@ echo "Backend mode: $BACKEND_MODE"
 echo "Daemons to test: ${DAEMONS_TO_RUN[*]}"
 echo ""
 
-# Test PHP
+# Test PHP (AMPHP with HTTP/1.1)
 if should_run php; then
     test_daemon "php" \
         "$(get_php_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "$PHP_MAX_CONNECTIONS")" \
         "streaming_daemon.php"
+fi
+
+# Test AMPHP (HTTP/2 with HTTPS multiplexing)
+if should_run amp-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping amp-http2: HTTP/2 requires TCP (llm-api backend)${NC}"
+    else
+        test_daemon "amp-http2" \
+            "$(get_amp_http2_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "$PHP_MAX_CONNECTIONS")" \
+            "streaming-daemon-amp/streaming_daemon.php" \
+            "true"
+    fi
+fi
+
+# Test Swoole (HTTP/1.1)
+if should_run swoole; then
+    test_daemon "swoole" \
+        "$(get_swoole_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http1")" \
+        "streaming-daemon-swoole/streaming_daemon.php"
+fi
+
+# Test Swoole (HTTP/2 with HTTPS multiplexing)
+# Swoole HTTP/2 uses HTTPS (TLS) for real-world performance testing
+if should_run swoole-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping swoole-http2: HTTP/2 requires TCP (llm-api backend)${NC}"
+    else
+        test_daemon "swoole-http2" \
+            "$(get_swoole_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2" 166333)" \
+            "streaming-daemon-swoole/streaming_daemon.php" \
+            "true"
+    fi
+fi
+
+# Test Swow (HTTP/1.1)
+if should_run swow; then
+    test_daemon "swow" \
+        "$(get_swow_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http1")" \
+        "streaming-daemon-swow/streaming_daemon.php"
+fi
+
+# Test Swow (HTTP/2 with HTTPS multiplexing via curl_multi)
+# Swow requires TLS for proper curl_multi connection reuse
+if should_run swow-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping swow-http2: HTTP/2 requires TCP (llm-api backend)${NC}"
+    else
+        test_daemon "swow-http2" \
+            "$(get_swow_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2" 166333)" \
+            "streaming-daemon-swow/streaming_daemon.php" \
+            "true"
+    fi
 fi
 
 # Test Python (using uvloop + 500 thread workers for high concurrency)
@@ -305,6 +385,19 @@ if should_run python; then
     fi
 fi
 
+# Test Python HTTP/2 (uses PycURL curl_multi integration for HTTP/2 multiplexing)
+# Python HTTP/2 requires TLS for proper curl_multi connection reuse
+if should_run python-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping python-http2: HTTP/2 requires TCP (llm-api backend), not Unix sockets used by delay backend${NC}"
+    else
+        test_daemon "python-http2" \
+            "$(get_python_http2_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS")" \
+            "streaming_daemon_async" \
+            "true"
+    fi
+fi
+
 # Test Go (HTTP/1.1 with Unix socket)
 if should_run go; then
     test_daemon "go" \
@@ -312,14 +405,15 @@ if should_run go; then
         "streaming-daemon-go/streaming-daemon"
 fi
 
-# Test Go (HTTP/2 with TCP h2c multiplexing)
+# Test Go (HTTP/2 with HTTPS TLS multiplexing)
 if should_run go-http2; then
     if [ "$BACKEND_MODE" != "llm-api" ]; then
         echo -e "${YELLOW}Skipping go-http2: HTTP/2 requires TCP (llm-api backend), not Unix sockets used by delay backend${NC}"
     else
         test_daemon "go-http2" \
             "$(get_go_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2")" \
-            "streaming-daemon-go/streaming-daemon"
+            "streaming-daemon-go/streaming-daemon" \
+            "true"
     fi
 fi
 
@@ -330,22 +424,35 @@ if should_run rust; then
         "streaming-daemon-rs"
 fi
 
-# Test Rust (HTTP/2 with TCP h2c multiplexing)
+# Test Rust (HTTP/2 with HTTPS TLS multiplexing)
 if should_run rust-http2; then
     if [ "$BACKEND_MODE" != "llm-api" ]; then
         echo -e "${YELLOW}Skipping rust-http2 (only available with --backend llm-api)${NC}"
     else
         test_daemon "rust-http2" \
             "$(get_rust_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2")" \
-            "streaming-daemon-rs"
+            "streaming-daemon-rs" \
+            "true"
     fi
 fi
 
-# Test C io_uring
+# Test C io_uring (HTTP/1.1 with Unix socket)
 if should_run uring; then
     test_daemon "uring" \
-        "$(get_uring_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS")" \
+        "$(get_uring_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http1")" \
         "streaming-daemon-uring"
+fi
+
+# Test C io_uring (HTTP/2 with HTTPS TLS multiplexing)
+if should_run uring-http2; then
+    if [ "$BACKEND_MODE" != "llm-api" ]; then
+        echo -e "${YELLOW}Skipping uring-http2: HTTP/2 requires TCP (llm-api backend)${NC}"
+    else
+        test_daemon "uring-http2" \
+            "$(get_uring_cmd "$BACKEND_MODE" "$MESSAGE_DELAY_MS" "http2")" \
+            "streaming-daemon-uring" \
+            "true"
+    fi
 fi
 
 
@@ -362,15 +469,16 @@ Generated: $(date)
 
 ## Configuration
 - Backend mode: $BACKEND_MODE
-- Stream duration: ~96 seconds (18 messages x 5625ms delay)
-- Hold time: 100 seconds after ramp-up
+- Stream duration: Dynamic (18 messages × calculated delay per connection level)
+  - ≤10k connections: ~12s streams (706ms delay)
+  - 10k-100k connections: ~36s streams (2118ms delay)
 - Connection levels: 100, 1,000, 10,000, 50,000, 100,000
 
 ## Results
 
 EOF
 
-for daemon in php python go go-http2 rust rust-http2 uring; do
+for daemon in php amp-http2 swoole swoole-http2 swow swow-http2 python go go-http2 rust rust-http2 uring uring-http2; do
     if [ -f "$RESULTS_DIR/${daemon}.csv" ]; then
         echo "### ${daemon^}" >> "$RESULTS_DIR/REPORT.md"
         echo "" >> "$RESULTS_DIR/REPORT.md"
@@ -394,10 +502,16 @@ cat >> "$RESULTS_DIR/REPORT.md" << 'EOF'
 - Peak Backlog = Maximum pending connections in kernel accept queue (from ss Recv-Q)
 
 ## HTTP/2 Mode
+- php: Uses AMPHP with HTTP/1.1 via Unix socket
+- amp-http2: Uses AMPHP with HTTP/2 via HTTPS (TLS) and amphp/http-client
+- swoole: Uses HTTP/1.1 with TCP connection to mock API
+- swoole-http2: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
+- swow: Uses HTTP/1.1 with TCP connection to mock API (via curl)
+- swow-http2: Uses HTTP/2 with HTTPS (TLS) via curl_multi (Swow requires TLS for connection reuse)
 - go: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
-- go-http2: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
+- go-http2: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
 - rust: Uses HTTP/1.1 with Unix socket for connection pooling to mock API
-- rust-http2: Uses HTTP/2 with TCP h2c (prior knowledge) for stream multiplexing
+- rust-http2: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
   - With HTTP/2, ~100 streams share each TCP connection vs 1 stream per connection with HTTP/1.1
   - This reduces connection overhead from 100k to ~1k connections for 100k concurrent streams
 EOF

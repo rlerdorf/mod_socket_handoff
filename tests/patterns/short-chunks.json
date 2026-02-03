@@ -1,0 +1,14 @@
+{
+  "name": "short",
+  "description": "Short (1-2 byte) SSE chunks for testing minimal payload handling",
+  "chunk_size": "1-2 bytes",
+  "expected_chunks": 49,
+  "content": "Hello world! This is a test. Each chunk is small.",
+  "assertions": [
+    {"type": "http_status", "expected": 200},
+    {"type": "sse_format"},
+    {"type": "chunk_count_at_least", "expected": 10},
+    {"type": "utf8_valid"},
+    {"type": "done_marker"}
+  ]
+}

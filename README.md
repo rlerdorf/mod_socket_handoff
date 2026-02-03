@@ -144,10 +144,13 @@ The daemon must:
 
 See `examples/` for implementations in:
 - **fdrecv** (`fdrecv.c`) - Minimal C daemon that execs any handler with fd as stdin/stdout
-- Go (`streaming-daemon-go/`) - Multi-threaded, production-ready
-- Rust (`streaming-daemon-rs/`) - Async/await with Tokio, production-ready, Prometheus metrics
-- PHP (`streaming_daemon.php`) - Uses `socket_cmsg_space()` for SCM_RIGHTS
-- Python (`test_daemon.py`) - Simple single-threaded test daemon
+- Go (`streaming-daemon-go/`) - Goroutines with HTTP/2 multiplexing, Prometheus metrics
+- Rust (`streaming-daemon-rs/`) - Async/await with Tokio, HTTP/2 with flow control tuning, Prometheus metrics
+- PHP AMPHP (`streaming-daemon-amp/`) - Fibers with HTTP/2 via amphp/http-client
+- PHP Swoole (`streaming-daemon-swoole/`) - Native coroutines with HTTP/2 client
+- PHP Swow (`streaming-daemon-swow/`) - Coroutines with curl_multi HTTP/2 multiplexing
+- Python (`streaming_daemon_async.py`) - asyncio with optional HTTP/2 via PycURL
+- C io_uring (`streaming-daemon-uring/`) - Linux io_uring with curl_multi
 
 ### Using fdrecv
 

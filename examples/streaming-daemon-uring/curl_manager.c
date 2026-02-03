@@ -13,7 +13,9 @@
 #include "connection.h"
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <poll.h>
 
 /* API configuration (from environment) */
@@ -21,6 +23,8 @@ static const char *api_key = NULL;
 static const char *api_base = NULL;
 static const char *api_socket = NULL;
 static const char *default_model = NULL;
+static bool insecure_ssl = false;
+static bool http2_enabled = true;  /* Default: HTTP/2 enabled */
 
 /* Forward declarations */
 static int socket_callback(CURL *easy, curl_socket_t sockfd, int what,
@@ -75,6 +79,21 @@ int curl_manager_init(curl_manager_t *mgr, daemon_ctx_t *ctx) {
         default_model = "gpt-4o-mini";
     }
 
+    /* Check for insecure SSL mode (for testing with self-signed certs) */
+    const char *insecure_env = getenv("OPENAI_INSECURE_SSL");
+    if (insecure_env && (strcasecmp(insecure_env, "true") == 0 ||
+                          strcmp(insecure_env, "1") == 0)) {
+        insecure_ssl = true;
+        fprintf(stderr, "Warning: TLS certificate verification disabled\n");
+    }
+
+    /* Check for HTTP/2 enabled/disabled */
+    const char *http2_env = getenv("OPENAI_HTTP2_ENABLED");
+    if (http2_env && (strcasecmp(http2_env, "false") == 0 ||
+                       strcmp(http2_env, "0") == 0)) {
+        http2_enabled = false;
+    }
+
     /* Initialize curl */
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         fprintf(stderr, "Failed to initialize libcurl\n");
@@ -117,11 +136,11 @@ int curl_manager_init(curl_manager_t *mgr, daemon_ctx_t *ctx) {
     }
 
     if (api_socket) {
-        fprintf(stderr, "Curl manager initialized (base: %s, socket: %s, model: %s)\n",
-                api_base, api_socket, default_model);
+        fprintf(stderr, "Curl manager initialized (base: %s, socket: %s, model: %s, http2: %s)\n",
+                api_base, api_socket, default_model, http2_enabled ? "on" : "off");
     } else {
-        fprintf(stderr, "Curl manager initialized (base: %s, model: %s)\n",
-                api_base, default_model);
+        fprintf(stderr, "Curl manager initialized (base: %s, model: %s, http2: %s)\n",
+                api_base, default_model, http2_enabled ? "on" : "off");
     }
 
     return 0;
@@ -596,19 +615,29 @@ int curl_manager_start_request(curl_manager_t *mgr, connection_t *conn) {
         curl_easy_setopt(req->easy, CURLOPT_UNIX_SOCKET_PATH, api_socket);
     }
 
-    /* Enable HTTP/2 multiplexing for efficient connection reuse.
+    /* Disable SSL verification if configured (for testing with self-signed certs) */
+    if (insecure_ssl) {
+        curl_easy_setopt(req->easy, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(req->easy, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+
+    /* Configure HTTP version based on http2_enabled setting.
      * For HTTPS: use CURL_HTTP_VERSION_2TLS (negotiate via ALPN)
      * For HTTP: use CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE (h2c)
      * PIPEWAIT makes curl wait for a connection to multiplex on.
      */
-    if (strncmp(url, "https://", 8) == 0) {
-        /* HTTPS - negotiate HTTP/2 via ALPN */
-        curl_easy_setopt(req->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    if (http2_enabled) {
+        if (strncmp(url, "https://", 8) == 0) {
+            /* HTTPS - negotiate HTTP/2 via ALPN */
+            curl_easy_setopt(req->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+        } else {
+            /* HTTP - use h2c prior knowledge */
+            curl_easy_setopt(req->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+        }
+        curl_easy_setopt(req->easy, CURLOPT_PIPEWAIT, 1L);
     } else {
-        /* HTTP - use h2c prior knowledge */
-        curl_easy_setopt(req->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+        curl_easy_setopt(req->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
     }
-    curl_easy_setopt(req->easy, CURLOPT_PIPEWAIT, 1L);
 
     /* Store easy handle in connection for cancellation */
     conn->curl_easy = req->easy;

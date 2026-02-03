@@ -36,6 +36,8 @@ pub struct StreamRequest {
     pub user_id: Option<i64>,
     /// Request ID for correlation.
     pub request_id: String,
+    /// Test pattern for validation testing (passed to backend as X-Test-Pattern header).
+    pub test_pattern: Option<String>,
 }
 
 impl StreamRequest {
@@ -58,6 +60,7 @@ impl StreamRequest {
                 .as_ref()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("conn-{}", conn_id)),
+            test_pattern: data.test_pattern.as_ref().map(|s| s.to_string()),
         }
     }
 }

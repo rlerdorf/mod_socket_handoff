@@ -56,6 +56,21 @@ pub struct Config {
     /// Keeps idle connections alive during streaming gaps.
     #[arg(long, default_value = "20")]
     pub h2_keepalive_secs: u64,
+
+    // TLS options for HTTPS support
+    /// Enable TLS/HTTPS with auto-generated self-signed certificate.
+    /// Uses TLS 1.3 with AES-128-GCM for maximum performance.
+    #[arg(long)]
+    pub tls: bool,
+
+    /// TLS certificate file (PEM format). If not specified with --tls,
+    /// a self-signed certificate is auto-generated at startup.
+    #[arg(long)]
+    pub tls_cert: Option<String>,
+
+    /// TLS private key file (PEM format). Required if --tls-cert is specified.
+    #[arg(long)]
+    pub tls_key: Option<String>,
 }
 
 impl Config {
