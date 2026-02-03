@@ -190,9 +190,18 @@ calculate_chunk_delay() {
     echo $(( (rampup_ms * 12 / 10) / 17 ))
 }
 
-# Build mock LLM API if needed
+# Build mock LLM API if needed (with staleness check)
 build_mock_api() {
+    local needs_build=false
+
     if [ ! -x "$MOCK_API_BIN" ]; then
+        needs_build=true
+    elif is_rust_binary_stale "$MOCK_API_BIN" "$MOCK_API_DIR"; then
+        echo "mock-llm-api binary is stale, rebuilding..."
+        needs_build=true
+    fi
+
+    if $needs_build; then
         if [ -z "$CARGO_BIN" ]; then
             echo -e "${RED}ERROR: cargo not found. Please build mock-llm-api first:${NC}"
             echo "  cd $MOCK_API_DIR && cargo build --release"
@@ -394,12 +403,104 @@ abort_handler() {
 }
 
 #=============================================================================
+# STALENESS CHECKING
+#=============================================================================
+
+# Check if a binary is stale (older than its source files)
+# Usage: is_binary_stale <binary_path> <source_dir> <source_pattern>
+# Returns: 0 if stale (needs rebuild), 1 if fresh
+# Example: is_binary_stale "./myapp" "./src" "*.go"
+is_binary_stale() {
+    local binary="$1"
+    local source_dir="$2"
+    local pattern="$3"
+
+    # If binary doesn't exist, it's "stale" (needs build)
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    # Find any source file newer than the binary
+    # Using -newer is more reliable than comparing timestamps manually
+    local newer_files
+    newer_files=$(find "$source_dir" -name "$pattern" -newer "$binary" 2>/dev/null | head -1)
+
+    if [ -n "$newer_files" ]; then
+        return 0  # Stale
+    fi
+
+    return 1  # Fresh
+}
+
+# Check if a Rust binary is stale (checks Cargo.toml and src/**/*.rs)
+# Usage: is_rust_binary_stale <binary_path> <cargo_dir>
+is_rust_binary_stale() {
+    local binary="$1"
+    local cargo_dir="$2"
+
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    # Check Cargo.toml
+    if [ "$cargo_dir/Cargo.toml" -nt "$binary" ]; then
+        return 0
+    fi
+
+    # Check any .rs file in src/
+    local newer_files
+    newer_files=$(find "$cargo_dir/src" -name "*.rs" -newer "$binary" 2>/dev/null | head -1)
+
+    if [ -n "$newer_files" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a C binary is stale (checks *.c and *.h files)
+# Usage: is_c_binary_stale <binary_path> <source_dir>
+is_c_binary_stale() {
+    local binary="$1"
+    local source_dir="$2"
+
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    # Check .c files
+    local newer_c
+    newer_c=$(find "$source_dir" -maxdepth 1 -name "*.c" -newer "$binary" 2>/dev/null | head -1)
+    if [ -n "$newer_c" ]; then
+        return 0
+    fi
+
+    # Check .h files
+    local newer_h
+    newer_h=$(find "$source_dir" -maxdepth 1 -name "*.h" -newer "$binary" 2>/dev/null | head -1)
+    if [ -n "$newer_h" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+#=============================================================================
 # BUILD DEPENDENCIES
 #=============================================================================
 
-# Build load generator if needed
+# Build load generator if needed (with staleness check)
 build_load_generator() {
+    local needs_build=false
+
     if [ ! -x "$LOAD_GEN" ]; then
+        needs_build=true
+    elif is_binary_stale "$LOAD_GEN" "$SCRIPT_DIR/load-generator" "*.go"; then
+        echo "Load generator binary is stale, rebuilding..."
+        needs_build=true
+    fi
+
+    if $needs_build; then
         if [ -z "$GO_BIN" ]; then
             echo -e "${RED}ERROR: go not found. Please build load generator first:${NC}"
             echo "  cd $SCRIPT_DIR/load-generator && go build -o load-generator ."
@@ -410,20 +511,30 @@ build_load_generator() {
     fi
 }
 
-# Build Go daemon if needed
+# Build Go daemon if needed (with staleness check)
 build_go_daemon() {
-    local daemon_path="$EXAMPLES_DIR/streaming-daemon-go/streaming-daemon"
+    local daemon_dir="$EXAMPLES_DIR/streaming-daemon-go"
+    local daemon_path="$daemon_dir/streaming-daemon"
+    local needs_build=false
+
     if [ ! -x "$daemon_path" ]; then
+        needs_build=true
+    elif is_binary_stale "$daemon_path" "$daemon_dir" "*.go"; then
+        echo "Go daemon binary is stale, rebuilding..."
+        needs_build=true
+    fi
+
+    if $needs_build; then
         if [ -z "$GO_BIN" ]; then
             echo -e "${RED}ERROR: go not found. Please build Go daemon first.${NC}"
             exit 1
         fi
         echo "Building Go daemon..."
-        (cd "$EXAMPLES_DIR/streaming-daemon-go" && "$GO_BIN" build -o streaming-daemon .)
+        (cd "$daemon_dir" && "$GO_BIN" build -o streaming-daemon .)
     fi
 }
 
-# Build uring daemon if needed
+# Build uring daemon if needed (with staleness check)
 # Usage: build_uring_daemon <backend>  (backend: mock or openai)
 build_uring_daemon() {
     local desired_backend=${1:-openai}
@@ -436,7 +547,19 @@ build_uring_daemon() {
         current_backend=$(cat "$uring_marker")
     fi
 
-    if [ ! -x "$uring_bin" ] || [ "$current_backend" != "$desired_backend" ]; then
+    local needs_build=false
+
+    if [ ! -x "$uring_bin" ]; then
+        needs_build=true
+    elif [ "$current_backend" != "$desired_backend" ]; then
+        echo "io_uring daemon backend changed ($current_backend -> $desired_backend), rebuilding..."
+        needs_build=true
+    elif is_c_binary_stale "$uring_bin" "$uring_dir"; then
+        echo "io_uring daemon binary is stale, rebuilding..."
+        needs_build=true
+    fi
+
+    if $needs_build; then
         echo "Building C io_uring daemon with $desired_backend backend..."
         make -C "$uring_dir" clean >/dev/null 2>&1 || true
         make -C "$uring_dir" BACKEND=$desired_backend -j$(nproc)

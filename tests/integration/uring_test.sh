@@ -14,7 +14,7 @@ log_info "=== io_uring Daemon Integration Tests ==="
 
 check_prerequisites
 
-# Build uring daemon if needed
+# Build uring daemon if needed (with staleness check)
 URING_DAEMON_DIR="$EXAMPLES_DIR/streaming-daemon-uring"
 URING_DAEMON_BIN="$URING_DAEMON_DIR/streaming-daemon-uring"
 
@@ -25,6 +25,10 @@ fi
 
 if [ ! -x "$URING_DAEMON_BIN" ]; then
     log_info "Building io_uring daemon with OpenAI backend..."
+    make -C "$URING_DAEMON_DIR" clean >/dev/null 2>&1 || true
+    make -C "$URING_DAEMON_DIR" BACKEND=openai -j$(nproc)
+elif is_c_binary_stale "$URING_DAEMON_BIN" "$URING_DAEMON_DIR"; then
+    log_warn "io_uring daemon binary is stale, rebuilding..."
     make -C "$URING_DAEMON_DIR" clean >/dev/null 2>&1 || true
     make -C "$URING_DAEMON_DIR" BACKEND=openai -j$(nproc)
 fi

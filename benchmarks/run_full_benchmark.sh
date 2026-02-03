@@ -157,7 +157,7 @@ test_daemon() {
     echo -e "==========================================${NC}"
 
     local daemon_results="$RESULTS_DIR/${name}.csv"
-    echo "connections,completed,failed,ttfb_p50,ttfb_p99,peak_rss_kb,avg_cpu,peak_concurrent,peak_backlog" > "$daemon_results"
+    echo "connections,completed,failed,ttfb_p50,ttfb_p95,ttfb_p99,ttfb_p999,peak_rss_kb,avg_cpu,peak_concurrent,peak_backlog" > "$daemon_results"
 
     for conns in "${CONNECTIONS[@]}"; do
         echo ""
@@ -190,7 +190,7 @@ test_daemon() {
             CURRENT_DAEMON_PID=""
             echo -e "${RED}ERROR: $name failed to start (no process)${NC}"
             cat "$daemon_log"
-            echo "$conns,0,0,0,0,0,0,0" >> "$daemon_results"
+            echo "$conns,0,0,0,0,0,0,0,0,0" >> "$daemon_results"
             continue
         fi
         CURRENT_DAEMON_PID="$pid"
@@ -200,7 +200,7 @@ test_daemon() {
             CURRENT_DAEMON_PID=""
             echo -e "${RED}ERROR: $name socket not created${NC}"
             cat "$daemon_log"
-            echo "$conns,0,0,0,0,0,0,0" >> "$daemon_results"
+            echo "$conns,0,0,0,0,0,0,0,0,0" >> "$daemon_results"
             continue
         fi
 
@@ -256,7 +256,9 @@ test_daemon() {
         local completed=$(jq -r '.connections_completed // 0' "$json_file" 2>/dev/null || echo 0)
         local failed=$(jq -r '.connections_failed // 0' "$json_file" 2>/dev/null || echo 0)
         local ttfb_p50=$(jq -r '.ttfb_latency_ms.p50 // 0' "$json_file" 2>/dev/null || echo 0)
+        local ttfb_p95=$(jq -r '.ttfb_latency_ms.p95 // 0' "$json_file" 2>/dev/null || echo 0)
         local ttfb_p99=$(jq -r '.ttfb_latency_ms.p99 // 0' "$json_file" 2>/dev/null || echo 0)
+        local ttfb_p999=$(jq -r '.ttfb_latency_ms.p999 // 0' "$json_file" 2>/dev/null || echo 0)
 
         # Get peak concurrent from daemon log (if available)
         local peak_concurrent=$(grep -oE "Peak concurrent( streams)?: [0-9]+" "$daemon_log" 2>/dev/null | grep -o '[0-9]*' | tail -1 || echo "-")
@@ -277,12 +279,12 @@ test_daemon() {
         else
             echo -e "${RED}Completed: $completed, Failed: $failed${NC}"
         fi
-        echo "TTFB p50: ${ttfb_p50}ms, p99: ${ttfb_p99}ms"
+        echo "TTFB p50: ${ttfb_p50}ms, p95: ${ttfb_p95}ms, p99: ${ttfb_p99}ms, p99.9: ${ttfb_p999}ms"
         echo "Peak RSS: ${peak_rss}KB ($(echo "scale=1; $peak_rss/1024" | bc)MB), Avg CPU: ${avg_cpu}%"
         echo "Peak concurrent: $peak_concurrent, Peak backlog: $peak_backlog"
 
         # Save to CSV
-        echo "$conns,$completed,$failed,$ttfb_p50,$ttfb_p99,$peak_rss,$avg_cpu,$peak_concurrent,$peak_backlog" >> "$daemon_results"
+        echo "$conns,$completed,$failed,$ttfb_p50,$ttfb_p95,$ttfb_p99,$ttfb_p999,$peak_rss,$avg_cpu,$peak_concurrent,$peak_backlog" >> "$daemon_results"
     done
 
     cleanup_daemons
@@ -482,13 +484,13 @@ for daemon in php amp-http2 swoole swoole-http2 swow swow-http2 python go go-htt
     if [ -f "$RESULTS_DIR/${daemon}.csv" ]; then
         echo "### ${daemon^}" >> "$RESULTS_DIR/REPORT.md"
         echo "" >> "$RESULTS_DIR/REPORT.md"
-        echo "| Connections | Completed | Failed | TTFB p50 (ms) | TTFB p99 (ms) | Peak RSS (MB) | Avg CPU (%) | Peak Concurrent | Peak Backlog |" >> "$RESULTS_DIR/REPORT.md"
-        echo "|-------------|-----------|--------|---------------|---------------|---------------|-------------|-----------------|--------------|" >> "$RESULTS_DIR/REPORT.md"
+        echo "| Connections | Completed | Failed | TTFB p50 (ms) | TTFB p95 (ms) | TTFB p99 (ms) | TTFB p99.9 (ms) | Peak RSS (MB) | Avg CPU (%) | Peak Concurrent | Peak Backlog |" >> "$RESULTS_DIR/REPORT.md"
+        echo "|-------------|-----------|--------|---------------|---------------|---------------|-----------------|---------------|-------------|-----------------|--------------|" >> "$RESULTS_DIR/REPORT.md"
 
-        tail -n +2 "$RESULTS_DIR/${daemon}.csv" | while IFS=',' read -r conns completed failed ttfb50 ttfb99 rss cpu peak backlog; do
+        tail -n +2 "$RESULTS_DIR/${daemon}.csv" | while IFS=',' read -r conns completed failed ttfb50 ttfb95 ttfb99 ttfb999 rss cpu peak backlog; do
             rss_mb=$(echo "scale=1; $rss/1024" | bc 2>/dev/null || echo "$rss")
-            printf "| %s | %s | %s | %.3f | %.3f | %s | %s | %s | %s |\n" \
-                "$conns" "$completed" "$failed" "$ttfb50" "$ttfb99" "$rss_mb" "$cpu" "$peak" "$backlog" >> "$RESULTS_DIR/REPORT.md"
+            printf "| %s | %s | %s | %.3f | %.3f | %.3f | %.3f | %s | %s | %s | %s |\n" \
+                "$conns" "$completed" "$failed" "$ttfb50" "$ttfb95" "$ttfb99" "$ttfb999" "$rss_mb" "$cpu" "$peak" "$backlog" >> "$RESULTS_DIR/REPORT.md"
         done
         echo "" >> "$RESULTS_DIR/REPORT.md"
     fi

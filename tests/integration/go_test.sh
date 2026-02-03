@@ -14,7 +14,7 @@ log_info "=== Go Daemon Integration Tests ==="
 
 check_prerequisites
 
-# Build Go daemon if needed
+# Build Go daemon if needed (with staleness check)
 GO_DAEMON_DIR="$EXAMPLES_DIR/streaming-daemon-go"
 GO_DAEMON_BIN="$GO_DAEMON_DIR/streaming-daemon"
 
@@ -25,6 +25,9 @@ fi
 
 if [ ! -x "$GO_DAEMON_BIN" ]; then
     log_info "Building Go daemon..."
+    (cd "$GO_DAEMON_DIR" && go build -o streaming-daemon streaming_daemon.go)
+elif is_binary_stale "$GO_DAEMON_BIN" "$GO_DAEMON_DIR" "*.go"; then
+    log_warn "Go daemon binary is stale, rebuilding..."
     (cd "$GO_DAEMON_DIR" && go build -o streaming-daemon streaming_daemon.go)
 fi
 

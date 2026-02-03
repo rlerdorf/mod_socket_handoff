@@ -14,7 +14,7 @@ log_info "=== Rust Daemon Integration Tests ==="
 
 check_prerequisites
 
-# Build Rust daemon if needed
+# Build Rust daemon if needed (with staleness check)
 RUST_DAEMON_DIR="$EXAMPLES_DIR/streaming-daemon-rs"
 RUST_DAEMON_BIN="$RUST_DAEMON_DIR/target/release/streaming-daemon-rs"
 
@@ -25,6 +25,9 @@ fi
 
 if [ ! -x "$RUST_DAEMON_BIN" ]; then
     log_info "Building Rust daemon..."
+    (cd "$RUST_DAEMON_DIR" && cargo build --release)
+elif is_rust_binary_stale "$RUST_DAEMON_BIN" "$RUST_DAEMON_DIR"; then
+    log_warn "Rust daemon binary is stale, rebuilding..."
     (cd "$RUST_DAEMON_DIR" && cargo build --release)
 fi
 

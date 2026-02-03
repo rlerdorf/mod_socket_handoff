@@ -345,19 +345,22 @@ func printResults(stats *Stats, outputFile string) {
 			"timeout": stats.timeoutErrors,
 		},
 		"handoff_latency_ms": map[string]float64{
-			"p50": float64(percentile(handoff, 0.50)) / float64(time.Millisecond),
-			"p95": float64(percentile(handoff, 0.95)) / float64(time.Millisecond),
-			"p99": float64(percentile(handoff, 0.99)) / float64(time.Millisecond),
+			"p50":  float64(percentile(handoff, 0.50)) / float64(time.Millisecond),
+			"p95":  float64(percentile(handoff, 0.95)) / float64(time.Millisecond),
+			"p99":  float64(percentile(handoff, 0.99)) / float64(time.Millisecond),
+			"p999": float64(percentile(handoff, 0.999)) / float64(time.Millisecond),
 		},
 		"ttfb_latency_ms": map[string]float64{
-			"p50": float64(percentile(ttfb, 0.50)) / float64(time.Millisecond),
-			"p95": float64(percentile(ttfb, 0.95)) / float64(time.Millisecond),
-			"p99": float64(percentile(ttfb, 0.99)) / float64(time.Millisecond),
+			"p50":  float64(percentile(ttfb, 0.50)) / float64(time.Millisecond),
+			"p95":  float64(percentile(ttfb, 0.95)) / float64(time.Millisecond),
+			"p99":  float64(percentile(ttfb, 0.99)) / float64(time.Millisecond),
+			"p999": float64(percentile(ttfb, 0.999)) / float64(time.Millisecond),
 		},
 		"stream_duration_ms": map[string]float64{
-			"p50": float64(percentile(stream, 0.50)) / float64(time.Millisecond),
-			"p95": float64(percentile(stream, 0.95)) / float64(time.Millisecond),
-			"p99": float64(percentile(stream, 0.99)) / float64(time.Millisecond),
+			"p50":  float64(percentile(stream, 0.50)) / float64(time.Millisecond),
+			"p95":  float64(percentile(stream, 0.95)) / float64(time.Millisecond),
+			"p99":  float64(percentile(stream, 0.99)) / float64(time.Millisecond),
+			"p999": float64(percentile(stream, 0.999)) / float64(time.Millisecond),
 		},
 	}
 

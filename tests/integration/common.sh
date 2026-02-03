@@ -46,6 +46,79 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
+#=============================================================================
+# STALENESS CHECKING
+#=============================================================================
+
+# Check if a binary is stale (older than its source files)
+# Usage: is_binary_stale <binary_path> <source_dir> <source_pattern>
+# Returns: 0 if stale (needs rebuild), 1 if fresh
+is_binary_stale() {
+    local binary="$1"
+    local source_dir="$2"
+    local pattern="$3"
+
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    local newer_files
+    newer_files=$(find "$source_dir" -name "$pattern" -newer "$binary" 2>/dev/null | head -1)
+
+    if [ -n "$newer_files" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a Rust binary is stale (checks Cargo.toml and src/**/*.rs)
+is_rust_binary_stale() {
+    local binary="$1"
+    local cargo_dir="$2"
+
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    if [ "$cargo_dir/Cargo.toml" -nt "$binary" ]; then
+        return 0
+    fi
+
+    local newer_files
+    newer_files=$(find "$cargo_dir/src" -name "*.rs" -newer "$binary" 2>/dev/null | head -1)
+
+    if [ -n "$newer_files" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Check if a C binary is stale (checks *.c and *.h files)
+is_c_binary_stale() {
+    local binary="$1"
+    local source_dir="$2"
+
+    if [ ! -x "$binary" ]; then
+        return 0
+    fi
+
+    local newer_c
+    newer_c=$(find "$source_dir" -maxdepth 1 -name "*.c" -newer "$binary" 2>/dev/null | head -1)
+    if [ -n "$newer_c" ]; then
+        return 0
+    fi
+
+    local newer_h
+    newer_h=$(find "$source_dir" -maxdepth 1 -name "*.h" -newer "$binary" 2>/dev/null | head -1)
+    if [ -n "$newer_h" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -123,14 +196,25 @@ wait_for_port() {
     return 0
 }
 
+# Build mock LLM API if needed (with staleness check)
+build_mock_api() {
+    local mock_api_dir="$EXAMPLES_DIR/mock-llm-api"
+    local mock_api_bin="$mock_api_dir/target/release/mock-llm-api"
+
+    if [ ! -x "$mock_api_bin" ]; then
+        log_info "Building mock-llm-api..."
+        (cd "$mock_api_dir" && cargo build --release)
+    elif is_rust_binary_stale "$mock_api_bin" "$mock_api_dir"; then
+        log_warn "mock-llm-api binary is stale, rebuilding..."
+        (cd "$mock_api_dir" && cargo build --release)
+    fi
+}
+
 # Start mock LLM API (HTTP)
 start_mock_api() {
     local mock_api_bin="$EXAMPLES_DIR/mock-llm-api/target/release/mock-llm-api"
 
-    if [ ! -x "$mock_api_bin" ]; then
-        log_info "Building mock-llm-api..."
-        (cd "$EXAMPLES_DIR/mock-llm-api" && cargo build --release)
-    fi
+    build_mock_api
 
     # Clean up any stale processes first
     cleanup_stale_processes
@@ -155,10 +239,7 @@ start_mock_api() {
 start_mock_api_tls() {
     local mock_api_bin="$EXAMPLES_DIR/mock-llm-api/target/release/mock-llm-api"
 
-    if [ ! -x "$mock_api_bin" ]; then
-        log_info "Building mock-llm-api..."
-        (cd "$EXAMPLES_DIR/mock-llm-api" && cargo build --release)
-    fi
+    build_mock_api
 
     # Clean up any stale processes first
     cleanup_stale_processes
@@ -180,10 +261,15 @@ start_mock_api_tls() {
     log_info "Mock API (TLS) running (PID $MOCK_API_PID)"
 }
 
-# Build test runner if needed
+# Build test runner if needed (with staleness check)
 build_test_runner() {
+    local runner_dir="$TESTS_DIR/runner"
+
     if [ ! -x "$TEST_RUNNER" ]; then
         log_info "Building test runner..."
+        (cd "$TESTS_DIR" && go build -o test-runner ./runner)
+    elif is_binary_stale "$TEST_RUNNER" "$runner_dir" "*.go"; then
+        log_warn "test-runner binary is stale, rebuilding..."
         (cd "$TESTS_DIR" && go build -o test-runner ./runner)
     fi
 }
