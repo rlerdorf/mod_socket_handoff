@@ -389,7 +389,7 @@ find_capacity() {
         [ $granularity -lt $MIN_GRANULARITY ] && granularity=$MIN_GRANULARITY
 
         # Check if we've converged
-        if [ $((high - low)) -lt $granularity ]; then
+        if [ $((high - low)) -le $granularity ]; then
             echo "  Converged: range ($((high - low))) < ${GRANULARITY_PERCENT}% of $mid ($granularity)"
             break
         fi
