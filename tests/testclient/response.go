@@ -173,6 +173,10 @@ func ReadResponse(conn net.Conn) *Response {
 					// Try simplified format: {"content":"..."} or {"error":"..."}
 					var simplified SimplifiedChunk
 					if err := json.Unmarshal([]byte(data), &simplified); err == nil {
+						if simplified.Error != "" {
+							// Map error chunk to response error
+							resp.Error = fmt.Errorf("daemon error: %s", simplified.Error)
+						}
 						if simplified.Content != "" {
 							contentBuilder.WriteString(simplified.Content)
 							// Create a synthetic parsed chunk for compatibility

@@ -69,6 +69,7 @@ sudo php -d extension=swow.so streaming_daemon.php \
 |----------|-------------|
 | `OPENAI_API_KEY` | API key for OpenAI backend |
 | `OPENAI_HTTP2_ENABLED` | Set to "true" for HTTP/2 multiplexing (requires https://) |
+| `OPENAI_INSECURE_SSL` | Set to "true" to skip TLS certificate verification (testing only) |
 
 ## Architecture
 

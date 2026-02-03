@@ -89,10 +89,12 @@ fn create_tls_config(config: &Config) -> Arc<ServerConfig> {
     // Validate that cert and key are either both provided or both absent
     match (&config.tls_cert, &config.tls_key) {
         (Some(_), None) => {
-            panic!("--tls-cert was provided but --tls-key is missing. Both must be specified together.");
+            eprintln!("Error: --tls-cert was provided but --tls-key is missing. Both must be specified together.");
+            std::process::exit(1);
         }
         (None, Some(_)) => {
-            panic!("--tls-key was provided but --tls-cert is missing. Both must be specified together.");
+            eprintln!("Error: --tls-key was provided but --tls-cert is missing. Both must be specified together.");
+            std::process::exit(1);
         }
         _ => {}
     }
@@ -128,7 +130,7 @@ fn create_tls_config(config: &Config) -> Arc<ServerConfig> {
         };
 
     // Configure TLS with performance-optimized settings:
-    // - TLS 1.3 only (fastest handshake, 1-RTT)
+    // - TLS 1.2 and 1.3 supported (rustls default)
     // - AES-128-GCM preferred (hardware accelerated via AES-NI)
     // - ALPN with h2 for HTTP/2 negotiation
     let mut server_config = ServerConfig::builder()

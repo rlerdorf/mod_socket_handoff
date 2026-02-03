@@ -193,7 +193,7 @@ The test runner returns exit code 0 on success, 1 on failure. Use TAP output for
 - Or run tests with appropriate permissions
 
 ### Mock API not starting
-- Check if port 18080 is already in use
+- Check if port 28080 is already in use (default test port)
 - Set `MOCK_API_PORT` environment variable to use a different port
 
 ### Daemon not starting

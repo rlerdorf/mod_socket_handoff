@@ -86,8 +86,10 @@ wait_for_socket() {
     local socket="$1"
     local timeout="${2:-10}"
     local elapsed=0
+    # Convert timeout to deciseconds (0.1s units) for accurate timing
+    local timeout_ds=$((timeout * 10))
 
-    while [ ! -S "$socket" ] && [ $elapsed -lt $timeout ]; do
+    while [ ! -S "$socket" ] && [ $elapsed -lt $timeout_ds ]; do
         sleep 0.1
         elapsed=$((elapsed + 1))
     done
@@ -105,8 +107,10 @@ wait_for_port() {
     local port="$1"
     local timeout="${2:-10}"
     local elapsed=0
+    # Convert timeout to deciseconds (0.1s units) for accurate timing
+    local timeout_ds=$((timeout * 10))
 
-    while ! nc -z 127.0.0.1 "$port" 2>/dev/null && [ $elapsed -lt $timeout ]; do
+    while ! nc -z 127.0.0.1 "$port" 2>/dev/null && [ $elapsed -lt $timeout_ds ]; do
         sleep 0.1
         elapsed=$((elapsed + 1))
     done

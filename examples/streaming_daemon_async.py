@@ -434,8 +434,8 @@ async def async_writer_task(
         client_sock = socket.socket(fileno=fd)
         client_sock.setblocking(False)
 
-        # Get event loop
-        loop = asyncio.get_event_loop()
+        # Get the currently running event loop
+        loop = asyncio.get_running_loop()
 
         # Create a protocol for the socket (needed for asyncio transport)
         # Use a simple protocol that just tracks connection state
@@ -570,6 +570,8 @@ async def async_writer_task(
             try:
                 transport.close()
             except Exception:
+                # Intentionally ignore errors when closing the transport during cleanup.
+                # The connection may already be closed by the client or network.
                 pass
 
     return bytes_sent, success

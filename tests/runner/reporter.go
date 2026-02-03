@@ -49,7 +49,7 @@ func NewReporter(output io.Writer, format string) *Reporter {
 func (r *Reporter) ReportResult(result TestResult) {
 	switch r.format {
 	case "tap":
-		r.reportTAP(result)
+		// TAP format outputs all results in reportTAPSummary for proper numbering
 	case "json":
 		// JSON outputs at the end
 	default:
@@ -69,9 +69,10 @@ func (r *Reporter) ReportSummary(summary TestSummary) {
 	}
 }
 
-// TAP format (Test Anything Protocol)
-func (r *Reporter) reportTAP(result TestResult) {
-	testNum := 0 // Will be set by caller
+// reportTAP outputs a single test result in TAP format.
+// Note: This method is not used directly; reportTAPSummary handles all TAP output
+// with proper test numbering. This method exists for potential future per-result streaming.
+func (r *Reporter) reportTAP(result TestResult, testNum int) {
 	status := "ok"
 	if !result.Passed {
 		status = "not ok"

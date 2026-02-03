@@ -37,14 +37,15 @@ if [ ! -f "$PHP_DAEMON" ]; then
     exit 1
 fi
 
-# Start mock API
-start_mock_api
+# Start mock API with TLS to test HTTP/2 ALPN path
+start_mock_api_tls
 
-# Start Swoole daemon
+# Start Swoole daemon with TLS + HTTP/2
 log_info "Starting Swoole daemon on $DAEMON_SOCKET..."
 rm -f "$DAEMON_SOCKET"
 
-OPENAI_API_BASE="http://127.0.0.1:$MOCK_API_PORT/v1" \
+OPENAI_API_BASE="https://127.0.0.1:$MOCK_API_PORT/v1" \
+OPENAI_INSECURE_SSL="true" \
     $PHP_CMD "$PHP_DAEMON" \
         --socket "$DAEMON_SOCKET" \
         --mode 0666 \

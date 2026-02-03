@@ -46,6 +46,7 @@ rm -f "$DAEMON_SOCKET"
 
 # Use HTTPS for HTTP/2 connection multiplexing (Swow's curl_multi fix works with TLS)
 OPENAI_API_BASE="https://127.0.0.1:$MOCK_API_PORT/v1" \
+OPENAI_INSECURE_SSL="true" \
     $PHP_CMD "$PHP_DAEMON" \
         --socket "$DAEMON_SOCKET" \
         --mode 0666 \

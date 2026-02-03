@@ -247,7 +247,7 @@ start_mock_api() {
         if ! $tcp_ready; then
             if [ "$use_tls" = "true" ]; then
                 # Use -k for self-signed cert
-                if curl -sk "${tcp_scheme}://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
+                if curl --http2 -sk "${tcp_scheme}://${MOCK_API_TCP_ADDR}/health" > /dev/null 2>&1; then
                     tcp_ready=true
                 fi
             else
