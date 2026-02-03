@@ -17,7 +17,7 @@
 #   sudo ./run_capacity_benchmark.sh go-http2     # Test Go with HTTP/2 multiplexing
 #   sudo ./run_capacity_benchmark.sh --help       # Show help
 #
-# Available daemons: php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, python-http2
+# Available daemons: php, amp-http2, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, uring-http2, python-http2
 #
 
 set -e
@@ -63,8 +63,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Arguments:"
             echo "  daemon    One or more daemons to test:"
-            echo "            php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring"
+            echo "            php, amp-http2, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, uring-http2, python-http2"
             echo ""
+            echo "            php       - AMPHP daemon with HTTP/1.1"
+            echo "            amp-http2 - AMPHP daemon with HTTP/2 multiplexing (HTTPS)"
             echo "            swoole    - Swoole daemon with HTTP/1.1"
             echo "            swoole-http2 - Swoole daemon with HTTP/2 multiplexing (HTTPS)"
             echo "            swow      - Swow daemon with HTTP/1.1"
@@ -85,23 +87,25 @@ while [[ $# -gt 0 ]]; do
             echo "  MAX_BACKLOG=$MAX_BACKLOG"
             echo ""
             echo "Examples:"
-            echo "  sudo $0              # Test all daemons"
+            echo "  sudo $0              # Test all HTTP/2 daemons (default)"
             echo "  sudo $0 rust go      # Test Rust and Go only"
+            echo "  sudo $0 amp-http2    # Test AMPHP with HTTP/2 multiplexing"
             echo "  sudo $0 swoole-http2 # Test Swoole with HTTP/2 multiplexing"
             echo "  sudo $0 swow-http2   # Test Swow with HTTP/2 multiplexing"
             echo "  sudo $0 rust-http2   # Test Rust with HTTP/2 multiplexing"
             echo "  sudo $0 go-http2     # Test Go with HTTP/2 multiplexing"
+            echo "  sudo $0 uring-http2  # Test io_uring with HTTP/2 multiplexing"
             echo "  sudo $0 python-http2 # Test Python with HTTP/2 via PycURL"
             echo ""
             exit 0
             ;;
-        php|swoole|swoole-http2|swow|swow-http2|go|go-http2|rust|rust-http2|uring|uring-http2|python-http2)
+        php|amp-http2|swoole|swoole-http2|swow|swow-http2|go|go-http2|rust|rust-http2|uring|uring-http2|python-http2)
             DAEMONS_TO_RUN+=("$1")
             shift
             ;;
         *)
             echo "Error: Unknown argument '$1'"
-            echo "Valid daemons: php, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, uring-http2, python-http2"
+            echo "Valid daemons: php, amp-http2, swoole, swoole-http2, swow, swow-http2, go, go-http2, rust, rust-http2, uring, uring-http2, python-http2"
             echo "Use --help for usage information."
             exit 1
             ;;
@@ -110,7 +114,7 @@ done
 
 # Default to all daemons if none specified
 if [ ${#DAEMONS_TO_RUN[@]} -eq 0 ]; then
-    DAEMONS_TO_RUN=(php go rust uring)
+    DAEMONS_TO_RUN=(python-http2 amp-http2 swow-http2 swoole-http2 go-http2 rust-http2 uring-http2)
 fi
 
 # Initialize benchmark environment
@@ -485,6 +489,14 @@ if should_run php; then
     RESULT_JSONS[php]="$FOUND_JSON"
 fi
 
+if should_run amp-http2; then
+    # AMPHP HTTP/2 uses HTTPS (TLS) for real-world performance testing
+    find_capacity "amp-http2" "$(get_amp_http2_cmd "llm-api" 0 50000)" "streaming-daemon-amp/streaming_daemon.php" "true"
+    CAPACITY_RESULTS[amp-http2]=$FOUND_CAPACITY
+    LIMITING_FACTORS[amp-http2]="$LIMITING_FACTOR"
+    RESULT_JSONS[amp-http2]="$FOUND_JSON"
+fi
+
 if should_run swoole; then
     find_capacity "swoole" "$(get_swoole_cmd "llm-api" 0 "http1" 50000)" "streaming-daemon-swoole/streaming_daemon.php"
     CAPACITY_RESULTS[swoole]=$FOUND_CAPACITY
@@ -598,7 +610,7 @@ Generated: $(date)
 |--------|-----------------|----------|----------|----------|---------|-----------------|
 EOF
 
-for daemon in rust rust-http2 swoole swoole-http2 swow swow-http2 go go-http2 uring uring-http2 php python-http2; do
+for daemon in rust rust-http2 amp-http2 swoole swoole-http2 swow swow-http2 go go-http2 uring uring-http2 php python-http2; do
     if [ -n "${CAPACITY_RESULTS[$daemon]}" ]; then
         json="${RESULT_JSONS[$daemon]}"
         capacity="${CAPACITY_RESULTS[$daemon]}"
@@ -632,6 +644,8 @@ cat >> "$REPORT_FILE" << 'EOF'
 
 ## HTTP/2 Mode
 
+- **php**: Uses AMPHP with HTTP/1.1 via Unix socket
+- **amp-http2**: Uses AMPHP with HTTP/2 via HTTPS (TLS) and amphp/http-client
 - **swoole**: Uses HTTP/1.1 with TCP connection to mock API
 - **swoole-http2**: Uses HTTP/2 with HTTPS (TLS) for stream multiplexing
 - **swow**: Uses HTTP/1.1 with TCP connection to mock API (via curl)
