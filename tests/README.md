@@ -5,13 +5,17 @@ Functional and integration testing framework for validating streaming daemon imp
 ## Quick Start
 
 ```bash
-# Run all daemon tests
+# Run all daemon tests (Go, Rust, PHP, Swoole, Swow, Python, io_uring)
 make test
 
 # Test a specific daemon
 make test-go
 make test-rust
 make test-php
+make test-swoole
+make test-swow
+make test-python-http2
+make test-uring
 
 # List available test scenarios
 make list

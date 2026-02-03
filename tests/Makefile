@@ -1,16 +1,20 @@
 # Test Framework Makefile
 #
 # Usage:
-#   make test          - Run all daemon tests
+#   make test          - Run all daemon tests (Go, Rust, PHP, Swoole, Swow, Python, io_uring)
 #   make test-go       - Test Go daemon only
 #   make test-rust     - Test Rust daemon only
-#   make test-php      - Test PHP daemon only
-#   make test-category CATEGORY=unicode  - Run specific category
+#   make test-php      - Test PHP AMP daemon only
+#   make test-swoole   - Test PHP Swoole daemon only
+#   make test-swow     - Test PHP Swow daemon only
+#   make test-python-http2 - Test Python HTTP/2 daemon only
+#   make test-uring    - Test C io_uring daemon only
+#   make test-category CATEGORY=unicode  - Run specific category across all daemons
 #   make build         - Build test runner
 #   make clean         - Clean build artifacts
 #   make list          - List available test scenarios
 
-.PHONY: all build test test-go test-rust test-php test-swoole test-swow test-python-http2 test-category list clean help
+.PHONY: all build test test-go test-rust test-php test-swoole test-swow test-python-http2 test-uring test-category list clean help
 
 # Configuration
 FORMAT ?= human
@@ -23,8 +27,8 @@ all: build
 build:
 	go build -o test-runner ./runner
 
-# Run all daemon tests
-test: build test-go test-rust test-php
+# Run all daemon tests (HTTP/2 with TLS)
+test: build test-go test-rust test-php test-swoole test-swow test-python-http2 test-uring
 	@echo "All daemon tests complete"
 
 # Test Go daemon
@@ -57,13 +61,22 @@ test-python-http2: build
 	@chmod +x integration/python_http2_test.sh
 	integration/python_http2_test.sh $(FORMAT) $(CATEGORY)
 
-# Run tests for a specific category
+# Test C io_uring daemon
+test-uring: build
+	@chmod +x integration/uring_test.sh
+	integration/uring_test.sh $(FORMAT) $(CATEGORY)
+
+# Run tests for a specific category across all daemons
 test-category: build
 	@echo "Running $(CATEGORY) tests..."
 	@chmod +x integration/*.sh
 	integration/go_test.sh $(FORMAT) $(CATEGORY) || true
 	integration/rust_test.sh $(FORMAT) $(CATEGORY) || true
 	integration/php_test.sh $(FORMAT) $(CATEGORY) || true
+	integration/swoole_test.sh $(FORMAT) $(CATEGORY) || true
+	integration/swow_test.sh $(FORMAT) $(CATEGORY) || true
+	integration/python_http2_test.sh $(FORMAT) $(CATEGORY) || true
+	integration/uring_test.sh $(FORMAT) $(CATEGORY) || true
 
 # List available test scenarios
 list: build
@@ -94,6 +107,7 @@ help:
 	@echo "  make test-swoole   - Test PHP daemon (Swoole) only"
 	@echo "  make test-swow     - Test PHP daemon (Swow) only"
 	@echo "  make test-python-http2 - Test Python HTTP/2 daemon only"
+	@echo "  make test-uring    - Test C io_uring daemon only"
 	@echo "  make test-tap      - Run tests with TAP output (for CI)"
 	@echo "  make test-json     - Run tests with JSON output (for analysis)"
 	@echo "  make list          - List available test scenarios"

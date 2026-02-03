@@ -37,6 +37,9 @@ cleanup_stale_processes() {
 MOCK_API_PID=""
 DAEMON_PID=""
 
+# Track TLS mode for backend URL
+MOCK_API_TLS=false
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -169,6 +172,7 @@ start_mock_api_tls() {
         return 1
     fi
 
+    MOCK_API_TLS=true
     log_info "Mock API (TLS) running (PID $MOCK_API_PID)"
 }
 
@@ -188,10 +192,16 @@ run_tests() {
 
     build_test_runner
 
+    # Use https:// when TLS mode is active
+    local backend_scheme="http"
+    if [ "$MOCK_API_TLS" = "true" ]; then
+        backend_scheme="https"
+    fi
+
     log_info "Running tests for $daemon_name..."
     "$TEST_RUNNER" \
         -socket "$DAEMON_SOCKET" \
-        -backend "http://127.0.0.1:$MOCK_API_PORT" \
+        -backend "${backend_scheme}://127.0.0.1:$MOCK_API_PORT" \
         -daemon "$daemon_name" \
         -format "$format" \
         -category "$category"
