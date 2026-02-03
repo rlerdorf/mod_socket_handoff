@@ -40,9 +40,10 @@ MAX_BACKLOG=256                 # Kernel accept queue limit (generous)
 
 # Binary search parameters
 INITIAL_HIGH=5000               # Starting upper bound (will expand if passes)
-GRANULARITY=500                 # Stop searching when range < this
+GRANULARITY_PERCENT=5           # Stop when range < this % of midpoint (proportional)
+MIN_GRANULARITY=100             # Minimum granularity floor (absolute)
 MAX_ITERATIONS=20               # Safety limit on search iterations
-STABILITY_RUNS=3                # Number of confirmation runs at final capacity
+STABILITY_RUNS=2                # Number of confirmation runs at final capacity
 
 # Test timing
 WARMUP_CONNECTIONS=100          # Warmup run before search starts
@@ -379,9 +380,19 @@ find_capacity() {
 
     # Phase 2: Binary search between low and high
     echo -e "${YELLOW}Phase 2: Binary search between $low and $high...${NC}"
-    while [ $((high - low)) -ge $GRANULARITY ] && [ $iteration -lt $MAX_ITERATIONS ]; do
+    while [ $iteration -lt $MAX_ITERATIONS ]; do
         iteration=$((iteration + 1))
         local mid=$(( (low + high) / 2 ))
+
+        # Calculate proportional granularity (scales with magnitude)
+        local granularity=$(( mid * GRANULARITY_PERCENT / 100 ))
+        [ $granularity -lt $MIN_GRANULARITY ] && granularity=$MIN_GRANULARITY
+
+        # Check if we've converged
+        if [ $((high - low)) -lt $granularity ]; then
+            echo "  Converged: range ($((high - low))) < ${GRANULARITY_PERCENT}% of $mid ($granularity)"
+            break
+        fi
 
         # Round to nearest 100 for cleaner numbers
         mid=$(( (mid / 100) * 100 ))
@@ -426,10 +437,12 @@ find_capacity() {
 
         if [ $pass_count -lt $STABILITY_RUNS ]; then
             echo "  Stability check failed ($pass_count/$STABILITY_RUNS). Reducing capacity."
-            # Reduce by granularity and report that
-            last_pass=$((last_pass - GRANULARITY))
-            if [ $last_pass -lt 100 ]; then
-                last_pass=100
+            # Reduce by proportional granularity
+            local reduction=$(( last_pass * GRANULARITY_PERCENT / 100 ))
+            [ $reduction -lt $MIN_GRANULARITY ] && reduction=$MIN_GRANULARITY
+            last_pass=$((last_pass - reduction))
+            if [ $last_pass -lt $MIN_GRANULARITY ]; then
+                last_pass=$MIN_GRANULARITY
             fi
         fi
     fi
