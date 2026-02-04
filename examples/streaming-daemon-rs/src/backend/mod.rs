@@ -1,9 +1,11 @@
 //! Backend providers for streaming responses.
 
+mod client;
 mod mock;
 mod openai;
 mod traits;
 
+pub use client::build_streaming_client;
 pub use mock::MockBackend;
 pub use openai::OpenAIBackend;
 pub use traits::{ChunkStream, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend};
@@ -32,16 +34,22 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                     )
                 })?;
 
+            // Build the shared HTTP client
+            let client = build_streaming_client(
+                &config.openai.http2,
+                config.timeout(),
+                config.openai.pool_max_idle_per_host,
+                config.openai.api_socket.as_deref(),
+                config.openai.insecure_ssl,
+                &config.openai.api_base,
+            )?;
+
             Ok(Arc::new(OpenAIBackend::new(
+                client,
                 api_key,
                 config.openai.api_base.clone(),
                 config.default_model.clone(),
-                config.timeout(),
-                config.openai.pool_max_idle_per_host,
-                config.openai.api_socket.clone(),
-                &config.openai.http2,
-                config.openai.insecure_ssl,
-            )?))
+            )))
         }
         other => Err(BackendError::Config(format!(
             "Unknown backend provider: {}. Available: mock, openai",
