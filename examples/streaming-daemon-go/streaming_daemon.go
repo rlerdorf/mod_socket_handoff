@@ -58,7 +58,7 @@ const (
 
 	// DefaultMaxConnections is the default maximum concurrent connections.
 	// Can be overridden with -max-connections flag for benchmarking.
-	DefaultMaxConnections = 1000
+	DefaultMaxConnections = 50000
 
 	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
 	// via the Unix socket. The data originates from the X-Handoff-Data HTTP header.
@@ -365,7 +365,10 @@ func main() {
 			// HTTP/1.1 with Unix socket for high-concurrency (no ephemeral port limits)
 			roundTripper = &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return net.Dial("unix", socketPath)
+					return (&net.Dialer{
+						Timeout:   30 * time.Second,
+						KeepAlive: 30 * time.Second,
+					}).DialContext(ctx, "unix", socketPath)
 				},
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
@@ -388,20 +391,24 @@ func main() {
 		}
 
 		// Create HTTP client with connection pooling
+		// No global Timeout - for streaming responses, we rely on:
+		// - Transport's DialContext timeout (30s) for connection establishment
+		// - Per-write deadlines in streamFromOpenAI for client writes
+		// - Request context for cancellation
 		httpClient = &http.Client{
-			Timeout:   2 * time.Minute,
 			Transport: roundTripper,
 		}
 	}
 
 	// Increase file descriptor limit to handle many concurrent connections.
-	// Each connection needs ~3 fds (client socket, apache conn, internal).
-	// We request 2x max-connections plus some headroom.
+	// Each active stream needs 1 fd for the client socket. Upstream HTTP
+	// connections are pooled (100-500 fds shared across all streams).
+	// Add headroom for the upstream pool, listening socket, and system overhead.
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
 		log.Printf("Warning: could not get fd limit: %v", err)
 	} else {
-		desiredLimit := uint64(*maxConnections*3 + 1000)
+		desiredLimit := uint64(*maxConnections + 2000)
 		if rLimit.Cur < desiredLimit {
 			rLimit.Cur = desiredLimit
 			if rLimit.Max < desiredLimit {
