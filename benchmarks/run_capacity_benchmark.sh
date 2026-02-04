@@ -49,9 +49,41 @@ STABILITY_RUNS=2                # Number of confirmation runs at final capacity
 WARMUP_CONNECTIONS=100          # Warmup run before search starts
 WARMUP_HOLD_SECONDS=10          # Hold time for warmup
 
+# Per-target starting points (default: INITIAL_HIGH)
+# These allow faster convergence by starting closer to known capacity
+declare -A TARGET_START_CONNECTIONS
+TARGET_START_CONNECTIONS[amp-http2]=800
+TARGET_START_CONNECTIONS[swoole-http2]=7000
+TARGET_START_CONNECTIONS[swow-http2]=40000
+TARGET_START_CONNECTIONS[python-http2]=1000
+TARGET_START_CONNECTIONS[go-http2]=60000
+TARGET_START_CONNECTIONS[rust-http2]=80000
+
+# Per-target first increments (default: double)
+# After the first expansion, normal doubling resumes
+declare -A TARGET_FIRST_INCREMENT
+TARGET_FIRST_INCREMENT[amp-http2]=400
+TARGET_FIRST_INCREMENT[swoole-http2]=1500
+TARGET_FIRST_INCREMENT[swow-http2]=10000
+TARGET_FIRST_INCREMENT[python-http2]=1000
+TARGET_FIRST_INCREMENT[go-http2]=10000
+TARGET_FIRST_INCREMENT[rust-http2]=40000
+
 #=============================================================================
 # END CONFIGURABLE THRESHOLDS
 #=============================================================================
+
+# Get starting connections for a target (default: INITIAL_HIGH)
+get_target_start() {
+    local name=$1
+    echo "${TARGET_START_CONNECTIONS[$name]:-$INITIAL_HIGH}"
+}
+
+# Get first increment for a target (0 means use doubling)
+get_target_first_increment() {
+    local name=$1
+    echo "${TARGET_FIRST_INCREMENT[$name]:-0}"
+}
 
 # Parse arguments
 DAEMONS_TO_RUN=()
@@ -87,6 +119,11 @@ while [[ $# -gt 0 ]]; do
             echo "  MAX_RSS_KB=$MAX_RSS_KB KB ($(echo "scale=0; $MAX_RSS_KB/1024" | bc) MB)"
             echo "  MAX_CPU_PCT=$MAX_CPU_PCT%"
             echo "  MAX_BACKLOG=$MAX_BACKLOG"
+            echo ""
+            echo "Per-target starting points (for faster convergence):"
+            echo "  amp-http2: 800, swoole-http2: 7000, swow-http2: 40000"
+            echo "  python-http2: 1000, go-http2: 60000, rust-http2: 80000"
+            echo "  Other targets start at $INITIAL_HIGH (default)"
             echo ""
             echo "Examples:"
             echo "  sudo $0              # Test all HTTP/2 daemons (default)"
@@ -339,7 +376,9 @@ find_capacity() {
     sleep 2
 
     local low=100
-    local high=$INITIAL_HIGH
+    local high=$(get_target_start "$name")
+    local first_increment=$(get_target_first_increment "$name")
+    local expansion_iteration=0
     local iteration=0
     local last_pass=0
     local last_pass_json=""
@@ -364,8 +403,13 @@ find_capacity() {
             last_pass_json="$result_json"
             low=$high
 
-            # Double the upper bound
-            high=$((high * 2))
+            # Expand upper bound (use first_increment on first expansion, then double)
+            expansion_iteration=$((expansion_iteration + 1))
+            if [ $expansion_iteration -eq 1 ] && [ $first_increment -gt 0 ]; then
+                high=$((high + first_increment))
+            else
+                high=$((high * 2))
+            fi
             if [ $high -gt $MAX_CONNECTIONS ]; then
                 high=$MAX_CONNECTIONS
                 if [ $low -eq $MAX_CONNECTIONS ]; then
