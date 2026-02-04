@@ -188,11 +188,13 @@ impl Default for Http2Config {
     fn default() -> Self {
         Self {
             enabled: true, // HTTP/2 is default
-            initial_stream_window_kb: 64,
-            initial_connection_window_kb: 1024,
+            // Large window sizes for high-concurrency SSE streaming
+            // 1MB per stream, 10MB per connection
+            initial_stream_window_kb: 1024,
+            initial_connection_window_kb: 10240,
             adaptive_window: true,
-            keep_alive_interval_secs: 20,
-            keep_alive_timeout_secs: 40,
+            keep_alive_interval_secs: 10,
+            keep_alive_timeout_secs: 20,
         }
     }
 }
@@ -404,11 +406,11 @@ mod tests {
     fn test_default_http2_config() {
         let config = Http2Config::default();
         assert!(config.enabled);
-        assert_eq!(config.initial_stream_window_kb, 64);
-        assert_eq!(config.initial_connection_window_kb, 1024);
+        assert_eq!(config.initial_stream_window_kb, 1024);
+        assert_eq!(config.initial_connection_window_kb, 10240);
         assert!(config.adaptive_window);
-        assert_eq!(config.keep_alive_interval_secs, 20);
-        assert_eq!(config.keep_alive_timeout_secs, 40);
+        assert_eq!(config.keep_alive_interval_secs, 10);
+        assert_eq!(config.keep_alive_timeout_secs, 20);
     }
 
     #[test]

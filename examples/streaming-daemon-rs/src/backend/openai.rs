@@ -6,15 +6,12 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
-use reqwest_eventsource::{Event, EventSource};
+use reqwest_eventsource::{Event, EventSource, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
-use std::time::Duration;
 
 use super::traits::{
     ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend,
 };
-use crate::config::Http2Config;
 use crate::error::BackendError;
 
 /// OpenAI streaming backend.
@@ -26,106 +23,17 @@ pub struct OpenAIBackend {
 }
 
 impl OpenAIBackend {
-    /// Create a new OpenAI backend.
+    /// Create a new OpenAI backend with a pre-configured HTTP client.
     ///
-    /// When HTTP/2 is enabled (default), connections use HTTP/2 multiplexing over TCP,
-    /// allowing ~100 concurrent streams per connection. This dramatically reduces
-    /// connection overhead for high-concurrency scenarios.
-    ///
-    /// When HTTP/2 is disabled, falls back to HTTP/1.1 mode where `api_socket` can be
-    /// used to route connections through a Unix socket for connection pooling.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        api_key: String,
-        api_base: String,
-        default_model: String,
-        timeout: Duration,
-        pool_max_idle_per_host: usize,
-        api_socket: Option<String>,
-        http2_config: &Http2Config,
-        insecure_ssl: bool,
-    ) -> Result<Self, BackendError> {
-        let mut builder = Client::builder()
-            .timeout(timeout)
-            .pool_max_idle_per_host(pool_max_idle_per_host);
-
-        // Allow insecure TLS connections (for testing with self-signed certificates)
-        if insecure_ssl {
-            builder = builder.danger_accept_invalid_certs(true);
-            tracing::warn!("TLS certificate verification disabled (OPENAI_INSECURE_SSL=true)");
-        }
-
-        // Determine if this is an HTTP (not HTTPS) endpoint
-        let is_plaintext = api_base.starts_with("http://");
-
-        // Configure HTTP version
-        if http2_config.enabled {
-            if is_plaintext {
-                // For http:// endpoints, use prior knowledge to skip upgrade negotiation.
-                // This enables h2c (HTTP/2 over cleartext) directly.
-                builder = builder.http2_prior_knowledge();
-                tracing::info!("HTTP/2 with prior knowledge (h2c) enabled for plaintext endpoint");
-            } else {
-                // For https:// endpoints, use ALPN negotiation during TLS handshake.
-                // Cannot use prior_knowledge with TLS - let TLS negotiate h2.
-                tracing::info!("HTTP/2 via ALPN negotiation enabled for TLS endpoint");
-            }
-
-            // Flow control tuning for high concurrency
-            builder = builder
-                .http2_initial_stream_window_size(http2_config.initial_stream_window_kb * 1024)
-                .http2_initial_connection_window_size(
-                    http2_config.initial_connection_window_kb * 1024,
-                );
-
-            if http2_config.adaptive_window {
-                builder = builder.http2_adaptive_window(true);
-            }
-
-            // Keep-alive for connection health
-            if http2_config.keep_alive_interval_secs > 0 {
-                builder = builder
-                    .http2_keep_alive_interval(Duration::from_secs(
-                        http2_config.keep_alive_interval_secs,
-                    ))
-                    .http2_keep_alive_timeout(Duration::from_secs(
-                        http2_config.keep_alive_timeout_secs,
-                    ))
-                    .http2_keep_alive_while_idle(true);
-            }
-
-            tracing::info!(
-                stream_window_kb = http2_config.initial_stream_window_kb,
-                conn_window_kb = http2_config.initial_connection_window_kb,
-                adaptive = http2_config.adaptive_window,
-                keep_alive_secs = http2_config.keep_alive_interval_secs,
-                "HTTP/2 flow control configured"
-            );
-        } else {
-            // HTTP/1.1 fallback mode
-            builder = builder.http1_only();
-            tracing::info!("HTTP/1.1 mode (HTTP/2 disabled)");
-
-            // Unix socket only makes sense for HTTP/1.1 connection pooling.
-            // With HTTP/2, multiplexing happens at the protocol layer over TCP,
-            // so we use TCP connections instead.
-            #[cfg(unix)]
-            if let Some(socket_path) = api_socket {
-                tracing::info!(socket = %socket_path, "Using Unix socket for API connections");
-                builder = builder.unix_socket(socket_path);
-            }
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| BackendError::Connection(e.to_string()))?;
-
-        Ok(Self {
+    /// The client should be created using `build_streaming_client()` which
+    /// configures proper timeouts and HTTP/2 settings for SSE streaming.
+    pub fn new(client: Client, api_key: String, api_base: String, default_model: String) -> Self {
+        Self {
             client,
             api_key,
             api_base,
             default_model,
-        })
+        }
     }
 }
 
@@ -177,7 +85,19 @@ impl StreamingBackend for OpenAIBackend {
 
         let req = req.json(&body);
 
-        let es = EventSource::new(req).map_err(|e| BackendError::Connection(e.to_string()))?;
+        // Create EventSource from the request builder
+        let es = req.eventsource().map_err(|e| {
+            // Log the full error chain for debugging connection issues
+            use std::error::Error;
+            let mut chain = format!("{}", e);
+            let mut source = e.source();
+            while let Some(s) = source {
+                chain.push_str(&format!(" -> {}", s));
+                source = s.source();
+            }
+            tracing::error!(error = %chain, "EventSource creation failed");
+            BackendError::Connection(chain)
+        })?;
 
         Ok(Box::new(OpenAIChunkStream { es }))
     }
@@ -204,7 +124,7 @@ impl StreamingBackend for OpenAIBackend {
     }
 }
 
-/// OpenAI streaming chunk stream.
+/// OpenAI streaming chunk stream using reqwest-eventsource.
 struct OpenAIChunkStream {
     es: EventSource,
 }
@@ -212,7 +132,7 @@ struct OpenAIChunkStream {
 impl ChunkStreamTrait for OpenAIChunkStream {
     fn next(
         &mut self,
-    ) -> Pin<
+    ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
         >,
@@ -220,11 +140,19 @@ impl ChunkStreamTrait for OpenAIChunkStream {
         Box::pin(async move {
             loop {
                 match self.es.next().await {
-                    Some(Ok(Event::Open)) => continue,
+                    Some(Ok(Event::Open)) => {
+                        // Connection opened, continue to next event
+                        continue;
+                    }
                     Some(Ok(Event::Message(msg))) => {
-                        // Check for done marker
+                        // Check for [DONE] marker
                         if msg.data == "[DONE]" {
                             return Some(Ok(StreamChunk::done()));
+                        }
+
+                        // Skip empty data
+                        if msg.data.is_empty() {
+                            continue;
                         }
 
                         // Parse the chunk
@@ -252,6 +180,7 @@ impl ChunkStreamTrait for OpenAIChunkStream {
                                         return Some(Ok(StreamChunk::done()));
                                     }
                                 }
+                                // Empty chunk, continue
                             }
                             Err(e) => {
                                 return Some(Err(BackendError::Parse(format!(
@@ -262,7 +191,16 @@ impl ChunkStreamTrait for OpenAIChunkStream {
                         }
                     }
                     Some(Err(e)) => {
-                        return Some(Err(BackendError::Stream(e.to_string())));
+                        // Log the full error chain for debugging
+                        use std::error::Error;
+                        let mut chain = format!("{}", e);
+                        let mut source = e.source();
+                        while let Some(s) = source {
+                            chain.push_str(&format!(" -> {}", s));
+                            source = s.source();
+                        }
+                        tracing::error!(error = %chain, "SSE stream error");
+                        return Some(Err(BackendError::Stream(chain)));
                     }
                     None => return None,
                 }
