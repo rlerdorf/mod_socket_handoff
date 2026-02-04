@@ -287,6 +287,26 @@ test_daemon() {
 
         # Save to CSV
         echo "$conns,$completed,$failed,$incomplete,$bytes_per_conn,$ttfb_p50,$ttfb_p95,$ttfb_p99,$ttfb_p999,$peak_rss,$avg_cpu,$peak_concurrent,$peak_backlog" >> "$daemon_results"
+
+        # Short-circuit: skip remaining connection levels if this one failed badly
+        # Thresholds: p50 > 1000ms, failures > 10, or peak RSS > 3000MB
+        local skip_remaining=false
+        local skip_reason=""
+        if (( $(echo "$ttfb_p50 > 1000" | bc -l) )); then
+            skip_remaining=true
+            skip_reason="p50 TTFB ${ttfb_p50}ms > 1000ms"
+        elif [ "$failed" -gt 10 ]; then
+            skip_remaining=true
+            skip_reason="$failed failures > 10"
+        elif [ "$peak_rss" -gt 3072000 ]; then
+            skip_remaining=true
+            skip_reason="Peak RSS $(echo "scale=0; $peak_rss/1024" | bc)MB > 3000MB"
+        fi
+
+        if $skip_remaining; then
+            echo -e "${YELLOW}Short-circuit: $skip_reason - skipping higher connection levels${NC}"
+            break
+        fi
     done
 
     cleanup_daemons
