@@ -208,6 +208,8 @@ async fn run_server(config: Config) {
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/models", get(handlers::list_models))
         .route("/health", get(handlers::health))
+        .route("/stats", get(handlers::stats))
+        .route("/stats/reset", post(handlers::stats_reset))
         .with_state(state);
 
     // TCP listener (always start for HTTP/2 multiplexing support)
