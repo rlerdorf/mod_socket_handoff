@@ -11,6 +11,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -47,10 +48,11 @@ type Stats struct {
 	BytesReceived        int64
 
 	// Error categorization (atomic)
-	connectErrors int64
-	sendErrors    int64
-	receiveErrors int64
-	timeoutErrors int64
+	connectErrors       int64
+	sendErrors          int64
+	receiveErrors       int64
+	timeoutErrors       int64
+	incompleteResponses int64 // Responses missing [DONE] marker
 
 	// Latency tracking with sharded collection to reduce contention
 	latencyShards []*latencyShard
@@ -233,6 +235,7 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 	var ttfb time.Duration
 	firstByte := false
 	bytesRead := int64(0)
+	sawDoneMarker := false
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -241,6 +244,10 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 			if !firstByte {
 				ttfb = time.Since(streamStart)
 				firstByte = true
+			}
+			// Check for SSE [DONE] marker indicating complete response
+			if bytes.Contains(line, []byte("[DONE]")) {
+				sawDoneMarker = true
 			}
 		}
 		if err != nil {
@@ -256,6 +263,11 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 			}
 			break
 		}
+	}
+
+	// Track incomplete responses (no [DONE] marker seen, including zero-byte responses)
+	if !sawDoneMarker {
+		atomic.AddInt64(&stats.incompleteResponses, 1)
 	}
 
 	streamDuration := time.Since(streamStart)
@@ -333,11 +345,19 @@ wait:
 func printResults(stats *Stats, outputFile string) {
 	handoff, ttfb, stream := stats.collectLatencies()
 
+	// Calculate bytes per connection for validation
+	var bytesPerConnection float64
+	if stats.ConnectionsCompleted > 0 {
+		bytesPerConnection = float64(stats.BytesReceived) / float64(stats.ConnectionsCompleted)
+	}
+
 	results := map[string]interface{}{
 		"connections_started":   stats.ConnectionsStarted,
 		"connections_completed": stats.ConnectionsCompleted,
 		"connections_failed":    stats.ConnectionsFailed,
 		"bytes_received":        stats.BytesReceived,
+		"incomplete_responses":  stats.incompleteResponses,
+		"bytes_per_connection":  bytesPerConnection,
 		"errors": map[string]int64{
 			"connect": stats.connectErrors,
 			"send":    stats.sendErrors,

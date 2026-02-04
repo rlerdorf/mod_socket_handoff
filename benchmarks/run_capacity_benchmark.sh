@@ -82,6 +82,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Thresholds (edit script to change):"
             echo "  MAX_FAILURE_RATE=$MAX_FAILURE_RATE (failures allowed)"
+            echo "  MAX_INCOMPLETE=0 (any missing [DONE] marker fails)"
             echo "  MAX_TTFB_P99_MS=$MAX_TTFB_P99_MS ms"
             echo "  MAX_RSS_KB=$MAX_RSS_KB KB ($(echo "scale=0; $MAX_RSS_KB/1024" | bc) MB)"
             echo "  MAX_CPU_PCT=$MAX_CPU_PCT%"
@@ -300,6 +301,17 @@ evaluate_run() {
         return 1
     fi
 
+    # Check for incomplete responses (missing [DONE] marker)
+    # The lg.json file is created from the load generator output
+    local lg_file="${json_file%_result.json}_lg.json"
+    if [ -f "$lg_file" ]; then
+        local incomplete=$(jq -r '.incomplete_responses // 0' "$lg_file" 2>/dev/null || echo 0)
+        if [ "$incomplete" -gt 0 ]; then
+            FAIL_REASON="incomplete_responses ($incomplete responses missing [DONE])"
+            return 1
+        fi
+    fi
+
     return 0
 }
 
@@ -487,6 +499,7 @@ echo "Daemons to test: ${DAEMONS_TO_RUN[*]}"
 echo ""
 echo "Thresholds:"
 echo "  Max failures: ${MAX_FAILURE_RATE}%"
+echo "  Max incomplete: 0 (any missing [DONE] marker fails)"
 echo "  Max p99 TTFB: ${MAX_TTFB_P99_MS}ms"
 echo "  Max RSS: $(echo "scale=0; $MAX_RSS_KB/1024" | bc)MB"
 echo "  Max CPU: ${MAX_CPU_PCT}%"

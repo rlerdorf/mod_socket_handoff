@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,11 +7,16 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use bytes::Bytes;
 use futures::stream::{self, StreamExt};
+use serde_json::json;
 
 use crate::patterns::{TestPattern, TestResponseChunks};
 use crate::responses::{health_response, models_response, ResponseChunks};
+
+/// Global request counter for benchmark validation
+static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Shared application state
 pub struct AppState {
@@ -33,6 +39,7 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let delay = state.chunk_delay;
 
     // Check for X-Test-Pattern header
@@ -169,4 +176,26 @@ pub async fn health() -> impl IntoResponse {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(health_response()))
         .expect("failed to build health response")
+}
+
+/// GET /stats
+///
+/// Returns request statistics for benchmark validation.
+/// Allows comparing request counts between daemon implementations
+/// to verify equivalent HTTP/2 multiplexing behavior.
+pub async fn stats() -> impl IntoResponse {
+    Json(json!({
+        "total_requests": REQUEST_COUNT.load(Ordering::Relaxed)
+    }))
+}
+
+/// POST /stats/reset
+///
+/// Resets request statistics. Useful between benchmark runs.
+pub async fn stats_reset() -> impl IntoResponse {
+    REQUEST_COUNT.store(0, Ordering::Relaxed);
+    Json(json!({
+        "reset": true,
+        "total_requests": 0
+    }))
 }

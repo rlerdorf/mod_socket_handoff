@@ -157,7 +157,7 @@ test_daemon() {
     echo -e "==========================================${NC}"
 
     local daemon_results="$RESULTS_DIR/${name}.csv"
-    echo "connections,completed,failed,ttfb_p50,ttfb_p95,ttfb_p99,ttfb_p999,peak_rss_kb,avg_cpu,peak_concurrent,peak_backlog" > "$daemon_results"
+    echo "connections,completed,failed,incomplete,bytes_per_conn,ttfb_p50,ttfb_p95,ttfb_p99,ttfb_p999,peak_rss_kb,avg_cpu,peak_concurrent,peak_backlog" > "$daemon_results"
 
     for conns in "${CONNECTIONS[@]}"; do
         echo ""
@@ -255,6 +255,8 @@ test_daemon() {
         # Parse results using jq
         local completed=$(jq -r '.connections_completed // 0' "$json_file" 2>/dev/null || echo 0)
         local failed=$(jq -r '.connections_failed // 0' "$json_file" 2>/dev/null || echo 0)
+        local incomplete=$(jq -r '.incomplete_responses // 0' "$json_file" 2>/dev/null || echo 0)
+        local bytes_per_conn=$(jq -r '.bytes_per_connection // 0' "$json_file" 2>/dev/null || echo 0)
         local ttfb_p50=$(jq -r '.ttfb_latency_ms.p50 // 0' "$json_file" 2>/dev/null || echo 0)
         local ttfb_p95=$(jq -r '.ttfb_latency_ms.p95 // 0' "$json_file" 2>/dev/null || echo 0)
         local ttfb_p99=$(jq -r '.ttfb_latency_ms.p99 // 0' "$json_file" 2>/dev/null || echo 0)
@@ -284,7 +286,7 @@ test_daemon() {
         echo "Peak concurrent: $peak_concurrent, Peak backlog: $peak_backlog"
 
         # Save to CSV
-        echo "$conns,$completed,$failed,$ttfb_p50,$ttfb_p95,$ttfb_p99,$ttfb_p999,$peak_rss,$avg_cpu,$peak_concurrent,$peak_backlog" >> "$daemon_results"
+        echo "$conns,$completed,$failed,$incomplete,$bytes_per_conn,$ttfb_p50,$ttfb_p95,$ttfb_p99,$ttfb_p999,$peak_rss,$avg_cpu,$peak_concurrent,$peak_backlog" >> "$daemon_results"
     done
 
     cleanup_daemons
@@ -488,13 +490,13 @@ for daemon in php amp-http2 swoole swoole-http2 swow swow-http2 python go go-htt
     if [ -f "$RESULTS_DIR/${daemon}.csv" ]; then
         echo "### ${daemon^}" >> "$RESULTS_DIR/REPORT.md"
         echo "" >> "$RESULTS_DIR/REPORT.md"
-        echo "| Connections | Completed | Failed | TTFB p50 (ms) | TTFB p95 (ms) | TTFB p99 (ms) | TTFB p99.9 (ms) | Peak RSS (MB) | Avg CPU (%) | Peak Concurrent | Peak Backlog |" >> "$RESULTS_DIR/REPORT.md"
-        echo "|-------------|-----------|--------|---------------|---------------|---------------|-----------------|---------------|-------------|-----------------|--------------|" >> "$RESULTS_DIR/REPORT.md"
+        echo "| Connections | Completed | Failed | Incomplete | Bytes/Conn | TTFB p50 (ms) | TTFB p95 (ms) | TTFB p99 (ms) | TTFB p99.9 (ms) | Peak RSS (MB) | Avg CPU (%) | Peak Concurrent | Peak Backlog |" >> "$RESULTS_DIR/REPORT.md"
+        echo "|-------------|-----------|--------|------------|------------|---------------|---------------|---------------|-----------------|---------------|-------------|-----------------|--------------|" >> "$RESULTS_DIR/REPORT.md"
 
-        tail -n +2 "$RESULTS_DIR/${daemon}.csv" | while IFS=',' read -r conns completed failed ttfb50 ttfb95 ttfb99 ttfb999 rss cpu peak backlog; do
+        tail -n +2 "$RESULTS_DIR/${daemon}.csv" | while IFS=',' read -r conns completed failed incomplete bytes_per_conn ttfb50 ttfb95 ttfb99 ttfb999 rss cpu peak backlog; do
             rss_mb=$(echo "scale=1; $rss/1024" | bc 2>/dev/null || echo "$rss")
-            printf "| %s | %s | %s | %.3f | %.3f | %.3f | %.3f | %s | %s | %s | %s |\n" \
-                "$conns" "$completed" "$failed" "$ttfb50" "$ttfb95" "$ttfb99" "$ttfb999" "$rss_mb" "$cpu" "$peak" "$backlog" >> "$RESULTS_DIR/REPORT.md"
+            printf "| %s | %s | %s | %s | %.1f | %.3f | %.3f | %.3f | %.3f | %s | %s | %s | %s |\n" \
+                "$conns" "$completed" "$failed" "$incomplete" "$bytes_per_conn" "$ttfb50" "$ttfb95" "$ttfb99" "$ttfb999" "$rss_mb" "$cpu" "$peak" "$backlog" >> "$RESULTS_DIR/REPORT.md"
         done
         echo "" >> "$RESULTS_DIR/REPORT.md"
     fi
@@ -503,6 +505,8 @@ done
 cat >> "$RESULTS_DIR/REPORT.md" << 'EOF'
 ## Notes
 - TTFB = Time to First Byte (handoff to first SSE message)
+- Incomplete = Responses missing the [DONE] marker (truncated streams)
+- Bytes/Conn = Average bytes received per completed connection (636 expected for 18 chunks)
 - Peak RSS = Peak Resident Set Size from /proc/PID/status VmHWM
 - Peak Concurrent = Maximum simultaneous active streams (from daemon's benchmark summary)
 - Peak Backlog = Maximum pending connections in kernel accept queue (from ss Recv-Q)
