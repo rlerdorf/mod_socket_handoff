@@ -311,6 +311,7 @@ function streamFromOpenAIHttp2(mixed $stream, array $handoffData, string $openai
         $request->setHeader('Content-Type', 'application/json');
         $request->setHeader('Authorization', 'Bearer ' . $openaiKey);
         $request->setTransferTimeout(120);
+        $request->setInactivityTimeout(120);
         $request->setBodySizeLimit(100 * 1024 * 1024); // 100MB for long streams
 
         // Add test pattern header if present (for validation testing)
