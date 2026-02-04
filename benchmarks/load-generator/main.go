@@ -236,6 +236,7 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 	firstByte := false
 	bytesRead := int64(0)
 	sawDoneMarker := false
+	hadReadError := false
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -252,6 +253,7 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 		}
 		if err != nil {
 			if err != io.EOF {
+				hadReadError = true
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					atomic.AddInt64(&stats.timeoutErrors, 1)
 				} else {
@@ -265,8 +267,9 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 		}
 	}
 
-	// Track incomplete responses (no [DONE] marker seen, including zero-byte responses)
-	if !sawDoneMarker {
+	// Track incomplete responses: no [DONE] marker AND no read error
+	// (Read errors are already counted separately as timeout/receive errors)
+	if !sawDoneMarker && !hadReadError {
 		atomic.AddInt64(&stats.incompleteResponses, 1)
 	}
 
@@ -345,24 +348,35 @@ wait:
 func printResults(stats *Stats, outputFile string) {
 	handoff, ttfb, stream := stats.collectLatencies()
 
+	// Load all atomic counters for consistent reads
+	connectionsStarted := atomic.LoadInt64(&stats.ConnectionsStarted)
+	connectionsCompleted := atomic.LoadInt64(&stats.ConnectionsCompleted)
+	connectionsFailed := atomic.LoadInt64(&stats.ConnectionsFailed)
+	bytesReceived := atomic.LoadInt64(&stats.BytesReceived)
+	incompleteResponses := atomic.LoadInt64(&stats.incompleteResponses)
+	connectErrors := atomic.LoadInt64(&stats.connectErrors)
+	sendErrors := atomic.LoadInt64(&stats.sendErrors)
+	receiveErrors := atomic.LoadInt64(&stats.receiveErrors)
+	timeoutErrors := atomic.LoadInt64(&stats.timeoutErrors)
+
 	// Calculate bytes per connection for validation
 	var bytesPerConnection float64
-	if stats.ConnectionsCompleted > 0 {
-		bytesPerConnection = float64(stats.BytesReceived) / float64(stats.ConnectionsCompleted)
+	if connectionsCompleted > 0 {
+		bytesPerConnection = float64(bytesReceived) / float64(connectionsCompleted)
 	}
 
 	results := map[string]interface{}{
-		"connections_started":   stats.ConnectionsStarted,
-		"connections_completed": stats.ConnectionsCompleted,
-		"connections_failed":    stats.ConnectionsFailed,
-		"bytes_received":        stats.BytesReceived,
-		"incomplete_responses":  stats.incompleteResponses,
+		"connections_started":   connectionsStarted,
+		"connections_completed": connectionsCompleted,
+		"connections_failed":    connectionsFailed,
+		"bytes_received":        bytesReceived,
+		"incomplete_responses":  incompleteResponses,
 		"bytes_per_connection":  bytesPerConnection,
 		"errors": map[string]int64{
-			"connect": stats.connectErrors,
-			"send":    stats.sendErrors,
-			"receive": stats.receiveErrors,
-			"timeout": stats.timeoutErrors,
+			"connect": connectErrors,
+			"send":    sendErrors,
+			"receive": receiveErrors,
+			"timeout": timeoutErrors,
 		},
 		"handoff_latency_ms": map[string]float64{
 			"p50":  float64(percentile(handoff, 0.50)) / float64(time.Millisecond),
