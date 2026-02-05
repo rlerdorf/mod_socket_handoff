@@ -1,0 +1,2 @@
+# Disable line length limitations - prefer readability over arbitrary limits
+max_width = 200

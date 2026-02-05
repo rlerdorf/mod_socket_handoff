@@ -38,17 +38,11 @@ impl ErrorReason {
     /// Classify an I/O error into an ErrorReason.
     pub fn from_io_error(err: &io::Error) -> Self {
         match err.kind() {
-            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => {
-                ErrorReason::ClientDisconnected
-            }
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => ErrorReason::ClientDisconnected,
             io::ErrorKind::TimedOut => ErrorReason::Timeout,
             io::ErrorKind::WouldBlock => ErrorReason::Other, // WouldBlock handled by tokio, not a timeout
             io::ErrorKind::Interrupted => ErrorReason::Canceled,
-            io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::AddrInUse
-            | io::ErrorKind::AddrNotAvailable => ErrorReason::Network,
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionAborted | io::ErrorKind::NotConnected | io::ErrorKind::AddrInUse | io::ErrorKind::AddrNotAvailable => ErrorReason::Network,
             _ => {
                 // Check raw OS error for more specific classification
                 if let Some(errno) = err.raw_os_error() {
@@ -124,11 +118,7 @@ pub fn bench_stream_start() {
         if current <= peak {
             break;
         }
-        if BENCH_STATS
-            .peak_streams
-            .compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
+        if BENCH_STATS.peak_streams.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
             break;
         }
     }
@@ -154,136 +144,64 @@ pub fn print_benchmark_summary() {
         return;
     }
     eprintln!("\n=== Benchmark Summary ===");
-    eprintln!(
-        "Peak concurrent streams: {}",
-        BENCH_STATS.peak_streams.load(Ordering::Relaxed)
-    );
-    eprintln!(
-        "Total started: {}",
-        BENCH_STATS.total_started.load(Ordering::Relaxed)
-    );
-    eprintln!(
-        "Total completed: {}",
-        BENCH_STATS.total_completed.load(Ordering::Relaxed)
-    );
-    eprintln!(
-        "Total failed: {}",
-        BENCH_STATS.total_failed.load(Ordering::Relaxed)
-    );
-    eprintln!(
-        "Total bytes sent: {}",
-        BENCH_STATS.total_bytes.load(Ordering::Relaxed)
-    );
+    eprintln!("Peak concurrent streams: {}", BENCH_STATS.peak_streams.load(Ordering::Relaxed));
+    eprintln!("Total started: {}", BENCH_STATS.total_started.load(Ordering::Relaxed));
+    eprintln!("Total completed: {}", BENCH_STATS.total_completed.load(Ordering::Relaxed));
+    eprintln!("Total failed: {}", BENCH_STATS.total_failed.load(Ordering::Relaxed));
+    eprintln!("Total bytes sent: {}", BENCH_STATS.total_bytes.load(Ordering::Relaxed));
     eprintln!("=========================");
 }
 
 /// Initialize metrics descriptions.
 pub fn init_metrics() {
     // Connection metrics
-    describe_gauge!(
-        "daemon_active_connections",
-        "Number of currently active connections"
-    );
-    describe_counter!(
-        "daemon_connections_total",
-        "Total number of connections accepted"
-    );
-    describe_counter!(
-        "daemon_connections_rejected_total",
-        "Connections rejected due to capacity"
-    );
+    describe_gauge!("daemon_active_connections", "Number of currently active connections");
+    describe_counter!("daemon_connections_total", "Total number of connections accepted");
+    describe_counter!("daemon_connections_rejected_total", "Connections rejected due to capacity");
 
     // Handoff metrics
     describe_counter!("daemon_handoffs_total", "Total handoffs received");
     describe_counter!("daemon_handoff_errors_total", "Handoff receive errors");
-    describe_histogram!(
-        "daemon_handoff_duration_seconds",
-        "Time to receive handoff from Apache"
-    );
+    describe_histogram!("daemon_handoff_duration_seconds", "Time to receive handoff from Apache");
 
     // Backend metrics
     describe_counter!("daemon_backend_requests_total", "Backend API requests");
     describe_counter!("daemon_backend_errors_total", "Backend API errors");
-    describe_histogram!(
-        "daemon_backend_duration_seconds",
-        "Backend request duration"
-    );
-    describe_histogram!(
-        "daemon_backend_ttfb_seconds",
-        "Time to first byte from backend"
-    );
+    describe_histogram!("daemon_backend_duration_seconds", "Backend request duration");
+    describe_histogram!("daemon_backend_ttfb_seconds", "Time to first byte from backend");
 
     // Streaming metrics
-    describe_gauge!(
-        "daemon_active_streams",
-        "Number of currently active streaming connections"
-    );
-    describe_gauge!(
-        "daemon_peak_streams",
-        "Peak number of concurrent streaming connections seen"
-    );
+    describe_gauge!("daemon_active_streams", "Number of currently active streaming connections");
+    describe_gauge!("daemon_peak_streams", "Peak number of concurrent streaming connections seen");
     describe_counter!("daemon_bytes_sent_total", "Total bytes sent to clients");
     describe_counter!("daemon_chunks_sent_total", "Total SSE chunks sent");
     describe_counter!("daemon_stream_errors_total", "Stream write errors");
-    describe_histogram!(
-        "daemon_stream_duration_seconds",
-        "Total stream duration per request"
-    );
+    describe_histogram!("daemon_stream_duration_seconds", "Total stream duration per request");
 }
 
 /// Start the Prometheus metrics HTTP server.
 pub async fn start_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
     // Define histogram buckets matching the Go daemon for consistency.
     // Handoff duration: 0.1ms to ~1.6s (exponential buckets base 0.0001, factor 2, count 15)
-    let handoff_buckets: [f64; 15] = [
-        0.0001, 0.0002, 0.0004, 0.0008, 0.0016, 0.0032, 0.0064, 0.0128, 0.0256, 0.0512, 0.1024,
-        0.2048, 0.4096, 0.8192, 1.6384,
-    ];
+    let handoff_buckets: [f64; 15] = [0.0001, 0.0002, 0.0004, 0.0008, 0.0016, 0.0032, 0.0064, 0.0128, 0.0256, 0.0512, 0.1024, 0.2048, 0.4096, 0.8192, 1.6384];
 
     // Stream/backend duration: 10ms to ~163s (exponential buckets base 0.01, factor 2, count 15)
-    let duration_buckets: [f64; 15] = [
-        0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
-        163.84,
-    ];
+    let duration_buckets: [f64; 15] = [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92, 163.84];
 
     // Backend TTFB: 1ms to ~16s (exponential buckets base 0.001, factor 2, count 15)
-    let ttfb_buckets: [f64; 15] = [
-        0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024, 2.048, 4.096,
-        8.192, 16.384,
-    ];
+    let ttfb_buckets: [f64; 15] = [0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024, 2.048, 4.096, 8.192, 16.384];
 
     let builder = PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full(
-                "daemon_handoff_duration_seconds".to_string(),
-            ),
-            &handoff_buckets,
-        )
+        .set_buckets_for_metric(metrics_exporter_prometheus::Matcher::Full("daemon_handoff_duration_seconds".to_string()), &handoff_buckets)
         .expect("valid handoff buckets")
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full(
-                "daemon_stream_duration_seconds".to_string(),
-            ),
-            &duration_buckets,
-        )
+        .set_buckets_for_metric(metrics_exporter_prometheus::Matcher::Full("daemon_stream_duration_seconds".to_string()), &duration_buckets)
         .expect("valid stream buckets")
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full(
-                "daemon_backend_duration_seconds".to_string(),
-            ),
-            &duration_buckets,
-        )
+        .set_buckets_for_metric(metrics_exporter_prometheus::Matcher::Full("daemon_backend_duration_seconds".to_string()), &duration_buckets)
         .expect("valid backend duration buckets")
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full("daemon_backend_ttfb_seconds".to_string()),
-            &ttfb_buckets,
-        )
+        .set_buckets_for_metric(metrics_exporter_prometheus::Matcher::Full("daemon_backend_ttfb_seconds".to_string()), &ttfb_buckets)
         .expect("valid ttfb buckets");
 
-    builder
-        .with_http_listener(addr)
-        .install()
-        .map_err(|e| anyhow::anyhow!("Failed to start metrics server: {}", e))?;
+    builder.with_http_listener(addr).install().map_err(|e| anyhow::anyhow!("Failed to start metrics server: {}", e))?;
 
     tracing::info!(%addr, "Metrics server started");
     Ok(())
@@ -351,8 +269,7 @@ pub fn record_backend_duration(backend: &'static str, duration: std::time::Durat
     if is_benchmark_mode() {
         return;
     }
-    histogram!("daemon_backend_duration_seconds", "backend" => backend)
-        .record(duration.as_secs_f64());
+    histogram!("daemon_backend_duration_seconds", "backend" => backend).record(duration.as_secs_f64());
 }
 
 /// Record time to first byte from backend.
@@ -402,10 +319,7 @@ pub fn record_stream_start() {
         if current <= peak {
             break;
         }
-        if PEAK_STREAMS
-            .compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
+        if PEAK_STREAMS.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
             gauge!("daemon_peak_streams").set(current as f64);
             break;
         }
@@ -436,9 +350,7 @@ pub struct Timer {
 
 impl Timer {
     pub fn new() -> Self {
-        Self {
-            start: Instant::now(),
-        }
+        Self { start: Instant::now() }
     }
 
     pub fn elapsed(&self) -> std::time::Duration {
