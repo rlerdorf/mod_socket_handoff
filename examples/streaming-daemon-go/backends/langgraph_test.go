@@ -276,6 +276,9 @@ func TestAppendJSONValue(t *testing.T) {
 		{"bool true", true, "true"},
 		{"bool false", false, "false"},
 		{"nil", nil, "null"},
+		{"slice", []string{"a", "b"}, `["a","b"]`},
+		{"map", map[string]int{"x": 1}, `{"x":1}`},
+		{"nested map", map[string]any{"key": map[string]int{"nested": 42}}, `{"key":{"nested":42}}`},
 	}
 
 	for _, tt := range tests {

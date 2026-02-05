@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -521,8 +522,9 @@ func mapRoleToLangGraph(role string) string {
 }
 
 // appendJSONValue appends a JSON-encoded value to buf.
-// Handles strings, numbers, booleans, and nil.
-// Uses strconv.Append* functions to avoid allocations.
+// Handles strings, numbers, booleans, nil, and complex types (maps, slices, structs).
+// Uses strconv.Append* functions for primitives to avoid allocations.
+// Falls back to json.Marshal for complex types.
 func appendJSONValue(buf []byte, v any) []byte {
 	switch val := v.(type) {
 	case string:
@@ -544,8 +546,14 @@ func appendJSONValue(buf []byte, v any) []byte {
 	case nil:
 		buf = append(buf, "null"...)
 	default:
-		// For complex types, just use null as a fallback
-		buf = append(buf, "null"...)
+		// For complex types (maps, slices, structs), use json.Marshal
+		jsonBytes, err := json.Marshal(val)
+		if err != nil {
+			log.Printf("Warning: failed to marshal LangGraphInput value: %v", err)
+			buf = append(buf, "null"...)
+		} else {
+			buf = append(buf, jsonBytes...)
+		}
 	}
 	return buf
 }
