@@ -11,7 +11,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -228,15 +231,16 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	body := buildLangGraphRequestBody(handoff, assistantID)
 
 	// Determine endpoint: stateful (with thread_id) or stateless
-	var url string
+	var reqURL string
 	if handoff.ThreadID != "" {
-		url = fmt.Sprintf("%s/threads/%s/runs/stream", langgraphAPIBase, handoff.ThreadID)
+		// URL-escape ThreadID to prevent path traversal attacks
+		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", langgraphAPIBase, url.PathEscape(handoff.ThreadID))
 	} else {
-		url = langgraphAPIBase + "/runs/stream"
+		reqURL = langgraphAPIBase + "/runs/stream"
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
 	}
@@ -473,14 +477,19 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 
 	buf = append(buf, `]`...)
 
-	// Add custom LangGraph input fields if provided
+	// Add custom LangGraph input fields if provided (sorted for deterministic output)
 	if len(handoff.LangGraphInput) > 0 {
-		for key, value := range handoff.LangGraphInput {
+		keys := make([]string, 0, len(handoff.LangGraphInput))
+		for key := range handoff.LangGraphInput {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
 			buf = append(buf, ',')
 			buf = append(buf, '"')
 			buf = appendJSONEscaped(buf, key)
 			buf = append(buf, `":`...)
-			buf = appendJSONValue(buf, value)
+			buf = appendJSONValue(buf, handoff.LangGraphInput[key])
 		}
 	}
 
@@ -513,6 +522,7 @@ func mapRoleToLangGraph(role string) string {
 
 // appendJSONValue appends a JSON-encoded value to buf.
 // Handles strings, numbers, booleans, and nil.
+// Uses strconv.Append* functions to avoid allocations.
 func appendJSONValue(buf []byte, v any) []byte {
 	switch val := v.(type) {
 	case string:
@@ -520,11 +530,11 @@ func appendJSONValue(buf []byte, v any) []byte {
 		buf = appendJSONEscaped(buf, val)
 		buf = append(buf, '"')
 	case int:
-		buf = append(buf, fmt.Sprintf("%d", val)...)
+		buf = strconv.AppendInt(buf, int64(val), 10)
 	case int64:
-		buf = append(buf, fmt.Sprintf("%d", val)...)
+		buf = strconv.AppendInt(buf, val, 10)
 	case float64:
-		buf = append(buf, fmt.Sprintf("%g", val)...)
+		buf = strconv.AppendFloat(buf, val, 'g', -1, 64)
 	case bool:
 		if val {
 			buf = append(buf, "true"...)
