@@ -89,7 +89,7 @@ var (
 	benchmarkMode = flag.Bool("benchmark", false,
 		"Enable benchmark mode: skip Prometheus updates, print summary on shutdown")
 	backendType = flag.String("backend", "",
-		"Backend type: mock, openai, typing (overrides config file)")
+		"Backend type: langgraph, mock, openai, typing (overrides config file)")
 )
 
 // activeBackend holds the initialized backend for streaming

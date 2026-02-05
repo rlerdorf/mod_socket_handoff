@@ -27,6 +27,11 @@ type HandoffData struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Timestamp   int64     `json:"timestamp,omitempty"`
 	TestPattern string    `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
+
+	// LangGraph-specific fields
+	ThreadID       string         `json:"thread_id,omitempty"`       // For stateful runs (uses /threads/{id}/runs/stream)
+	AssistantID    string         `json:"assistant_id,omitempty"`    // Override default assistant ID
+	LangGraphInput map[string]any `json:"langgraph_input,omitempty"` // Custom input fields (seller_id, shop_id, etc.)
 }
 
 // Backend defines the interface for streaming backends.
