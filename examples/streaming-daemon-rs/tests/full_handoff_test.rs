@@ -20,14 +20,7 @@ fn send_fd(socket: &UnixStream, fd_to_send: i32, data: &[u8]) -> std::io::Result
     let fds = [fd_to_send];
     let cmsg = [ControlMessage::ScmRights(&fds)];
 
-    sendmsg::<nix::sys::socket::SockaddrStorage>(
-        socket.as_raw_fd(),
-        &iov,
-        &cmsg,
-        MsgFlags::empty(),
-        None,
-    )
-    .map_err(std::io::Error::other)?;
+    sendmsg::<nix::sys::socket::SockaddrStorage>(socket.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None).map_err(std::io::Error::other)?;
 
     Ok(())
 }
@@ -38,13 +31,7 @@ fn recv_fd(socket: &UnixStream) -> std::io::Result<(i32, Vec<u8>)> {
     let mut cmsg_buf = nix::cmsg_space!([i32; 1]);
     let mut iov = [IoSliceMut::new(&mut data_buf)];
 
-    let msg = recvmsg::<nix::sys::socket::SockaddrStorage>(
-        socket.as_raw_fd(),
-        &mut iov,
-        Some(&mut cmsg_buf),
-        MsgFlags::empty(),
-    )
-    .map_err(std::io::Error::other)?;
+    let msg = recvmsg::<nix::sys::socket::SockaddrStorage>(socket.as_raw_fd(), &mut iov, Some(&mut cmsg_buf), MsgFlags::empty()).map_err(std::io::Error::other)?;
 
     let bytes_received = msg.bytes;
 

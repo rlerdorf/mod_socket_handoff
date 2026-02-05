@@ -4,10 +4,7 @@
 
 use nix::cmsg_space;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::sys::socket::{
-    getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType,
-    ControlMessageOwned, MsgFlags, SockaddrStorage,
-};
+use nix::sys::socket::{getsockopt, recvmsg, setsockopt, sockopt::ReceiveTimeout, sockopt::SockType, ControlMessageOwned, MsgFlags, SockaddrStorage};
 use serde::Deserialize;
 use std::io::IoSliceMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -74,11 +71,7 @@ pub struct HandoffResult {
 /// 3. Extracts the file descriptor from SCM_RIGHTS
 /// 4. Validates the socket type
 /// 5. Parses the JSON handoff data
-pub async fn receive_handoff(
-    stream: UnixStream,
-    timeout: Duration,
-    buffer_size: usize,
-) -> Result<HandoffResult, HandoffError> {
+pub async fn receive_handoff(stream: UnixStream, timeout: Duration, buffer_size: usize) -> Result<HandoffResult, HandoffError> {
     // Wait for readable with timeout. Without this, a peer that connects but
     // never sends data would hang forever, consuming capacity and blocking
     // shutdown drain.
@@ -88,16 +81,12 @@ pub async fn receive_handoff(
         .map_err(|e| HandoffError::ReceiveFailed(e.to_string()))?;
 
     if !ready.is_readable() {
-        return Err(HandoffError::ReceiveFailed(
-            "Socket not readable".to_string(),
-        ));
+        return Err(HandoffError::ReceiveFailed("Socket not readable".to_string()));
     }
 
     // Convert tokio UnixStream to OwnedFd by going through std UnixStream.
     // This transfers ownership cleanly without sharing file descriptions.
-    let std_stream = stream.into_std().map_err(|e| {
-        HandoffError::ReceiveFailed(format!("Failed to convert to std stream: {}", e))
-    })?;
+    let std_stream = stream.into_std().map_err(|e| HandoffError::ReceiveFailed(format!("Failed to convert to std stream: {}", e)))?;
     let owned_fd = OwnedFd::from(std_stream);
 
     // Use block_in_place to run blocking recvmsg without spawn_blocking overhead.
@@ -108,26 +97,18 @@ pub async fn receive_handoff(
 }
 
 /// Blocking recvmsg implementation.
-fn receive_fd_blocking(
-    owned_fd: OwnedFd,
-    timeout: Duration,
-    buffer_size: usize,
-) -> Result<HandoffResult, HandoffError> {
+fn receive_fd_blocking(owned_fd: OwnedFd, timeout: Duration, buffer_size: usize) -> Result<HandoffResult, HandoffError> {
     // Clear O_NONBLOCK on the duplicated fd so SO_RCVTIMEO works correctly.
     // The original tokio UnixStream has O_NONBLOCK set, which we inherit via dup().
     let fd = owned_fd.as_raw_fd();
-    let flags = fcntl(fd, FcntlArg::F_GETFL)
-        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to get fd flags: {}", e)))?;
+    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|e| HandoffError::ReceiveFailed(format!("Failed to get fd flags: {}", e)))?;
     let new_flags = OFlag::from_bits_truncate(flags) & !OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(new_flags))
-        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to clear O_NONBLOCK: {}", e)))?;
+    fcntl(fd, FcntlArg::F_SETFL(new_flags)).map_err(|e| HandoffError::ReceiveFailed(format!("Failed to clear O_NONBLOCK: {}", e)))?;
 
     // Set SO_RCVTIMEO so recvmsg returns even if peer is slow/malicious.
     // This ensures the blocking thread is released and not leaked.
-    let timeval =
-        nix::sys::time::TimeVal::new(timeout.as_secs() as i64, timeout.subsec_micros() as i64);
-    setsockopt(&owned_fd, ReceiveTimeout, &timeval)
-        .map_err(|e| HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e)))?;
+    let timeval = nix::sys::time::TimeVal::new(timeout.as_secs() as i64, timeout.subsec_micros() as i64);
+    setsockopt(&owned_fd, ReceiveTimeout, &timeval).map_err(|e| HandoffError::ReceiveFailed(format!("Failed to set SO_RCVTIMEO: {}", e)))?;
 
     let mut data_buf = vec![0u8; buffer_size];
     let mut cmsg_buf = cmsg_space!([RawFd; 1]);
@@ -137,13 +118,7 @@ fn receive_fd_blocking(
     // Use MSG_CMSG_CLOEXEC to set FD_CLOEXEC on received fds, preventing
     // them from leaking into any future exec calls.
     let fd = owned_fd.as_raw_fd();
-    let msg = recvmsg::<SockaddrStorage>(
-        fd,
-        &mut iov,
-        Some(&mut cmsg_buf),
-        MsgFlags::MSG_CMSG_CLOEXEC,
-    )
-    .map_err(|e| {
+    let msg = recvmsg::<SockaddrStorage>(fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::MSG_CMSG_CLOEXEC).map_err(|e| {
         // Translate SO_RCVTIMEO errors (EAGAIN/EWOULDBLOCK) to Timeout
         use nix::errno::Errno;
         if e == Errno::EAGAIN || e == Errno::EWOULDBLOCK {
@@ -216,12 +191,8 @@ fn parse_handoff_data(data: &[u8]) -> Result<HandoffData, HandoffError> {
     // Trim NUL bytes and whitespace - mod_socket_handoff sends a dummy \0 byte
     // when X-Handoff-Data is omitted, which would otherwise cause parse warnings.
     let trimmed: &[u8] = {
-        let start = data
-            .iter()
-            .position(|&b| b != 0 && !b.is_ascii_whitespace());
-        let end = data
-            .iter()
-            .rposition(|&b| b != 0 && !b.is_ascii_whitespace());
+        let start = data.iter().position(|&b| b != 0 && !b.is_ascii_whitespace());
+        let end = data.iter().rposition(|&b| b != 0 && !b.is_ascii_whitespace());
         match (start, end) {
             (Some(s), Some(e)) => &data[s..=e],
             _ => &[],

@@ -40,9 +40,7 @@ impl ConnectionHandler {
         let _enter = span.enter();
 
         // Wrap in panic catcher
-        let result = AssertUnwindSafe(self.handle_inner(stream, &guard))
-            .catch_unwind()
-            .await;
+        let result = AssertUnwindSafe(self.handle_inner(stream, &guard)).catch_unwind().await;
 
         match result {
             Ok(Ok(())) => {
@@ -65,20 +63,10 @@ impl ConnectionHandler {
         // Note: active connections gauge is updated atomically in ConnectionGuard::drop
     }
 
-    async fn handle_inner(
-        &self,
-        stream: UnixStream,
-        guard: &ConnectionGuard,
-    ) -> Result<(), ConnectionError> {
+    async fn handle_inner(&self, stream: UnixStream, guard: &ConnectionGuard) -> Result<(), ConnectionError> {
         // Receive handoff from Apache (takes ownership of stream)
         let handoff_timer = Timer::new();
-        let handoff = receive_handoff(
-            stream,
-            self.config.handoff_timeout(),
-            self.config.handoff_buffer_size,
-        )
-        .await
-        .map_err(|e| {
+        let handoff = receive_handoff(stream, self.config.handoff_timeout(), self.config.handoff_buffer_size).await.map_err(|e| {
             metrics::record_handoff_error(classify_handoff_error(&e));
             ConnectionError::Handoff(e)
         })?;
@@ -98,11 +86,7 @@ impl ConnectionHandler {
         self.stream_to_client(handoff, guard).await
     }
 
-    async fn stream_to_client(
-        &self,
-        handoff: HandoffResult,
-        guard: &ConnectionGuard,
-    ) -> Result<(), ConnectionError> {
+    async fn stream_to_client(&self, handoff: HandoffResult, guard: &ConnectionGuard) -> Result<(), ConnectionError> {
         let stream_timer = Instant::now();
 
         // Track benchmark stats and stream metrics
@@ -113,32 +97,21 @@ impl ConnectionHandler {
         }
 
         // Destructure handoff to avoid partial move issues
-        let HandoffResult {
-            client_fd,
-            data,
-            raw_data_len: _,
-        } = handoff;
+        let HandoffResult { client_fd, data, raw_data_len: _ } = handoff;
 
         // Convert OwnedFd to std::net::TcpStream using safe ownership transfer (Rust 1.80+)
         let std_stream = std::net::TcpStream::from(client_fd);
 
         // Set non-blocking for tokio
-        std_stream
-            .set_nonblocking(true)
-            .map_err(|e| ConnectionError::Stream(format!("Failed to set non-blocking: {}", e)))?;
+        std_stream.set_nonblocking(true).map_err(|e| ConnectionError::Stream(format!("Failed to set non-blocking: {}", e)))?;
 
-        let tcp_stream = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
-            ConnectionError::Stream(format!("Failed to create tokio stream: {}", e))
-        })?;
+        let tcp_stream = tokio::net::TcpStream::from_std(std_stream).map_err(|e| ConnectionError::Stream(format!("Failed to create tokio stream: {}", e)))?;
 
         // Create SSE writer
         let mut writer = SseWriter::new(tcp_stream, self.config.write_timeout());
 
         // Send HTTP headers
-        writer
-            .send_headers()
-            .await
-            .map_err(|e| ConnectionError::Stream(format!("Failed to send headers: {}", e)))?;
+        writer.send_headers().await.map_err(|e| ConnectionError::Stream(format!("Failed to send headers: {}", e)))?;
 
         // Create stream request
         let request = StreamRequest::from_handoff(&data, guard.id());
@@ -232,10 +205,7 @@ impl ConnectionHandler {
         metrics::record_backend_duration(self.backend.name(), backend_timer.elapsed());
         metrics::record_stream_duration(stream_timer.elapsed());
 
-        tracing::info!(
-            duration_ms = stream_timer.elapsed().as_millis(),
-            "Stream completed"
-        );
+        tracing::info!(duration_ms = stream_timer.elapsed().as_millis(), "Stream completed");
 
         Ok(())
     }
@@ -267,10 +237,6 @@ fn classify_handoff_error(err: &HandoffError) -> ErrorReason {
                 _ => ErrorReason::Other,
             }
         }
-        HandoffError::ReceiveFailed(_)
-        | HandoffError::NoFileDescriptor
-        | HandoffError::InvalidSocketType
-        | HandoffError::ControlMessageTruncated
-        | HandoffError::DataTruncated => ErrorReason::Other,
+        HandoffError::ReceiveFailed(_) | HandoffError::NoFileDescriptor | HandoffError::InvalidSocketType | HandoffError::ControlMessageTruncated | HandoffError::DataTruncated => ErrorReason::Other,
     }
 }

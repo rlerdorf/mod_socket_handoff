@@ -64,9 +64,7 @@ async fn main() -> anyhow::Result<()> {
     // Install rustls crypto provider for TLS support.
     // Required for rustls 0.23+ when using reqwest with rustls-tls feature.
     // Must be done before any TLS connections are made.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
 
     let args = Args::parse();
 
@@ -160,18 +158,14 @@ async fn main() -> anyhow::Result<()> {
         "Waiting for connections to drain"
     );
 
-    let drain_result =
-        tokio::time::timeout(config.server.shutdown_timeout(), shutdown.wait_for_drain()).await;
+    let drain_result = tokio::time::timeout(config.server.shutdown_timeout(), shutdown.wait_for_drain()).await;
 
     match drain_result {
         Ok(()) => {
             tracing::info!("All connections drained");
         }
         Err(_) => {
-            tracing::warn!(
-                active = shutdown.active_connections(),
-                "Shutdown timeout reached, forcing exit"
-            );
+            tracing::warn!(active = shutdown.active_connections(), "Shutdown timeout reached, forcing exit");
         }
     }
 
@@ -184,21 +178,14 @@ async fn main() -> anyhow::Result<()> {
 
 /// Initialize logging with tracing.
 fn init_logging(config: &streaming_daemon_rs::config::LoggingConfig) -> anyhow::Result<()> {
-    let filter =
-        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.level))?;
+    let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.level))?;
 
     match config.format.as_str() {
         "json" => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(fmt::layer().json())
-                .init();
+            tracing_subscriber::registry().with(filter).with(fmt::layer().json()).init();
         }
         _ => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(fmt::layer())
-                .init();
+            tracing_subscriber::registry().with(filter).with(fmt::layer()).init();
         }
     }
 

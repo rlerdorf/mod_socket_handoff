@@ -46,17 +46,10 @@ pub fn build_streaming_client(
     if http2_config.enabled {
         // No timeout for HTTP/2 - streams are long-lived and requests may queue
         // Larger pool to allow more HTTP/2 connections for high concurrency
-        builder = builder
-            .pool_max_idle_per_host(200)
-            .pool_idle_timeout(Duration::from_secs(90));
-        tracing::info!(
-            pool_size = 200,
-            "HTTP/2: no request timeout for SSE streaming"
-        );
+        builder = builder.pool_max_idle_per_host(200).pool_idle_timeout(Duration::from_secs(90));
+        tracing::info!(pool_size = 200, "HTTP/2: no request timeout for SSE streaming");
     } else {
-        builder = builder
-            .timeout(timeout)
-            .pool_max_idle_per_host(pool_max_idle_per_host);
+        builder = builder.timeout(timeout).pool_max_idle_per_host(pool_max_idle_per_host);
     }
 
     // Allow insecure TLS connections (for testing with self-signed certificates)
@@ -87,9 +80,7 @@ pub fn build_streaming_client(
         // HTTP/2 keep-alive settings from config
         if http2_config.keep_alive_interval_secs > 0 {
             builder = builder
-                .http2_keep_alive_interval(Duration::from_secs(
-                    http2_config.keep_alive_interval_secs,
-                ))
+                .http2_keep_alive_interval(Duration::from_secs(http2_config.keep_alive_interval_secs))
                 .http2_keep_alive_timeout(Duration::from_secs(http2_config.keep_alive_timeout_secs))
                 .http2_keep_alive_while_idle(true);
         }
@@ -97,9 +88,7 @@ pub fn build_streaming_client(
         // Flow control window sizes from config
         let stream_window = http2_config.initial_stream_window_kb * 1024;
         let conn_window = http2_config.initial_connection_window_kb * 1024;
-        builder = builder
-            .http2_initial_stream_window_size(stream_window)
-            .http2_initial_connection_window_size(conn_window);
+        builder = builder.http2_initial_stream_window_size(stream_window).http2_initial_connection_window_size(conn_window);
 
         if http2_config.adaptive_window {
             builder = builder.http2_adaptive_window(true);
@@ -131,7 +120,5 @@ pub fn build_streaming_client(
         let _ = api_socket; // Suppress unused warning on non-Unix
     }
 
-    builder
-        .build()
-        .map_err(|e| BackendError::Connection(e.to_string()))
+    builder.build().map_err(|e| BackendError::Connection(e.to_string()))
 }
