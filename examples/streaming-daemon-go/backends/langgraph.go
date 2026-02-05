@@ -228,8 +228,64 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		assistantID = handoff.AssistantID
 	}
 
-	// Build request body
-	body := buildLangGraphRequestBody(handoff, assistantID)
+	// Get buffer from pool and build request JSON manually (same pattern as OpenAI backend)
+	bufPtr := langgraphBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+
+	buf = append(buf, `{"assistant_id":"`...)
+	buf = appendJSONEscaped(buf, assistantID)
+	buf = append(buf, `","input":{"messages":[`...)
+
+	// Use messages array if provided, otherwise fall back to single prompt
+	if len(handoff.Messages) > 0 {
+		for i, msg := range handoff.Messages {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `{"type":"`...)
+			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
+			buf = append(buf, `","content":"`...)
+			buf = appendJSONEscaped(buf, msg.Content)
+			buf = append(buf, `"}`...)
+		}
+	} else {
+		prompt := handoff.Prompt
+		if prompt == "" {
+			prompt = "Hello"
+		}
+		buf = append(buf, `{"type":"human","content":"`...)
+		buf = appendJSONEscaped(buf, prompt)
+		buf = append(buf, `"}`...)
+	}
+
+	buf = append(buf, `]`...)
+
+	// Add custom LangGraph input fields if provided (sorted for deterministic output)
+	if n := len(handoff.LangGraphInput); n > 0 {
+		// Use stack-allocated array for common case (<=8 keys) to avoid heap allocation
+		var stackKeys [8]string
+		var keys []string
+		if n <= 8 {
+			keys = stackKeys[:0]
+		} else {
+			keys = make([]string, 0, n)
+		}
+		for key := range handoff.LangGraphInput {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			buf = append(buf, ',')
+			buf = append(buf, '"')
+			buf = appendJSONEscaped(buf, key)
+			buf = append(buf, `":`...)
+			buf = appendJSONValue(buf, handoff.LangGraphInput[key])
+		}
+	}
+
+	buf = append(buf, `},"stream_mode":["`...)
+	buf = appendJSONEscaped(buf, langgraphStreamMode)
+	buf = append(buf, `"],"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
 	// Determine endpoint: stateful (with thread_id) or stateless
 	var reqURL string
@@ -241,8 +297,10 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(buf))
 	if err != nil {
+		*bufPtr = buf
+		langgraphBufPool.Put(bufPtr)
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -258,6 +316,11 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 
 	// Make request
 	resp, err := langgraphHTTPClient.Do(req)
+
+	// Return buffer to pool after request is sent
+	*bufPtr = buf
+	langgraphBufPool.Put(bufPtr)
+
 	if err != nil {
 		RecordBackendError("langgraph")
 		return 0, fmt.Errorf("http request: %w", err)
@@ -266,7 +329,8 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 
 	if resp.StatusCode != http.StatusOK {
 		RecordBackendError("langgraph")
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		// Limit error body size to prevent memory exhaustion from large error payloads
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -369,7 +433,8 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte,
 	if bytes.HasPrefix(line, []byte("event:")) {
 		eventType = strings.TrimSpace(string(line[6:]))
 	} else {
-		// Unexpected format, skip
+		// Unexpected format, log and skip to avoid silently hiding protocol issues
+		log.Printf("parseLangGraphEvent: unexpected event line format: %q", string(line))
 		return "", nil, nil
 	}
 
@@ -444,6 +509,7 @@ func extractContentFromMessages(data []byte) string {
 }
 
 // buildLangGraphRequestBody builds the JSON request body for a LangGraph API call.
+// This is used by tests; the Stream() method inlines this logic for better performance.
 func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	bufPtr := langgraphBufPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -459,14 +525,12 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 				buf = append(buf, ',')
 			}
 			buf = append(buf, `{"type":"`...)
-			// Map OpenAI roles to LangGraph message types
 			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
 			buf = append(buf, `","content":"`...)
 			buf = appendJSONEscaped(buf, msg.Content)
 			buf = append(buf, `"}`...)
 		}
 	} else {
-		// Legacy: single prompt mode
 		prompt := handoff.Prompt
 		if prompt == "" {
 			prompt = "Hello"
@@ -479,8 +543,15 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	buf = append(buf, `]`...)
 
 	// Add custom LangGraph input fields if provided (sorted for deterministic output)
-	if len(handoff.LangGraphInput) > 0 {
-		keys := make([]string, 0, len(handoff.LangGraphInput))
+	if n := len(handoff.LangGraphInput); n > 0 {
+		// Use stack-allocated array for common case (<=8 keys) to avoid heap allocation
+		var stackKeys [8]string
+		var keys []string
+		if n <= 8 {
+			keys = stackKeys[:0]
+		} else {
+			keys = make([]string, 0, n)
+		}
 		for key := range handoff.LangGraphInput {
 			keys = append(keys, key)
 		}
@@ -498,7 +569,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	buf = appendJSONEscaped(buf, langgraphStreamMode)
 	buf = append(buf, `"],"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
-	// Return buffer to pool (make a copy first since we're returning the content)
+	// Return buffer to pool (make a copy since we're returning the content for tests)
 	result := make([]byte, len(buf))
 	copy(result, buf)
 	*bufPtr = buf
