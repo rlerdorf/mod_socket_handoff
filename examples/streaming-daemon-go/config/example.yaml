@@ -14,7 +14,9 @@ backend:
 
   # OpenAI-compatible API configuration
   openai:
-    # api_key: sk-...  # Or use OPENAI_API_KEY env var
+    # SECURITY: Never store API keys in config files for production.
+    # Use OPENAI_API_KEY environment variable instead (recommended).
+    # api_key: sk-...
     api_base: https://api.openai.com/v1
     # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
     http2_enabled: true

@@ -269,9 +269,10 @@ func main() {
 	if *pprofAddr != "" {
 		cfg.Server.PprofAddr = *pprofAddr
 	}
+	// Metrics flag: empty string disables, non-empty enables and sets address
 	if *metricsAddr != "" {
 		cfg.Metrics.ListenAddr = *metricsAddr
-		cfg.Metrics.Enabled = *metricsAddr != ""
+		cfg.Metrics.Enabled = true
 	}
 	if *backendType != "" {
 		cfg.Backend.Provider = *backendType

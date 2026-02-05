@@ -41,13 +41,18 @@ const (
 // Package-level byte slices to avoid allocation in hot paths
 var contentFieldPattern = []byte(`"content":"`)
 
-// OpenAI configuration (set during Init)
+// OpenAI configuration (set during Init).
+//
+// Thread safety: Init() must be called exactly once at process startup,
+// on a single goroutine, before any Stream() calls. These variables are
+// then read-only during normal operation. Concurrent or repeated calls
+// to Init() are not supported and may cause data races.
 var (
-	openaiAPIBase    string
-	openaiAPIKey     string
-	openaiInsecure   bool
+	openaiAPIBase      string
+	openaiAPIKey       string
+	openaiInsecure     bool
 	openaiDefaultModel string
-	httpClient       *http.Client
+	httpClient         *http.Client
 )
 
 // OpenAI is a backend that streams responses from an OpenAI-compatible API.

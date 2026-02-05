@@ -18,7 +18,8 @@ import (
 )
 
 // fortuneTimeout is the maximum time to wait for fortune command.
-const fortuneTimeout = 2 * time.Second
+// Keep short to avoid resource exhaustion under high concurrency.
+const fortuneTimeout = 500 * time.Millisecond
 
 // sseCharBufPool reuses buffers for SSE character messages.
 var sseCharBufPool = sync.Pool{
@@ -41,7 +42,7 @@ func (t *Typing) Name() string {
 }
 
 func (t *Typing) Description() string {
-	return "Typewriter effect with character-by-character streaming"
+	return "Typewriter effect with character-by-character streaming (uses {char,index} format)"
 }
 
 func (t *Typing) Init(cfg *config.BackendConfig) error {
@@ -78,6 +79,13 @@ The connection handoff is transparent to the client - you see a single HTTP requ
 
 This is the end of my response. Have a great day!`
 	} else {
+		// Check context before spawning fortune process
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+
 		// Unknown prompt - run fortune with timeout
 		fortuneCtx, cancel := context.WithTimeout(ctx, fortuneTimeout)
 		fortune, err := exec.CommandContext(fortuneCtx, "/usr/games/fortune", "literature").Output()
