@@ -85,8 +85,8 @@ typedef struct {
 } socket_handoff_config;
 
 /* Retry configuration defaults */
-#define DEFAULT_MAX_RETRIES 3
-#define RETRY_BASE_DELAY_MS 10  /* Base delay: 10ms, 20ms, 40ms */
+#define DEFAULT_MAX_RETRIES 2
+#define RETRY_BASE_DELAY_MS 10  /* Base delay: 10ms, 20ms */
 
 /* Create per-server config */
 static void *create_server_config(apr_pool_t *p, server_rec *s)
@@ -95,9 +95,9 @@ static void *create_server_config(apr_pool_t *p, server_rec *s)
     conf->enabled = 1;
     conf->enabled_set = 0;
     conf->allowed_socket_prefix = "/var/run/";
-    conf->connect_timeout_ms = 500;
+    conf->connect_timeout_ms = 100;
     conf->connect_timeout_ms_set = 0;
-    conf->send_timeout_ms = 500;
+    conf->send_timeout_ms = 200;
     conf->send_timeout_ms_set = 0;
     conf->max_retries = DEFAULT_MAX_RETRIES;
     conf->max_retries_set = 0;
@@ -229,7 +229,8 @@ static int wait_for_write(int sock, int timeout_ms)
 static int send_fd_with_data(int unix_sock, int fd_to_send,
                              const char *data, size_t data_len,
                              int timeout_ms,
-                             apr_time_t deadline)
+                             apr_time_t deadline,
+                             int *fd_was_sent)
 {
     struct msghdr msg;
     struct iovec iov;
@@ -243,6 +244,8 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     size_t remaining;
     const char *p;
     ssize_t n;
+
+    *fd_was_sent = 0;
 
     memset(&msg, 0, sizeof(msg));
     memset(&control_un, 0, sizeof(control_un));
@@ -289,6 +292,14 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         }
         return -1;
     }
+
+    /*
+     * The fd has been duplicated to the receiving process via SCM_RIGHTS.
+     * From this point on, the caller MUST commit to the handoff (swap in
+     * dummy socket) even if the remaining data sends fail, because the
+     * daemon now holds a live duplicate of the client fd.
+     */
+    *fd_was_sent = 1;
 
     if (data && data_len > 0 && (size_t)sent < data_len) {
         remaining = data_len - (size_t)sent;
@@ -351,15 +362,16 @@ static int connect_to_socket(const char *socket_path,
     *returned_errno = 0;
 
     /*
-     * Use SOCK_NONBLOCK if available (Linux 2.6.27+).
-     * This eliminates one fcntl() call per connection.
+     * Use SOCK_NONBLOCK and SOCK_CLOEXEC if available (Linux 2.6.27+).
+     * SOCK_NONBLOCK eliminates one fcntl() call per connection.
+     * SOCK_CLOEXEC prevents fd leaks to child processes (CGI, piped logs).
      */
 #ifdef SOCK_NONBLOCK
-    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (sock >= 0) {
         sock_nonblock = 1;
     } else if (errno == EINVAL) {
-        /* SOCK_NONBLOCK not supported, fall back */
+        /* SOCK_NONBLOCK/SOCK_CLOEXEC not supported, fall back */
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
     }
 #else
@@ -386,7 +398,7 @@ static int connect_to_socket(const char *socket_path,
 
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
-    /* Set non-blocking for connect with timeout (if not already set via SOCK_NONBLOCK) */
+    /* Set non-blocking and close-on-exec (if not already set via SOCK_NONBLOCK/SOCK_CLOEXEC) */
     if (!sock_nonblock) {
         flags = fcntl(sock, F_GETFL, 0);
         if (flags < 0) {
@@ -403,6 +415,8 @@ static int connect_to_socket(const char *socket_path,
             close(sock);
             return -1;
         }
+        /* Prevent fd leak to child processes (CGI, piped logs) */
+        fcntl(sock, F_SETFD, FD_CLOEXEC);
     }
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -442,11 +456,20 @@ static int connect_to_socket(const char *socket_path,
 
         /* Check for poll error conditions */
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            /* Get the actual error instead of assuming ECONNREFUSED.
+             * Non-transient errors like EACCES should not be retried. */
+            so_error = 0;
+            so_error_len = sizeof(so_error);
+            if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                           &so_error, &so_error_len) == 0 && so_error != 0) {
+                *returned_errno = so_error;
+            } else {
+                *returned_errno = ECONNREFUSED;
+            }
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                "mod_socket_handoff: poll() on connect() to %s indicated error",
-                socket_path);
+                "mod_socket_handoff: connect() to %s failed: %s",
+                socket_path, strerror(*returned_errno));
             close(sock);
-            *returned_errno = ECONNREFUSED;
             return -1;
         }
 
@@ -708,6 +731,7 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     apr_socket_t *client_socket;
     apr_socket_t *dummy_socket = NULL;
     int daemon_sock = -1;
+    int fd_was_sent = 0;
     apr_status_t status = APR_SUCCESS;
     apr_time_t deadline = 0;
     apr_bucket *e;
@@ -737,6 +761,19 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
 
     ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
         "mod_socket_handoff: Handoff requested to %s", socket_path);
+
+    /*
+     * Reject HTTP/2 connections. The module hands off the underlying TCP
+     * socket, but HTTP/2 multiplexes many streams over a single connection.
+     * Handing off the socket would break all other concurrent streams.
+     */
+    if (r->protocol && strncmp(r->protocol, "HTTP/2", 6) == 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "mod_socket_handoff: handoff not supported over HTTP/2 "
+            "(would break other multiplexed streams)");
+        status = HTTP_INTERNAL_SERVER_ERROR;
+        goto cleanup;
+    }
 
     /* Validate socket path for security */
     if (!validate_socket_path(socket_path, conf, r)) {
@@ -804,9 +841,27 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
                           handoff_data,
                           handoff_data ? strlen(handoff_data) : 0,
                           conf->send_timeout_ms,
-                          deadline) < 0) {
+                          deadline,
+                          &fd_was_sent) < 0) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: Failed to send fd: %s", strerror(errno));
+        if (fd_was_sent) {
+            /*
+             * The fd was duplicated to the daemon via SCM_RIGHTS before
+             * the data send failed. We MUST commit to the handoff to
+             * avoid both Apache and the daemon writing to the same
+             * client socket concurrently.
+             */
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "mod_socket_handoff: fd was sent but data transfer "
+                "incomplete; committing handoff to avoid split ownership");
+            close(daemon_sock);
+            daemon_sock = -1;
+            ap_set_core_module_config(c->conn_config, dummy_socket);
+            c->aborted = 1;
+            status = APR_SUCCESS;
+            goto cleanup;
+        }
         status = HTTP_INTERNAL_SERVER_ERROR;
         goto cleanup;
     }
@@ -846,7 +901,44 @@ cleanup:
     }
     ap_remove_output_filter(f);
 
-    return status;
+    if (status != APR_SUCCESS) {
+        /*
+         * Send a proper HTTP error response instead of dropping the
+         * connection. This lets load balancers and clients distinguish
+         * between "daemon unavailable" (503, retry elsewhere) and
+         * "network failure" (connection reset).
+         */
+
+        /* Discard any leftover brigade content (may still have PHP
+         * response if error occurred before the bucket deletion loop) */
+        for (e = APR_BRIGADE_FIRST(bb);
+             e != APR_BRIGADE_SENTINEL(bb);
+             e = next) {
+            next = APR_BUCKET_NEXT(e);
+            apr_bucket_delete(e);
+        }
+
+        r->status = status;
+        r->status_line = NULL; /* Apache computes from status code */
+        apr_table_clear(r->headers_out);
+        apr_table_clear(r->err_headers_out);
+        ap_set_content_type(r, "text/html; charset=utf-8");
+        {
+            const char *body = apr_psprintf(r->pool,
+                "<!DOCTYPE html>\n<html><body>"
+                "<h1>%d %s</h1>"
+                "</body></html>\n",
+                status, ap_get_status_line(status));
+            apr_bucket *b = apr_bucket_transient_create(
+                body, strlen(body), bb->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, b);
+            b = apr_bucket_eos_create(bb->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, b);
+        }
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    return APR_SUCCESS;
 }
 
 /*
@@ -988,21 +1080,21 @@ static const command_rec socket_handoff_cmds[] = {
         set_connect_timeout,
         NULL,
         RSRC_CONF,
-        "Timeout for connecting to handoff daemon in milliseconds (default: 500)"
+        "Timeout for connecting to handoff daemon in milliseconds (default: 100)"
     ),
     AP_INIT_TAKE1(
         "SocketHandoffSendTimeoutMs",
         set_send_timeout,
         NULL,
         RSRC_CONF,
-        "Timeout in ms for sending fd to daemon; uses poll() on non-blocking socket (default: 500)"
+        "Timeout in ms for sending fd to daemon; uses poll() on non-blocking socket (default: 200)"
     ),
     AP_INIT_TAKE1(
         "SocketHandoffMaxRetries",
         set_max_retries,
         NULL,
         RSRC_CONF,
-        "Max retries for transient connect errors like ENOENT/ECONNREFUSED (default: 3)"
+        "Max retries for transient connect errors like ENOENT/ECONNREFUSED (default: 2)"
     ),
     {NULL}
 };

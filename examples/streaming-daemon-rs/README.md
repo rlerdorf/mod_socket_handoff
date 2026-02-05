@@ -153,7 +153,7 @@ Ensure `mod_socket_handoff` is enabled and configured:
 # /etc/apache2/mods-enabled/socket_handoff.conf
 SocketHandoffEnabled On
 SocketHandoffAllowedPrefix /run/
-SocketHandoffConnectTimeoutMs 500
+SocketHandoffConnectTimeoutMs 100
 ```
 
 Note: The systemd service uses `RuntimeDirectory` which creates the socket under
