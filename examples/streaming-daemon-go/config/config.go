@@ -31,9 +31,10 @@ type BackendConfig struct {
 	DefaultModel string `yaml:"default_model"`
 
 	// Backend-specific configuration sections
-	OpenAI OpenAIConfig `yaml:"openai"`
-	Mock   MockConfig   `yaml:"mock"`
-	Typing TypingConfig `yaml:"typing"`
+	OpenAI    OpenAIConfig    `yaml:"openai"`
+	LangGraph LangGraphConfig `yaml:"langgraph"`
+	Mock      MockConfig      `yaml:"mock"`
+	Typing    TypingConfig    `yaml:"typing"`
 }
 
 // OpenAIConfig contains OpenAI-compatible API settings.
@@ -41,6 +42,17 @@ type OpenAIConfig struct {
 	APIKey       string `yaml:"api_key"`
 	APIBase      string `yaml:"api_base"`
 	APISocket    string `yaml:"api_socket"`
+	HTTP2Enabled *bool  `yaml:"http2_enabled"` // Pointer to distinguish unset from false
+	InsecureSSL  bool   `yaml:"insecure_ssl"`
+}
+
+// LangGraphConfig contains LangGraph Platform API settings.
+type LangGraphConfig struct {
+	APIKey       string `yaml:"api_key"`
+	APIBase      string `yaml:"api_base"`
+	APISocket    string `yaml:"api_socket"`
+	AssistantID  string `yaml:"assistant_id"`
+	StreamMode   string `yaml:"stream_mode"`
 	HTTP2Enabled *bool  `yaml:"http2_enabled"` // Pointer to distinguish unset from false
 	InsecureSSL  bool   `yaml:"insecure_ssl"`
 }
@@ -103,6 +115,9 @@ func (c *Config) Validate() error {
 	if c.Backend.OpenAI.APISocket != "" && !filepath.IsAbs(c.Backend.OpenAI.APISocket) {
 		return fmt.Errorf("backend.openai.api_socket must be absolute path")
 	}
+	if c.Backend.LangGraph.APISocket != "" && !filepath.IsAbs(c.Backend.LangGraph.APISocket) {
+		return fmt.Errorf("backend.langgraph.api_socket must be absolute path")
+	}
 
 	// Validate metrics config
 	if c.Metrics.Enabled && c.Metrics.ListenAddr == "" {
@@ -134,6 +149,12 @@ func Default() *Config {
 			DefaultModel: "gpt-4o-mini",
 			OpenAI: OpenAIConfig{
 				APIBase:      "https://api.openai.com/v1",
+				HTTP2Enabled: &http2,
+			},
+			LangGraph: LangGraphConfig{
+				APIBase:      "https://api.langchain.com/v1",
+				AssistantID:  "agent",
+				StreamMode:   "messages-tuple",
 				HTTP2Enabled: &http2,
 			},
 			Mock: MockConfig{

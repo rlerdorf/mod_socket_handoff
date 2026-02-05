@@ -8,7 +8,7 @@ server:
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
 
 backend:
-  # Available providers: mock, openai, typing
+  # Available providers: langgraph, mock, openai, typing
   provider: openai
   default_model: gpt-4o-mini
 
@@ -19,6 +19,18 @@ backend:
     # api_key: sk-...
     api_base: https://api.openai.com/v1
     # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
+    http2_enabled: true
+    insecure_ssl: false
+
+  # LangGraph Platform API configuration
+  langgraph:
+    # SECURITY: Never store API keys in config files for production.
+    # Use LANGGRAPH_API_KEY environment variable instead (recommended).
+    # api_key: lgk_...
+    api_base: https://api.langchain.com/v1
+    # api_socket: /var/run/langgraph-proxy.sock  # Unix socket for high concurrency
+    assistant_id: agent
+    stream_mode: messages-tuple
     http2_enabled: true
     insecure_ssl: false
 

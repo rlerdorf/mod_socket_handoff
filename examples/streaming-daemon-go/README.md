@@ -15,7 +15,7 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go
 
 ## Features
 
-- **Backend plugin architecture** - Extensible backends (mock, openai, typing) with Caddy-style `init()` registration
+- **Backend plugin architecture** - Extensible backends (langgraph, mock, openai, typing) with Caddy-style `init()` registration
 - **YAML configuration** - Optional config file with flag overrides
 - **Goroutine-per-connection** - Lightweight concurrency for high throughput
 - **SCM_RIGHTS fd receiving** - Portable buffer sizing with `syscall.CmsgSpace`
@@ -52,6 +52,9 @@ sudo ./streaming-daemon
 # Run with OpenAI backend
 OPENAI_API_KEY=sk-... sudo ./streaming-daemon -backend openai
 
+# Run with LangGraph backend
+LANGGRAPH_API_KEY=lgk_... sudo ./streaming-daemon -backend langgraph
+
 # Run with config file
 sudo ./streaming-daemon -config config/local.yaml
 
@@ -67,6 +70,7 @@ The daemon supports multiple streaming backends via a plugin architecture. Backe
 
 | Backend | Description | Use Case |
 |---------|-------------|----------|
+| `langgraph` | LangGraph Platform API | Stateful agents with conversation threads |
 | `mock` | Fixed demo messages with configurable delay | Testing, benchmarking |
 | `openai` | OpenAI-compatible streaming API | GPT-4, Groq, Ollama, any OpenAI-compatible API |
 | `typing` | Character-by-character typewriter effect | Demos, fortune integration |
@@ -112,6 +116,43 @@ Configuration options:
 | `-openai-socket` | `OPENAI_API_SOCKET` | `backend.openai.api_socket` | Unix socket for API |
 | `-http2-enabled` | `OPENAI_HTTP2_ENABLED` | `backend.openai.http2_enabled` | Enable HTTP/2 |
 
+### LangGraph Backend
+
+Streams responses from the LangGraph Platform API. Supports both stateless runs and stateful conversation threads.
+
+```bash
+# Basic usage
+LANGGRAPH_API_KEY=lgk_... ./streaming-daemon -backend langgraph
+
+# Custom assistant
+LANGGRAPH_API_KEY=lgk_... ./streaming-daemon -backend langgraph \
+    -langgraph-assistant my-agent
+
+# Self-hosted LangGraph
+LANGGRAPH_API_KEY=lgk_... ./streaming-daemon -backend langgraph \
+    -langgraph-base http://localhost:8000
+```
+
+Configuration options:
+
+| Flag | Env Var | Config Key | Description |
+|------|---------|------------|-------------|
+| `-langgraph-base` | `LANGGRAPH_API_BASE` | `backend.langgraph.api_base` | API base URL |
+| - | `LANGGRAPH_API_KEY` | `backend.langgraph.api_key` | API key |
+| `-langgraph-socket` | `LANGGRAPH_API_SOCKET` | `backend.langgraph.api_socket` | Unix socket for API |
+| `-langgraph-assistant` | `LANGGRAPH_ASSISTANT_ID` | `backend.langgraph.assistant_id` | Default assistant ID |
+| - | `LANGGRAPH_STREAM_MODE` | `backend.langgraph.stream_mode` | Stream mode (default: messages-tuple) |
+| - | `LANGGRAPH_HTTP2_ENABLED` | `backend.langgraph.http2_enabled` | Enable HTTP/2 |
+| - | `LANGGRAPH_INSECURE_SSL` | `backend.langgraph.insecure_ssl` | Skip TLS verification |
+
+LangGraph-specific handoff data fields:
+
+| Field | Description |
+|-------|-------------|
+| `thread_id` | Thread ID for stateful conversations (uses `/threads/{id}/runs/stream`) |
+| `assistant_id` | Override the default assistant ID |
+| `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
+
 ### Typing Backend
 
 Streams characters one at a time with realistic typing delays. Uses `/usr/games/fortune` for dynamic content when the prompt isn't recognized.
@@ -122,7 +163,7 @@ Streams characters one at a time with realistic typing delays. Uses `/usr/games/
 
 ### Adding New Backends
 
-To add a new backend (e.g., Anthropic, LangGraph):
+To add a new backend (e.g., Anthropic):
 
 1. Create `backends/anthropic.go`
 2. Implement the `Backend` interface:
@@ -173,6 +214,13 @@ backend:
     api_base: https://api.openai.com/v1
     http2_enabled: true
 
+  langgraph:
+    # api_key: lgk_...  # Better to use LANGGRAPH_API_KEY env var
+    api_base: https://api.langchain.com/v1
+    assistant_id: agent
+    stream_mode: messages-tuple
+    http2_enabled: true
+
   mock:
     message_delay_ms: 50
 
@@ -207,7 +255,7 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | `-socket` | `/var/run/streaming-daemon.sock` | Unix socket path |
 | `-socket-mode` | `0660` | Socket permission mode |
 | `-max-connections` | `50000` | Max concurrent connections |
-| `-backend` | `mock` | Backend: mock, openai, typing |
+| `-backend` | `mock` | Backend: langgraph, mock, openai, typing |
 | `-metrics-addr` | `127.0.0.1:9090` | Metrics server address (empty to disable) |
 | `-pprof-addr` | - | pprof server address (empty to disable) |
 | `-benchmark` | `false` | Enable benchmark mode |
@@ -215,6 +263,9 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | `-openai-base` | - | OpenAI API base URL |
 | `-openai-socket` | - | Unix socket for OpenAI API |
 | `-http2-enabled` | `true` | Enable HTTP/2 for upstream |
+| `-langgraph-base` | - | LangGraph API base URL |
+| `-langgraph-socket` | - | Unix socket for LangGraph API |
+| `-langgraph-assistant` | - | LangGraph assistant ID |
 
 ### Signals
 
@@ -231,10 +282,13 @@ streaming-daemon-go/
 ├── go.sum
 ├── backends/
 │   ├── backend.go           # Backend interface + registry
+│   ├── langgraph.go         # LangGraph Platform API backend
+│   ├── langgraph_test.go    # LangGraph backend tests
 │   ├── mock.go              # Mock demo backend
 │   ├── openai.go            # OpenAI streaming backend
 │   ├── typing.go            # Typewriter effect backend
-│   └── sse.go               # Shared SSE utilities
+│   ├── sse.go               # Shared SSE utilities
+│   └── metrics.go           # Backend metrics helpers
 └── config/
     ├── config.go            # Config structs and loader
     └── example.yaml         # Example configuration
