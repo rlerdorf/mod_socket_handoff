@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -95,17 +94,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.max_connections must be non-negative")
 	}
 
-	// Validate socket path for security (prevent path traversal)
-	if c.Server.SocketPath != "" {
-		// Must be absolute path
-		if !filepath.IsAbs(c.Server.SocketPath) {
-			return fmt.Errorf("server.socket_path must be absolute path")
-		}
-		// Check for path traversal attempts
-		cleaned := filepath.Clean(c.Server.SocketPath)
-		if strings.Contains(cleaned, "..") {
-			return fmt.Errorf("server.socket_path contains invalid path components")
-		}
+	// Validate socket paths for security.
+	// Requiring absolute paths prevents path traversal; filepath.Clean()
+	// (used by callers) normalizes any ".." components.
+	if c.Server.SocketPath != "" && !filepath.IsAbs(c.Server.SocketPath) {
+		return fmt.Errorf("server.socket_path must be absolute path")
+	}
+	if c.Backend.OpenAI.APISocket != "" && !filepath.IsAbs(c.Backend.OpenAI.APISocket) {
+		return fmt.Errorf("backend.openai.api_socket must be absolute path")
 	}
 
 	// Validate metrics config

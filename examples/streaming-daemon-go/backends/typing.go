@@ -21,6 +21,26 @@ import (
 // Keep short to avoid resource exhaustion under high concurrency.
 const fortuneTimeout = 500 * time.Millisecond
 
+// fortuneRateLimit limits fortune command invocations to avoid fork bombing.
+// Under high load, fallback responses are used instead.
+var (
+	fortuneLastCall time.Time
+	fortuneMu       sync.Mutex
+	fortuneMinGap   = 10 * time.Millisecond // Max ~100 fortune calls/second
+)
+
+// fallbackResponses are used when fortune is unavailable or rate-limited.
+var fallbackResponses = []string{
+	"the best way to predict the future is to invent it.",
+	"simplicity is the ultimate sophistication.",
+	"a journey of a thousand miles begins with a single step.",
+	"the only way to do great work is to love what you do.",
+	"in the middle of difficulty lies opportunity.",
+	"imagination is more important than knowledge.",
+	"the mind is everything. What you think you become.",
+	"it does not matter how slowly you go as long as you do not stop.",
+}
+
 // sseCharBufPool reuses buffers for SSE character messages.
 var sseCharBufPool = sync.Pool{
 	New: func() any {
@@ -86,26 +106,43 @@ This is the end of my response. Have a great day!`
 		default:
 		}
 
-		// Unknown prompt - run fortune with timeout
-		fortuneCtx, cancel := context.WithTimeout(ctx, fortuneTimeout)
-		fortune, err := exec.CommandContext(fortuneCtx, "/usr/games/fortune", "literature").Output()
-		cancel()
-		if err != nil {
-			fortune = []byte("(fortune command not available)")
-		}
-		fortuneStr := string(fortune)
+		var fortuneStr string
 
-		// Remove attribution (lines starting with -- or tabs followed by --)
-		lines := strings.Split(fortuneStr, "\n")
-		var cleanLines []string
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "--") {
-				break // Stop at attribution
-			}
-			cleanLines = append(cleanLines, line)
+		// Rate-limit fortune calls to avoid fork bombing under high load
+		fortuneMu.Lock()
+		canCallFortune := time.Since(fortuneLastCall) >= fortuneMinGap
+		if canCallFortune {
+			fortuneLastCall = time.Now()
 		}
-		fortuneStr = strings.Join(cleanLines, " ")
+		fortuneMu.Unlock()
+
+		if canCallFortune {
+			// Try fortune command with timeout
+			fortuneCtx, cancel := context.WithTimeout(ctx, fortuneTimeout)
+			fortune, err := exec.CommandContext(fortuneCtx, "/usr/games/fortune", "literature").Output()
+			cancel()
+			if err == nil {
+				fortuneStr = string(fortune)
+				// Remove attribution (lines starting with -- or tabs followed by --)
+				lines := strings.Split(fortuneStr, "\n")
+				var cleanLines []string
+				for _, line := range lines {
+					trimmed := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmed, "--") {
+						break // Stop at attribution
+					}
+					cleanLines = append(cleanLines, line)
+				}
+				fortuneStr = strings.Join(cleanLines, " ")
+			}
+		}
+
+		// Use fallback if fortune failed or was rate-limited
+		if fortuneStr == "" {
+			// Pick a fallback based on current time for variety
+			idx := int(time.Now().UnixNano()) % len(fallbackResponses)
+			fortuneStr = fallbackResponses[idx]
+		}
 
 		// Clean up whitespace: collapse multiple spaces, trim
 		fortuneStr = strings.Join(strings.Fields(fortuneStr), " ")
