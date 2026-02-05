@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+
+	"examples/backends"
 )
 
 // sendFd sends a file descriptor over a Unix socket along with data.
@@ -270,7 +272,7 @@ func TestHandoffDataParsing(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var data HandoffData
+			var data backends.HandoffData
 			if err := json.Unmarshal([]byte(tc.json), &data); err != nil {
 				t.Fatalf("Unmarshal failed: %v", err)
 			}

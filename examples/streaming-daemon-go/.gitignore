@@ -1,0 +1,8 @@
+# Compiled binary
+streaming-daemon
+
+# Local config files (may contain API keys)
+config/local.yaml
+config/local.yml
+*.local.yaml
+*.local.yml
