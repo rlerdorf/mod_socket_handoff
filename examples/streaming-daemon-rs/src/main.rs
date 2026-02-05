@@ -102,11 +102,11 @@ async fn main() -> anyhow::Result<()> {
             );
             config.server.max_connections = max_from_fds;
         }
-    } else {
-        eprintln!(
-            "Warning: fd limit ({}) is at or below reserve ({}), cannot cap max_connections ({})",
-            fd_limit, FD_RESERVE, config.server.max_connections
-        );
+    } else if fd_limit > 0 {
+        // fd limit is critically low; cap to what's available
+        let max_from_fds = (fd_limit - 1) as usize; // leave at least 1 for the listener
+        eprintln!("Warning: fd limit ({}) is at or below reserve ({}), capping max_connections to {}", fd_limit, FD_RESERVE, max_from_fds);
+        config.server.max_connections = max_from_fds;
     }
 
     // Initialize logging
@@ -221,6 +221,7 @@ fn increase_fd_limit() -> u64 {
         let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
         if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) == 0 {
             let mut rlim = rlim.assume_init();
+            let original_cur = rlim.rlim_cur;
             if rlim.rlim_cur < DESIRED_LIMIT {
                 rlim.rlim_cur = DESIRED_LIMIT;
                 if rlim.rlim_max < DESIRED_LIMIT {
@@ -237,7 +238,8 @@ fn increase_fd_limit() -> u64 {
             if libc::getrlimit(libc::RLIMIT_NOFILE, actual.as_mut_ptr()) == 0 {
                 return actual.assume_init().rlim_cur;
             }
-            return rlim.rlim_cur;
+            // Second getrlimit failed; return what we know was the original
+            return original_cur;
         }
     }
     // Fallback: assume a conservative default

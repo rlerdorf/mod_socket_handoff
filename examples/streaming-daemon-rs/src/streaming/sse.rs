@@ -30,6 +30,7 @@ X-Accel-Buffering: no\r\n\
 \r\n";
 
 /// Format an HTTP error response with the given status code and reason.
+/// The reason is sanitized to prevent HTTP response splitting.
 pub fn format_error_response(status: u16, reason: &str) -> String {
     let status_text = match status {
         502 => "Bad Gateway",
@@ -37,7 +38,9 @@ pub fn format_error_response(status: u16, reason: &str) -> String {
         504 => "Gateway Timeout",
         _ => "Internal Server Error",
     };
-    let body = format!("{}: {}\n", status_text, reason);
+    // Sanitize reason to prevent HTTP response splitting
+    let safe_reason: String = reason.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+    let body = format!("{}: {}\n", status_text, safe_reason);
     format!(
         "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,

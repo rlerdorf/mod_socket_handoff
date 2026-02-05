@@ -56,7 +56,9 @@ impl SseWriter {
     /// Used when the backend is unavailable before headers are sent.
     pub async fn send_error_response(&mut self, status: u16, reason: &str) {
         let response = format_error_response(status, reason);
-        let _ = self.write_with_timeout(response.as_bytes()).await;
+        if let Err(e) = self.write_with_timeout(response.as_bytes()).await {
+            tracing::debug!(status, error = %e, "Failed to send error response to client");
+        }
     }
 
     /// Write raw bytes with timeout.

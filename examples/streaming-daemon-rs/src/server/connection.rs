@@ -120,6 +120,9 @@ impl ConnectionHandler {
 
         // Create backend stream BEFORE sending headers so we can return a
         // proper HTTP error (502/504) if the backend is unavailable.
+        // This timeout covers stream *creation* only (connection establishment
+        // and initial response). Individual chunk write timeouts are governed
+        // by write_timeout_secs via SseWriter.
         let backend_timer = Timer::new();
         let mut ttfb_recorded = false;
 
