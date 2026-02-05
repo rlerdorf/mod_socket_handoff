@@ -68,4 +68,29 @@ mod tests {
         let error = format_sse_error("test error");
         assert!(String::from_utf8_lossy(&error).contains("error"));
     }
+
+    #[test]
+    fn test_format_error_response_502() {
+        let resp = format_error_response(502, "Backend unavailable");
+        assert!(resp.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(resp.contains("Content-Type: text/plain\r\n"));
+        assert!(resp.contains("Connection: close\r\n"));
+        assert!(resp.contains("Bad Gateway: Backend unavailable"));
+        // Verify Content-Length matches actual body
+        let body = "Bad Gateway: Backend unavailable\n";
+        assert!(resp.contains(&format!("Content-Length: {}\r\n", body.len())));
+    }
+
+    #[test]
+    fn test_format_error_response_504() {
+        let resp = format_error_response(504, "Backend timeout");
+        assert!(resp.starts_with("HTTP/1.1 504 Gateway Timeout\r\n"));
+        assert!(resp.contains("Gateway Timeout: Backend timeout"));
+    }
+
+    #[test]
+    fn test_format_error_response_unknown_status() {
+        let resp = format_error_response(500, "Something broke");
+        assert!(resp.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    }
 }

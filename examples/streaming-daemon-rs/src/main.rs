@@ -102,6 +102,11 @@ async fn main() -> anyhow::Result<()> {
             );
             config.server.max_connections = max_from_fds;
         }
+    } else {
+        eprintln!(
+            "Warning: fd limit ({}) is at or below reserve ({}), cannot cap max_connections ({})",
+            fd_limit, FD_RESERVE, config.server.max_connections
+        );
     }
 
     // Initialize logging
