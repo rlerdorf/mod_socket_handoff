@@ -386,6 +386,11 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		case "metadata", "values", "updates":
 			// These event types don't contain streamable content
 			continue
+		default:
+			// Log unknown event types for forward compatibility debugging
+			if eventType != "" {
+				log.Printf("LangGraph: unknown event type %q, skipping", eventType)
+			}
 		}
 	}
 
@@ -603,8 +608,26 @@ func appendJSONValue(buf []byte, v any) []byte {
 		buf = append(buf, '"')
 	case int:
 		buf = strconv.AppendInt(buf, int64(val), 10)
+	case int8:
+		buf = strconv.AppendInt(buf, int64(val), 10)
+	case int16:
+		buf = strconv.AppendInt(buf, int64(val), 10)
+	case int32:
+		buf = strconv.AppendInt(buf, int64(val), 10)
 	case int64:
 		buf = strconv.AppendInt(buf, val, 10)
+	case uint:
+		buf = strconv.AppendUint(buf, uint64(val), 10)
+	case uint8:
+		buf = strconv.AppendUint(buf, uint64(val), 10)
+	case uint16:
+		buf = strconv.AppendUint(buf, uint64(val), 10)
+	case uint32:
+		buf = strconv.AppendUint(buf, uint64(val), 10)
+	case uint64:
+		buf = strconv.AppendUint(buf, val, 10)
+	case float32:
+		buf = strconv.AppendFloat(buf, float64(val), 'g', -1, 32)
 	case float64:
 		buf = strconv.AppendFloat(buf, val, 'g', -1, 64)
 	case bool:
