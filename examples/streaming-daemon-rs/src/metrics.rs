@@ -41,7 +41,8 @@ impl ErrorReason {
             io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => {
                 ErrorReason::ClientDisconnected
             }
-            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => ErrorReason::Timeout,
+            io::ErrorKind::TimedOut => ErrorReason::Timeout,
+            io::ErrorKind::WouldBlock => ErrorReason::Other, // WouldBlock handled by tokio, not a timeout
             io::ErrorKind::Interrupted => ErrorReason::Canceled,
             io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
@@ -232,7 +233,47 @@ pub fn init_metrics() {
 
 /// Start the Prometheus metrics HTTP server.
 pub async fn start_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
-    let builder = PrometheusBuilder::new();
+    // Define histogram buckets matching the Go daemon for consistency.
+    // Handoff duration: 0.1ms to ~1.6s (exponential buckets base 0.0001, factor 2, count 15)
+    let handoff_buckets: [f64; 15] = [
+        0.0001, 0.0002, 0.0004, 0.0008, 0.0016, 0.0032, 0.0064, 0.0128, 0.0256, 0.0512, 0.1024,
+        0.2048, 0.4096, 0.8192, 1.6384,
+    ];
+
+    // Stream/backend duration: 10ms to ~163s (exponential buckets base 0.01, factor 2, count 15)
+    let duration_buckets: [f64; 15] = [
+        0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
+        163.84,
+    ];
+
+    // Backend TTFB: 1ms to ~16s (exponential buckets base 0.001, factor 2, count 15)
+    let ttfb_buckets: [f64; 15] = [
+        0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024, 2.048, 4.096,
+        8.192, 16.384,
+    ];
+
+    let builder = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full("daemon_handoff_duration_seconds".to_string()),
+            &handoff_buckets,
+        )
+        .expect("valid handoff buckets")
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full("daemon_stream_duration_seconds".to_string()),
+            &duration_buckets,
+        )
+        .expect("valid stream buckets")
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full("daemon_backend_duration_seconds".to_string()),
+            &duration_buckets,
+        )
+        .expect("valid backend duration buckets")
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full("daemon_backend_ttfb_seconds".to_string()),
+            &ttfb_buckets,
+        )
+        .expect("valid ttfb buckets");
+
     builder
         .with_http_listener(addr)
         .install()
@@ -341,9 +382,9 @@ pub fn record_stream_error(reason: ErrorReason) {
 }
 
 /// Record stream start - increments active streams and updates peak if necessary.
+/// Note: Caller must check is_benchmark_mode() and call bench_stream_start() directly if true.
 pub fn record_stream_start() {
     if is_benchmark_mode() {
-        bench_stream_start();
         return;
     }
     let current = ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed) + 1;

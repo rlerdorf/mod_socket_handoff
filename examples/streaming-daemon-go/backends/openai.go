@@ -278,6 +278,9 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 		req.Header.Set("X-Test-Pattern", handoff.TestPattern)
 	}
 
+	// Record backend request attempt (before the call, so all attempts are counted)
+	RecordBackendRequest("openai")
+
 	// Make request
 	resp, err := httpClient.Do(req)
 
@@ -296,9 +299,6 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
-
-	// Record successful backend request
-	RecordBackendRequest("openai")
 
 	// Set write deadline once for entire stream (refreshed periodically below)
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
