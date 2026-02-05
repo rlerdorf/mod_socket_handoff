@@ -68,22 +68,14 @@ impl StreamRequest {
             .unwrap_or_default();
 
         Self {
-            prompt: data
-                .prompt
-                .as_ref()
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+            prompt: data.prompt.as_ref().map(|s| s.to_string()).unwrap_or_default(),
             messages,
             model: data.model.as_ref().map(|s| s.to_string()),
             max_tokens: data.max_tokens,
             temperature: data.temperature,
             system: data.system.as_ref().map(|s| s.to_string()),
             user_id: data.user_id,
-            request_id: data
-                .request_id
-                .as_ref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("conn-{}", conn_id)),
+            request_id: data.request_id.as_ref().map(|s| s.to_string()).unwrap_or_else(|| format!("conn-{}", conn_id)),
             test_pattern: data.test_pattern.as_ref().map(|s| s.to_string()),
         }
     }
@@ -136,13 +128,7 @@ pub type ChunkStream = Box<dyn ChunkStreamTrait>;
 pub trait ChunkStreamTrait: Send {
     /// Get the next chunk.
     #[allow(clippy::type_complexity)]
-    fn next(
-        &mut self,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
-        >,
-    >;
+    fn next(&mut self) -> Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>>;
 }
 
 /// Simple vector-based chunk stream for testing.
@@ -153,21 +139,12 @@ pub struct VecChunkStream {
 
 impl VecChunkStream {
     pub fn new(chunks: Vec<StreamChunk>, delay: Option<std::time::Duration>) -> Self {
-        Self {
-            chunks: chunks.into_iter(),
-            delay,
-        }
+        Self { chunks: chunks.into_iter(), delay }
     }
 }
 
 impl ChunkStreamTrait for VecChunkStream {
-    fn next(
-        &mut self,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
-        >,
-    > {
+    fn next(&mut self) -> Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>> {
         let delay = self.delay;
         let chunk = self.chunks.next();
 

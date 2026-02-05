@@ -9,9 +9,7 @@ use reqwest::Client;
 use reqwest_eventsource::{Event, EventSource, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
 
-use super::traits::{
-    ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend,
-};
+use super::traits::{ChunkMetadata, ChunkStreamTrait, StreamChunk, StreamRequest, StreamingBackend};
 use crate::error::BackendError;
 
 /// OpenAI streaming backend.
@@ -48,14 +46,7 @@ impl StreamingBackend for OpenAIBackend {
 
         let messages = if !request.messages.is_empty() {
             // Use full conversation history from request
-            request
-                .messages
-                .into_iter()
-                .map(|m| ChatMessage {
-                    role: m.role,
-                    content: m.content,
-                })
-                .collect()
+            request.messages.into_iter().map(|m| ChatMessage { role: m.role, content: m.content }).collect()
         } else {
             // Legacy: build messages from prompt and system
             let mut msgs = Vec::new();
@@ -145,13 +136,7 @@ struct OpenAIChunkStream {
 }
 
 impl ChunkStreamTrait for OpenAIChunkStream {
-    fn next(
-        &mut self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_,
-        >,
-    > {
+    fn next(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Result<StreamChunk, BackendError>>> + Send + '_>> {
         Box::pin(async move {
             loop {
                 match self.es.next().await {
@@ -198,10 +183,7 @@ impl ChunkStreamTrait for OpenAIChunkStream {
                                 // Empty chunk, continue
                             }
                             Err(e) => {
-                                return Some(Err(BackendError::Parse(format!(
-                                    "Failed to parse chunk: {}",
-                                    e
-                                ))));
+                                return Some(Err(BackendError::Parse(format!("Failed to parse chunk: {}", e))));
                             }
                         }
                     }

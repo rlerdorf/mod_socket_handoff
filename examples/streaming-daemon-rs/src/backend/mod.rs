@@ -28,11 +28,7 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 .api_key
                 .clone()
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .ok_or_else(|| {
-                    BackendError::Config(
-                        "OpenAI API key not configured. Set OPENAI_API_KEY or config.backend.openai.api_key".to_string()
-                    )
-                })?;
+                .ok_or_else(|| BackendError::Config("OpenAI API key not configured. Set OPENAI_API_KEY or config.backend.openai.api_key".to_string()))?;
 
             // Build the shared HTTP client
             let client = build_streaming_client(
@@ -44,16 +40,8 @@ pub fn create_backend(config: &BackendConfig) -> Result<Arc<dyn StreamingBackend
                 &config.openai.api_base,
             )?;
 
-            Ok(Arc::new(OpenAIBackend::new(
-                client,
-                api_key,
-                config.openai.api_base.clone(),
-                config.default_model.clone(),
-            )))
+            Ok(Arc::new(OpenAIBackend::new(client, api_key, config.openai.api_base.clone(), config.default_model.clone())))
         }
-        other => Err(BackendError::Config(format!(
-            "Unknown backend provider: {}. Available: mock, openai",
-            other
-        ))),
+        other => Err(BackendError::Config(format!("Unknown backend provider: {}. Available: mock, openai", other))),
     }
 }

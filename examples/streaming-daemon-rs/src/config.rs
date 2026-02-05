@@ -242,16 +242,9 @@ impl Default for LoggingConfig {
 impl Config {
     /// Load configuration from a TOML file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, DaemonError> {
-        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            DaemonError::Config(format!(
-                "Failed to read config file {}: {}",
-                path.as_ref().display(),
-                e
-            ))
-        })?;
+        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| DaemonError::Config(format!("Failed to read config file {}: {}", path.as_ref().display(), e)))?;
 
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| DaemonError::Config(format!("Failed to parse config: {}", e)))?;
+        let config: Config = toml::from_str(&content).map_err(|e| DaemonError::Config(format!("Failed to parse config: {}", e)))?;
 
         Ok(config)
     }
@@ -448,10 +441,7 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.backend.openai.http2.enabled);
         assert_eq!(config.backend.openai.http2.initial_stream_window_kb, 128);
-        assert_eq!(
-            config.backend.openai.http2.initial_connection_window_kb,
-            2048
-        );
+        assert_eq!(config.backend.openai.http2.initial_connection_window_kb, 2048);
         assert!(!config.backend.openai.http2.adaptive_window);
         assert_eq!(config.backend.openai.http2.keep_alive_interval_secs, 30);
         assert_eq!(config.backend.openai.http2.keep_alive_timeout_secs, 60);

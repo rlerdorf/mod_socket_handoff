@@ -73,6 +73,11 @@ func (t *Typing) Init(cfg *config.BackendConfig) error {
 // Stream sends characters one at a time with realistic typing delays.
 func (t *Typing) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
+	backendStart := time.Now()
+	var ttfbRecorded bool
+
+	// Record backend request
+	RecordBackendRequest("typing")
 
 	// Set initial write timeout
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
@@ -176,7 +181,16 @@ This is the end of my response. Have a great day!`
 		*bufPtr = buf
 		sseCharBufPool.Put(bufPtr)
 		totalBytes += int64(n)
+		RecordChunkSent()
+
+		// Record TTFB on first chunk
+		if !ttfbRecorded {
+			RecordBackendTTFB("typing", time.Since(backendStart).Seconds())
+			ttfbRecorded = true
+		}
+
 		if err != nil {
+			RecordBackendError("typing")
 			return totalBytes, fmt.Errorf("write failed: %w", err)
 		}
 		if err := writer.Flush(); err != nil {
@@ -226,6 +240,10 @@ This is the end of my response. Have a great day!`
 	if err := writer.Flush(); err != nil {
 		return totalBytes, fmt.Errorf("flush failed: %w", err)
 	}
+
+	// Record backend duration
+	RecordBackendDuration("typing", time.Since(backendStart).Seconds())
+
 	return totalBytes, nil
 }
 

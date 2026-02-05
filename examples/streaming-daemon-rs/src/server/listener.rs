@@ -27,9 +27,7 @@ impl UnixSocketListener {
 
         // Handle existing socket file
         if socket_path.exists() {
-            let metadata = std::fs::symlink_metadata(&socket_path).map_err(|e| {
-                DaemonError::Socket(format!("Failed to stat {}: {}", socket_path.display(), e))
-            })?;
+            let metadata = std::fs::symlink_metadata(&socket_path).map_err(|e| DaemonError::Socket(format!("Failed to stat {}: {}", socket_path.display(), e)))?;
 
             if metadata.file_type().is_socket() {
                 // Probe the socket to see if another daemon is listening.
@@ -37,10 +35,7 @@ impl UnixSocketListener {
                 match std::os::unix::net::UnixStream::connect(&socket_path) {
                     Ok(_) => {
                         // Connection succeeded - another daemon is running
-                        return Err(DaemonError::Socket(format!(
-                            "Socket {} is already in use by another process",
-                            socket_path.display()
-                        )));
+                        return Err(DaemonError::Socket(format!("Socket {} is already in use by another process", socket_path.display())));
                     }
                     Err(e) => {
                         // Connection failed - check if it's a stale socket
@@ -58,54 +53,31 @@ impl UnixSocketListener {
                                 // Our goal is to ensure it's gone, which it is.
                                 if let Err(e) = std::fs::remove_file(&socket_path) {
                                     if e.kind() != ErrorKind::NotFound {
-                                        return Err(DaemonError::Socket(format!(
-                                            "Failed to remove stale socket {}: {}",
-                                            socket_path.display(),
-                                            e
-                                        )));
+                                        return Err(DaemonError::Socket(format!("Failed to remove stale socket {}: {}", socket_path.display(), e)));
                                     }
                                 }
                             }
                             // Other errors (permission denied, etc.) - don't assume we can take over
                             _ => {
-                                return Err(DaemonError::Socket(format!(
-                                    "Cannot determine if socket {} is in use: {}",
-                                    socket_path.display(),
-                                    e
-                                )));
+                                return Err(DaemonError::Socket(format!("Cannot determine if socket {} is in use: {}", socket_path.display(), e)));
                             }
                         }
                     }
                 }
             } else {
-                return Err(DaemonError::Socket(format!(
-                    "Path {} exists but is not a socket",
-                    socket_path.display()
-                )));
+                return Err(DaemonError::Socket(format!("Path {} exists but is not a socket", socket_path.display())));
             }
         }
 
         // Create parent directory if needed
         if let Some(parent) = socket_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    DaemonError::Socket(format!(
-                        "Failed to create socket directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
+                std::fs::create_dir_all(parent).map_err(|e| DaemonError::Socket(format!("Failed to create socket directory {}: {}", parent.display(), e)))?;
             }
         }
 
         // Bind the listener
-        let listener = UnixListener::bind(&socket_path).map_err(|e| {
-            DaemonError::Socket(format!(
-                "Failed to bind socket {}: {}",
-                socket_path.display(),
-                e
-            ))
-        })?;
+        let listener = UnixListener::bind(&socket_path).map_err(|e| DaemonError::Socket(format!("Failed to bind socket {}: {}", socket_path.display(), e)))?;
 
         // Set permissions; if this fails, clean up the bound socket before returning
         if let Err(e) = set_socket_permissions(&socket_path, config.socket_mode) {
@@ -270,12 +242,6 @@ pub struct AcceptedConnection {
 /// Set socket file permissions.
 fn set_socket_permissions(path: &Path, mode: u32) -> Result<()> {
     let permissions = std::fs::Permissions::from_mode(mode);
-    std::fs::set_permissions(path, permissions).map_err(|e| {
-        DaemonError::Socket(format!(
-            "Failed to set socket permissions on {}: {}",
-            path.display(),
-            e
-        ))
-    })?;
+    std::fs::set_permissions(path, permissions).map_err(|e| DaemonError::Socket(format!("Failed to set socket permissions on {}: {}", path.display(), e)))?;
     Ok(())
 }

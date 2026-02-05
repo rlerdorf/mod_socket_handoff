@@ -56,6 +56,11 @@ func (m *Mock) Init(cfg *config.BackendConfig) error {
 // Stream sends demo SSE messages to the client.
 func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
+	backendStart := time.Now()
+	var ttfbRecorded bool
+
+	// Record backend request
+	RecordBackendRequest("mock")
 
 	// Fixed messages for consistent benchmarking (18 messages x delay)
 	messages := []string{
@@ -94,7 +99,16 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		// Send SSE event
 		n, err := SendSSE(conn, msg)
 		totalBytes += int64(n)
+		RecordChunkSent()
+
+		// Record TTFB on first chunk
+		if !ttfbRecorded {
+			RecordBackendTTFB("mock", time.Since(backendStart).Seconds())
+			ttfbRecorded = true
+		}
+
 		if err != nil {
+			RecordBackendError("mock")
 			return totalBytes, err
 		}
 
@@ -132,6 +146,10 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	if err != nil {
 		return totalBytes, fmt.Errorf("write failed: %w", err)
 	}
+
+	// Record backend duration
+	RecordBackendDuration("mock", time.Since(backendStart).Seconds())
+
 	return totalBytes, nil
 }
 

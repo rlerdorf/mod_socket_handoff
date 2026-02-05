@@ -20,10 +20,7 @@ impl MockBackend {
     /// Reads DAEMON_TOKEN_DELAY_MS environment variable for token delay (default: 50ms).
     /// For ~100-second streams with 18 messages, use DAEMON_TOKEN_DELAY_MS=5625.
     pub fn new() -> Self {
-        let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(50);
+        let delay_ms = std::env::var("DAEMON_TOKEN_DELAY_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(50);
         Self {
             token_delay: Duration::from_millis(delay_ms),
         }
@@ -75,19 +72,13 @@ impl StreamingBackend for MockBackend {
             request.prompt.clone()
         };
 
-        let user_id = request
-            .user_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "unknown".into());
+        let user_id = request.user_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into());
 
         // Pre-allocate with exact capacity: 2 dynamic + 16 static + 1 done = 19
         let mut chunks = Vec::with_capacity(19);
 
         // Dynamic messages (allocate)
-        chunks.push(StreamChunk::content(format!(
-            "Hello from Rust daemon! Prompt: {}",
-            prompt_preview
-        )));
+        chunks.push(StreamChunk::content(format!("Hello from Rust daemon! Prompt: {}", prompt_preview)));
         chunks.push(StreamChunk::content(format!("User ID: {}", user_id)));
 
         // Static messages (no allocation for the &str, only StreamChunk wrapper)
@@ -98,10 +89,7 @@ impl StreamingBackend for MockBackend {
         // Done marker
         chunks.push(StreamChunk::done());
 
-        Ok(Box::new(VecChunkStream::new(
-            chunks,
-            Some(self.token_delay),
-        )))
+        Ok(Box::new(VecChunkStream::new(chunks, Some(self.token_delay))))
     }
 
     async fn health_check(&self) -> Result<(), BackendError> {
