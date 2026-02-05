@@ -433,9 +433,8 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte,
 	if bytes.HasPrefix(line, []byte("event:")) {
 		eventType = strings.TrimSpace(string(line[6:]))
 	} else {
-		// Unexpected format, log and skip to avoid silently hiding protocol issues
-		log.Printf("parseLangGraphEvent: unexpected event line format: %q", string(line))
-		return "", nil, nil
+		// Fail fast on protocol violations to catch integration issues early
+		return "", nil, fmt.Errorf("unexpected event line format: %q", string(line))
 	}
 
 	// Read data line
