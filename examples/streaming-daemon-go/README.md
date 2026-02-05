@@ -301,7 +301,7 @@ Ensure `mod_socket_handoff` is enabled and configured:
 ```apache
 SocketHandoffEnabled On
 SocketHandoffAllowedPrefix /var/run/
-SocketHandoffConnectTimeoutMs 500
+SocketHandoffConnectTimeoutMs 100
 ```
 
 ## PHP Integration

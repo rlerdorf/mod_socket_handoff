@@ -75,7 +75,7 @@ LoadModule socket_handoff_module modules/mod_socket_handoff.so
 
 SocketHandoffEnabled On
 SocketHandoffAllowedPrefix /var/run/
-SocketHandoffConnectTimeoutMs 500
+SocketHandoffConnectTimeoutMs 100
 ```
 
 ## Configuration Directives
@@ -106,10 +106,10 @@ Timeout (in milliseconds) when connecting to the handoff daemon Unix socket.
 Valid range: 1-60000 (1ms to 60 seconds).
 
 ```apache
-SocketHandoffConnectTimeoutMs 500
+SocketHandoffConnectTimeoutMs 100
 ```
 
-Default: `500`
+Default: `100`
 
 ## PHP Usage
 
@@ -435,8 +435,8 @@ optimizations:
 
 ### Connect Timeout
 
-The default timeout (500ms) is generous for localhost Unix socket connections.
-If your daemon is consistently responsive, you can lower this:
+The default timeout (100ms) is generous for localhost Unix socket connections.
+If your daemon is consistently responsive, you can lower this further:
 
 ```apache
 SocketHandoffConnectTimeoutMs 100

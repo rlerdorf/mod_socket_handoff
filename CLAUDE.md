@@ -87,9 +87,9 @@ Security check using `realpath()` to prevent path traversal attacks.
 ```apache
 SocketHandoffEnabled On|Off              # Enable/disable (default: On)
 SocketHandoffAllowedPrefix /var/run/     # Security prefix for socket paths
-SocketHandoffConnectTimeoutMs 500        # Daemon connect timeout (default: 500ms)
-SocketHandoffSendTimeoutMs 500           # Daemon send timeout (default: 500ms)
-SocketHandoffMaxRetries 3                # Retries for transient errors (default: 3)
+SocketHandoffConnectTimeoutMs 100        # Daemon connect timeout (default: 100ms)
+SocketHandoffSendTimeoutMs 200           # Daemon send timeout (default: 200ms)
+SocketHandoffMaxRetries 2                # Retries for transient errors (default: 2)
 ```
 
 ### Timeout Directives
@@ -105,7 +105,7 @@ SocketHandoffMaxRetries 3                # Retries for transient errors (default
 
 - **SocketHandoffMaxRetries** - Number of retries for transient connection errors.
   Retries on ENOENT (socket doesn't exist) and ECONNREFUSED (daemon not listening).
-  Uses exponential backoff: 10ms, 20ms, 40ms, etc. Set to 0 to disable retries.
+  Uses exponential backoff: 10ms, 20ms, etc. Set to 0 to disable retries.
   Range: 0-10.
 
 ## Headers
@@ -223,8 +223,8 @@ sudo systemctl reload apache2
 
 ### 503 errors during daemon restart
 **Cause**: Daemon socket briefly unavailable during restart.
-**Fix**: `SocketHandoffMaxRetries 3` (default) handles this with exponential backoff.
-Increase if daemon restarts take longer than ~70ms (10+20+40ms).
+**Fix**: `SocketHandoffMaxRetries 2` (default) handles this with exponential backoff.
+Increase if daemon restarts take longer than ~30ms (10+20ms).
 
 ### Send timeout errors (ETIMEDOUT)
 **Cause**: Daemon socket buffer full, sendmsg() timed out.
@@ -242,9 +242,9 @@ The module includes several optimizations for high-traffic deployments:
 2. **SOCK_NONBLOCK** - On Linux 2.6.27+, the daemon socket is created with
    `SOCK_NONBLOCK` to eliminate one `fcntl()` syscall per connection.
 
-3. **Lower default timeout** - Default connect timeout is 500ms (was 2000ms).
-   For localhost Unix sockets, 500ms is generous. Lower timeouts prevent worker
-   starvation when the daemon is slow.
+3. **Lower default timeout** - Default connect timeout is 100ms, send timeout
+   is 200ms. For localhost Unix sockets, these are generous. Lower timeouts
+   prevent worker starvation when the daemon is slow.
 
 4. **poll()-based send timeout** - Before sending, poll() is used to wait for
    socket buffer space with the configured timeout. This prevents sendmsg() from
@@ -252,7 +252,7 @@ The module includes several optimizations for high-traffic deployments:
    production - without it, a slow daemon can block Apache workers indefinitely.
 
 5. **Retry with exponential backoff** - Transient errors (ENOENT, ECONNREFUSED)
-   are retried with exponential backoff (10ms, 20ms, 40ms). This handles daemon
+   are retried with exponential backoff (10ms, 20ms). This handles daemon
    restarts gracefully without failing all in-flight requests.
 
 6. **Non-blocking throughout** - The socket stays non-blocking after connect.
