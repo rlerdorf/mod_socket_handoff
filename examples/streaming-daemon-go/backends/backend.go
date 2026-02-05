@@ -11,15 +11,22 @@ import (
 	"examples/config"
 )
 
+// Message represents a single message in the conversation.
+type Message struct {
+	Role    string `json:"role"`    // "user", "assistant", or "system"
+	Content string `json:"content"` // The message content
+}
+
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
 // Customize this struct to match your application's needs.
 type HandoffData struct {
-	UserID      int64  `json:"user_id"`
-	Prompt      string `json:"prompt"`
-	Model       string `json:"model,omitempty"`
-	MaxTokens   int    `json:"max_tokens,omitempty"`
-	Timestamp   int64  `json:"timestamp,omitempty"`
-	TestPattern string `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
+	UserID      int64     `json:"user_id"`
+	Prompt      string    `json:"prompt"`                 // Single prompt (legacy, used if Messages is empty)
+	Messages    []Message `json:"messages,omitempty"`     // Full conversation history
+	Model       string    `json:"model,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Timestamp   int64     `json:"timestamp,omitempty"`
+	TestPattern string    `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
 }
 
 // Backend defines the interface for streaming backends.

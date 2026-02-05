@@ -218,11 +218,6 @@ var requestBufPool = sync.Pool{
 func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
 
-	// Build request body using pooled buffer to avoid allocations
-	prompt := handoff.Prompt
-	if prompt == "" {
-		prompt = "Hello"
-	}
 	model := handoff.Model
 	if model == "" {
 		model = openaiDefaultModel
@@ -233,9 +228,32 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	buf := (*bufPtr)[:0]
 	buf = append(buf, `{"model":"`...)
 	buf = appendJSONEscaped(buf, model)
-	buf = append(buf, `","messages":[{"role":"user","content":"`...)
-	buf = appendJSONEscaped(buf, prompt)
-	buf = append(buf, `"}],"stream":true}`...)
+	buf = append(buf, `","messages":[`...)
+
+	// Use messages array if provided, otherwise fall back to single prompt
+	if len(handoff.Messages) > 0 {
+		for i, msg := range handoff.Messages {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `{"role":"`...)
+			buf = appendJSONEscaped(buf, msg.Role)
+			buf = append(buf, `","content":"`...)
+			buf = appendJSONEscaped(buf, msg.Content)
+			buf = append(buf, `"}`...)
+		}
+	} else {
+		// Legacy: single prompt mode
+		prompt := handoff.Prompt
+		if prompt == "" {
+			prompt = "Hello"
+		}
+		buf = append(buf, `{"role":"user","content":"`...)
+		buf = appendJSONEscaped(buf, prompt)
+		buf = append(buf, `"}`...)
+	}
+
+	buf = append(buf, `],"stream":true}`...)
 
 	// Create HTTP request
 	url := openaiAPIBase + "/chat/completions"
