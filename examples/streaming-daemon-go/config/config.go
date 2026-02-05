@@ -4,6 +4,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -93,16 +95,26 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.max_connections must be non-negative")
 	}
 
+	// Validate socket path for security (prevent path traversal)
+	if c.Server.SocketPath != "" {
+		// Must be absolute path
+		if !filepath.IsAbs(c.Server.SocketPath) {
+			return fmt.Errorf("server.socket_path must be absolute path")
+		}
+		// Check for path traversal attempts
+		cleaned := filepath.Clean(c.Server.SocketPath)
+		if strings.Contains(cleaned, "..") {
+			return fmt.Errorf("server.socket_path contains invalid path components")
+		}
+	}
+
 	// Validate metrics config
 	if c.Metrics.Enabled && c.Metrics.ListenAddr == "" {
 		return fmt.Errorf("metrics.listen_addr required when metrics.enabled is true")
 	}
 
-	// Validate backend config
-	validProviders := map[string]bool{"mock": true, "openai": true, "typing": true}
-	if c.Backend.Provider != "" && !validProviders[c.Backend.Provider] {
-		return fmt.Errorf("unknown backend.provider: %s (valid: mock, openai, typing)", c.Backend.Provider)
-	}
+	// Note: Backend provider validation is done in main.go against registered backends
+	// to avoid circular imports between config and backends packages.
 
 	// Validate mock backend
 	if c.Backend.Mock.MessageDelayMs < 0 {

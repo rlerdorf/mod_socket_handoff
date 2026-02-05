@@ -199,8 +199,10 @@ Override specific values:
 
 ### Command-Line Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
+Flags override config file values when explicitly set. The "Config Default" column shows the default value used when neither flag nor config file specifies a value.
+
+| Flag | Config Default | Description |
+|------|----------------|-------------|
 | `-config` | - | Path to YAML config file |
 | `-socket` | `/var/run/streaming-daemon.sock` | Unix socket path |
 | `-socket-mode` | `0660` | Socket permission mode |
@@ -231,7 +233,8 @@ streaming-daemon-go/
 │   ├── backend.go           # Backend interface + registry
 │   ├── mock.go              # Mock demo backend
 │   ├── openai.go            # OpenAI streaming backend
-│   └── typing.go            # Typewriter effect backend
+│   ├── typing.go            # Typewriter effect backend
+│   └── sse.go               # Shared SSE utilities
 └── config/
     ├── config.go            # Config structs and loader
     └── example.yaml         # Example configuration
