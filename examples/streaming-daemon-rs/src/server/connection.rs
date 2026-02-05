@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use crate::backend::StreamingBackend;
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
-use crate::metrics::{self, bench_stream_end, bench_stream_start, Timer};
+use crate::metrics::{self, bench_stream_end, bench_stream_start, ErrorReason, Timer};
 use crate::server::handoff::{receive_handoff, HandoffResult};
 use crate::shutdown::ConnectionGuard;
 use crate::streaming::{SseWriter, StreamRequest};
@@ -79,7 +79,7 @@ impl ConnectionHandler {
         )
         .await
         .map_err(|e| {
-            metrics::record_handoff_error();
+            metrics::record_handoff_error(classify_handoff_error(&e));
             ConnectionError::Handoff(e)
         })?;
 
@@ -105,8 +105,12 @@ impl ConnectionHandler {
     ) -> Result<(), ConnectionError> {
         let stream_timer = Instant::now();
 
-        // Track benchmark stats
-        bench_stream_start();
+        // Track benchmark stats and stream metrics
+        if metrics::is_benchmark_mode() {
+            bench_stream_start();
+        } else {
+            metrics::record_stream_start();
+        }
 
         // Destructure handoff to avoid partial move issues
         let HandoffResult {
@@ -182,7 +186,7 @@ impl ConnectionHandler {
                             // Write content first (some backends include content in done chunk)
                             if !chunk.content.is_empty() {
                                 if let Err(e) = writer.send_chunk(&chunk.content).await {
-                                    metrics::record_stream_error();
+                                    metrics::record_stream_error(ErrorReason::from_io_error(&e));
                                     tracing::warn!(error = %e, "Client write error");
                                     break;
                                 }
@@ -218,8 +222,12 @@ impl ConnectionHandler {
         }
         let _ = writer.shutdown().await;
 
-        // Record benchmark stats
-        bench_stream_end(stream_completed_normally, writer.bytes_written());
+        // Record benchmark stats and stream metrics
+        if metrics::is_benchmark_mode() {
+            bench_stream_end(stream_completed_normally, writer.bytes_written());
+        } else {
+            metrics::record_stream_end();
+        }
 
         metrics::record_backend_duration(self.backend.name(), backend_timer.elapsed());
         metrics::record_stream_duration(stream_timer.elapsed());
@@ -244,4 +252,25 @@ pub enum ConnectionError {
 
     #[error("Backend error: {0}")]
     Backend(String),
+}
+
+/// Classify a handoff error into an ErrorReason for metrics.
+fn classify_handoff_error(err: &HandoffError) -> ErrorReason {
+    match err {
+        HandoffError::Timeout => ErrorReason::Timeout,
+        HandoffError::System(nix_err) => {
+            // Map nix errors to error reasons
+            match nix_err {
+                nix::Error::EPIPE | nix::Error::ECONNRESET => ErrorReason::ClientDisconnected,
+                nix::Error::ETIMEDOUT => ErrorReason::Timeout,
+                nix::Error::ECONNREFUSED | nix::Error::ENOTCONN => ErrorReason::Network,
+                _ => ErrorReason::Other,
+            }
+        }
+        HandoffError::ReceiveFailed(_)
+        | HandoffError::NoFileDescriptor
+        | HandoffError::InvalidSocketType
+        | HandoffError::ControlMessageTruncated
+        | HandoffError::DataTruncated => ErrorReason::Other,
+    }
 }

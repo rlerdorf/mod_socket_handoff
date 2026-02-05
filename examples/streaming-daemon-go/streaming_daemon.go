@@ -289,6 +289,11 @@ func main() {
 	}
 	log.Printf("Using backend: %s (%s)", activeBackend.Name(), activeBackend.Description())
 
+	// Set benchmark mode for backends package (skips Prometheus updates)
+	if *benchmarkMode {
+		backends.SetBenchmarkMode(true)
+	}
+
 	// Increase file descriptor limit to handle many concurrent connections.
 	// Each active stream needs 1 fd for the client socket. Upstream HTTP
 	// connections are pooled (100-500 fds shared across all streams).

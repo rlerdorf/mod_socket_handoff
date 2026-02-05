@@ -2,9 +2,73 @@
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
+use nix::libc;
+use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Instant;
+
+/// Error reason labels for metrics (matches Go daemon classification).
+#[derive(Debug, Clone, Copy)]
+pub enum ErrorReason {
+    /// Client disconnected (EPIPE, ECONNRESET, BrokenPipe, ConnectionReset)
+    ClientDisconnected,
+    /// Timeout (deadline exceeded, ETIMEDOUT)
+    Timeout,
+    /// Operation was canceled
+    Canceled,
+    /// Network error (other network-related errors)
+    Network,
+    /// Other/unknown error
+    Other,
+}
+
+impl ErrorReason {
+    /// Convert to static string for metrics label.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorReason::ClientDisconnected => "client_disconnected",
+            ErrorReason::Timeout => "timeout",
+            ErrorReason::Canceled => "canceled",
+            ErrorReason::Network => "network",
+            ErrorReason::Other => "other",
+        }
+    }
+
+    /// Classify an I/O error into an ErrorReason.
+    pub fn from_io_error(err: &io::Error) -> Self {
+        match err.kind() {
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => {
+                ErrorReason::ClientDisconnected
+            }
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => ErrorReason::Timeout,
+            io::ErrorKind::Interrupted => ErrorReason::Canceled,
+            io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::AddrInUse
+            | io::ErrorKind::AddrNotAvailable => ErrorReason::Network,
+            _ => {
+                // Check raw OS error for more specific classification
+                if let Some(errno) = err.raw_os_error() {
+                    match errno {
+                        libc::EPIPE | libc::ECONNRESET => ErrorReason::ClientDisconnected,
+                        libc::ETIMEDOUT => ErrorReason::Timeout,
+                        libc::ECANCELED => ErrorReason::Canceled,
+                        _ => ErrorReason::Other,
+                    }
+                } else {
+                    ErrorReason::Other
+                }
+            }
+        }
+    }
+}
+
+/// Global peak streams tracker (atomic for thread safety).
+static PEAK_STREAMS: AtomicI64 = AtomicI64::new(0);
+/// Global active streams tracker.
+static ACTIVE_STREAMS: AtomicI64 = AtomicI64::new(0);
 
 /// Global benchmark mode flag. When true, Prometheus updates are skipped.
 static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
@@ -124,21 +188,21 @@ pub fn init_metrics() {
         "Total number of connections accepted"
     );
     describe_counter!(
-        "daemon_connections_rejected",
+        "daemon_connections_rejected_total",
         "Connections rejected due to capacity"
     );
 
     // Handoff metrics
     describe_counter!("daemon_handoffs_total", "Total handoffs received");
-    describe_counter!("daemon_handoff_errors", "Handoff receive errors");
+    describe_counter!("daemon_handoff_errors_total", "Handoff receive errors");
     describe_histogram!(
         "daemon_handoff_duration_seconds",
         "Time to receive handoff from Apache"
     );
 
     // Backend metrics
-    describe_counter!("daemon_backend_requests", "Backend API requests");
-    describe_counter!("daemon_backend_errors", "Backend API errors");
+    describe_counter!("daemon_backend_requests_total", "Backend API requests");
+    describe_counter!("daemon_backend_errors_total", "Backend API errors");
     describe_histogram!(
         "daemon_backend_duration_seconds",
         "Backend request duration"
@@ -149,9 +213,17 @@ pub fn init_metrics() {
     );
 
     // Streaming metrics
-    describe_counter!("daemon_bytes_sent", "Total bytes sent to clients");
-    describe_counter!("daemon_chunks_sent", "Total SSE chunks sent");
-    describe_counter!("daemon_stream_errors", "Stream write errors");
+    describe_gauge!(
+        "daemon_active_streams",
+        "Number of currently active streaming connections"
+    );
+    describe_gauge!(
+        "daemon_peak_streams",
+        "Peak number of concurrent streaming connections seen"
+    );
+    describe_counter!("daemon_bytes_sent_total", "Total bytes sent to clients");
+    describe_counter!("daemon_chunks_sent_total", "Total SSE chunks sent");
+    describe_counter!("daemon_stream_errors_total", "Stream write errors");
     describe_histogram!(
         "daemon_stream_duration_seconds",
         "Total stream duration per request"
@@ -183,7 +255,7 @@ pub fn record_connection_rejected() {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_connections_rejected").increment(1);
+    counter!("daemon_connections_rejected_total").increment(1);
 }
 
 /// Update active connection gauge.
@@ -203,12 +275,12 @@ pub fn record_handoff_success(duration: std::time::Duration) {
     histogram!("daemon_handoff_duration_seconds").record(duration.as_secs_f64());
 }
 
-/// Record handoff error.
-pub fn record_handoff_error() {
+/// Record handoff error with reason label.
+pub fn record_handoff_error(reason: ErrorReason) {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_handoff_errors").increment(1);
+    counter!("daemon_handoff_errors_total", "reason" => reason.as_str()).increment(1);
 }
 
 /// Record backend request.
@@ -216,7 +288,7 @@ pub fn record_backend_request(backend: &'static str) {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_backend_requests", "backend" => backend).increment(1);
+    counter!("daemon_backend_requests_total", "backend" => backend).increment(1);
 }
 
 /// Record backend error.
@@ -224,7 +296,7 @@ pub fn record_backend_error(backend: &'static str) {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_backend_errors", "backend" => backend).increment(1);
+    counter!("daemon_backend_errors_total", "backend" => backend).increment(1);
 }
 
 /// Record backend request duration.
@@ -249,7 +321,7 @@ pub fn record_bytes_sent(bytes: u64) {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_bytes_sent").increment(bytes);
+    counter!("daemon_bytes_sent_total").increment(bytes);
 }
 
 /// Record SSE chunk sent.
@@ -257,15 +329,49 @@ pub fn record_chunk_sent() {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_chunks_sent").increment(1);
+    counter!("daemon_chunks_sent_total").increment(1);
 }
 
-/// Record stream error.
-pub fn record_stream_error() {
+/// Record stream error with reason label.
+pub fn record_stream_error(reason: ErrorReason) {
     if is_benchmark_mode() {
         return;
     }
-    counter!("daemon_stream_errors").increment(1);
+    counter!("daemon_stream_errors_total", "reason" => reason.as_str()).increment(1);
+}
+
+/// Record stream start - increments active streams and updates peak if necessary.
+pub fn record_stream_start() {
+    if is_benchmark_mode() {
+        bench_stream_start();
+        return;
+    }
+    let current = ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed) + 1;
+    gauge!("daemon_active_streams").set(current as f64);
+
+    // Update peak if needed using CAS loop
+    loop {
+        let peak = PEAK_STREAMS.load(Ordering::Relaxed);
+        if current <= peak {
+            break;
+        }
+        if PEAK_STREAMS
+            .compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            gauge!("daemon_peak_streams").set(current as f64);
+            break;
+        }
+    }
+}
+
+/// Record stream end - decrements active streams.
+pub fn record_stream_end() {
+    if is_benchmark_mode() {
+        return;
+    }
+    let current = ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed) - 1;
+    gauge!("daemon_active_streams").set(current as f64);
 }
 
 /// Record total stream duration.

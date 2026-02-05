@@ -222,7 +222,7 @@ The handoff data can specify:
 - **SIGTERM/SIGINT** - Initiates graceful shutdown, stops accepting new connections, waits for active streams to complete
 - **SIGHUP** - Logs current connection count (status report)
 
-## Metrics
+## Prometheus Metrics
 
 When metrics are enabled, a Prometheus endpoint is available:
 
@@ -230,14 +230,86 @@ When metrics are enabled, a Prometheus endpoint is available:
 curl http://localhost:9090/metrics
 ```
 
-Available metrics:
-- `daemon_active_connections` - Current active connections
-- `daemon_connections_total` - Total connections handled
-- `daemon_handoffs_total` - Successful fd handoffs
-- `daemon_handoff_errors` - Failed handoffs
-- `daemon_bytes_sent` - Total bytes streamed
-- `daemon_backend_requests` - Backend API requests
-- `daemon_backend_errors` - Backend errors
+Note: The Rust metrics library only exposes metrics after they've been recorded at least once.
+Metrics will appear as requests are processed.
+
+### Available Metrics
+
+#### Connection Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `daemon_active_connections` | Gauge | - | Currently active Apache handoff connections |
+| `daemon_connections_total` | Counter | - | Total connections accepted |
+| `daemon_connections_rejected_total` | Counter | - | Connections rejected due to capacity limits |
+
+#### Stream Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `daemon_active_streams` | Gauge | - | Currently active streaming responses |
+| `daemon_peak_streams` | Gauge | - | Peak concurrent streams since startup |
+| `daemon_bytes_sent_total` | Counter | - | Total bytes sent to clients |
+| `daemon_chunks_sent_total` | Counter | - | Total SSE chunks sent to clients |
+| `daemon_stream_errors_total` | Counter | `reason` | Stream errors by type |
+| `daemon_stream_duration_seconds` | Histogram | - | Total stream duration per request |
+
+#### Handoff Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `daemon_handoffs_total` | Counter | - | Successful fd handoffs received |
+| `daemon_handoff_errors_total` | Counter | `reason` | Handoff errors by type |
+| `daemon_handoff_duration_seconds` | Histogram | - | Time spent receiving fd handoff from Apache |
+
+#### Backend Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `daemon_backend_requests_total` | Counter | `backend` | Total backend API requests made |
+| `daemon_backend_errors_total` | Counter | `backend` | Total backend API errors |
+| `daemon_backend_duration_seconds` | Histogram | `backend` | Backend request total duration |
+| `daemon_backend_ttfb_seconds` | Histogram | `backend` | Time to first byte from backend |
+
+### Error Reason Labels
+
+The `reason` label on error counters can have the following values:
+
+| Reason | Description |
+|--------|-------------|
+| `client_disconnected` | Client closed connection (EPIPE, ECONNRESET) |
+| `timeout` | Operation timed out |
+| `canceled` | Operation was canceled |
+| `network` | Network-related error |
+| `other` | Other/unknown error type |
+
+### Example Queries
+
+```promql
+# Current connection count
+daemon_active_connections
+
+# Connection accept rate (per second)
+rate(daemon_connections_total[1m])
+
+# 99th percentile stream duration
+histogram_quantile(0.99, rate(daemon_stream_duration_seconds_bucket[5m]))
+
+# Bytes per second throughput
+rate(daemon_bytes_sent_total[1m])
+
+# Chunks per second
+rate(daemon_chunks_sent_total[1m])
+
+# Backend request rate by backend type
+rate(daemon_backend_requests_total[1m])
+
+# Backend TTFB 95th percentile
+histogram_quantile(0.95, rate(daemon_backend_ttfb_seconds_bucket[5m]))
+
+# Client disconnect rate
+rate(daemon_stream_errors_total{reason="client_disconnected"}[1m])
+```
 
 ## Systemd Installation
 

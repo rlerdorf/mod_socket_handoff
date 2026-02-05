@@ -222,6 +222,8 @@ var requestBufPool = sync.Pool{
 // Stream sends a request to the OpenAI API and streams the response to the client.
 func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
+	backendStart := time.Now()
+	var ttfbRecorded bool
 
 	model := handoff.Model
 	if model == "" {
@@ -284,14 +286,19 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	requestBufPool.Put(bufPtr)
 
 	if err != nil {
+		RecordBackendError("openai")
 		return 0, fmt.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		RecordBackendError("openai")
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
+
+	// Record successful backend request
+	RecordBackendRequest("openai")
 
 	// Set write deadline once for entire stream (refreshed periodically below)
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
@@ -330,8 +337,15 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 		// Fast-path content extraction without full JSON parsing
 		content := extractContentFast(data)
 		if content != "" {
+			// Record TTFB on first chunk
+			if !ttfbRecorded {
+				RecordBackendTTFB("openai", time.Since(backendStart).Seconds())
+				ttfbRecorded = true
+			}
+
 			n, err := SendSSE(conn, content)
 			totalBytes += int64(n)
+			RecordChunkSent()
 			if err != nil {
 				return totalBytes, err
 			}
@@ -357,6 +371,9 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	if err != nil {
 		return totalBytes, fmt.Errorf("write done: %w", err)
 	}
+
+	// Record backend duration
+	RecordBackendDuration("openai", time.Since(backendStart).Seconds())
 
 	return totalBytes, nil
 }

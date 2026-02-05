@@ -7,7 +7,7 @@
 APXS ?= apxs
 MODULE = mod_socket_handoff
 
-.PHONY: all install clean test
+.PHONY: all install clean test test-go test-rust test-daemons
 
 all: $(MODULE).la
 
@@ -42,6 +42,21 @@ disable:
 test-compile: $(MODULE).la
 	@echo "Compilation successful!"
 
+# Test Go daemon
+# Uses /var/tmp for temp directory because /tmp is often mounted noexec
+test-go:
+	@echo "Running Go daemon tests..."
+	cd examples/streaming-daemon-go && TMPDIR=/var/tmp go test -v ./...
+
+# Test Rust daemon
+test-rust:
+	@echo "Running Rust daemon tests..."
+	cd examples/streaming-daemon-rs && cargo test --lib
+
+# Run all daemon tests
+test-daemons: test-go test-rust
+	@echo "All daemon tests passed!"
+
 # Show help
 help:
 	@echo "mod_socket_handoff - Apache socket handoff output filter"
@@ -52,6 +67,11 @@ help:
 	@echo "  make enable     - Enable module (Debian/Ubuntu)"
 	@echo "  make disable    - Disable module (Debian/Ubuntu)"
 	@echo "  make clean      - Remove build artifacts"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test-go      - Run Go daemon tests"
+	@echo "  make test-rust    - Run Rust daemon tests"
+	@echo "  make test-daemons - Run all daemon tests"
 	@echo ""
 	@echo "After installation:"
 	@echo "  1. Add to Apache config: LoadModule socket_handoff_module modules/mod_socket_handoff.so"
