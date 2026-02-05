@@ -96,4 +96,16 @@ mod tests {
         let resp = format_error_response(500, "Something broke");
         assert!(resp.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
     }
+
+    #[test]
+    fn test_format_error_response_sanitizes_crlf() {
+        let resp = format_error_response(502, "Backend unavailable\r\nX-Malicious: header");
+        // \r\n must be stripped so the injected text cannot form a separate header.
+        // The text becomes part of the body, not a header line.
+        assert!(!resp.contains("\r\nX-Malicious:"));
+        // The body should contain the flattened (sanitized) reason
+        assert!(resp.contains("Backend unavailableX-Malicious: header"));
+        // Verify the response has exactly one status line
+        assert_eq!(resp.matches("HTTP/1.1").count(), 1);
+    }
 }
