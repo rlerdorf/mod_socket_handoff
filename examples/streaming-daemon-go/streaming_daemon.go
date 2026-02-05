@@ -674,7 +674,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}
 
-	// Per-stream context timeout (Issue 2)
+	// Per-stream context timeout to prevent runaway/hung streams
 	var streamCtx context.Context
 	var streamCancel context.CancelFunc
 	if maxStreamDuration > 0 {

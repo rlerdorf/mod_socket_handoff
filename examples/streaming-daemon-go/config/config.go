@@ -19,11 +19,11 @@ type Config struct {
 
 // ServerConfig contains server-level settings.
 type ServerConfig struct {
-	SocketPath     string `yaml:"socket_path"`
-	SocketMode     uint32 `yaml:"socket_mode"`
-	MaxConnections     int    `yaml:"max_connections"`
-	MaxStreamDurationMs int   `yaml:"max_stream_duration_ms"`
-	PprofAddr          string `yaml:"pprof_addr"`
+	SocketPath          string `yaml:"socket_path"`
+	SocketMode          uint32 `yaml:"socket_mode"`
+	MaxConnections      int    `yaml:"max_connections"`
+	MaxStreamDurationMs int    `yaml:"max_stream_duration_ms"`
+	PprofAddr           string `yaml:"pprof_addr"`
 }
 
 // BackendConfig contains backend selection and configuration.
