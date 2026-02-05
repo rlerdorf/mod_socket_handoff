@@ -46,21 +46,36 @@ impl StreamingBackend for OpenAIBackend {
     async fn stream(&self, request: StreamRequest) -> Result<super::ChunkStream, BackendError> {
         let model = request.model.unwrap_or_else(|| self.default_model.clone());
 
-        let mut messages = Vec::new();
+        let messages = if !request.messages.is_empty() {
+            // Use full conversation history from request
+            request
+                .messages
+                .into_iter()
+                .map(|m| ChatMessage {
+                    role: m.role,
+                    content: m.content,
+                })
+                .collect()
+        } else {
+            // Legacy: build messages from prompt and system
+            let mut msgs = Vec::new();
 
-        // Add system message if provided
-        if let Some(system) = &request.system {
-            messages.push(ChatMessage {
-                role: "system".to_string(),
-                content: system.clone(),
+            // Add system message if provided
+            if let Some(system) = &request.system {
+                msgs.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: system.clone(),
+                });
+            }
+
+            // Add user message
+            msgs.push(ChatMessage {
+                role: "user".to_string(),
+                content: request.prompt,
             });
-        }
 
-        // Add user message
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: request.prompt,
-        });
+            msgs
+        };
 
         let body = ChatRequest {
             model,

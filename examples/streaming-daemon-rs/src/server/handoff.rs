@@ -17,6 +17,13 @@ use tokio::net::UnixStream;
 
 use crate::error::HandoffError;
 
+/// A single message in the conversation history.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ChatMessage {
+    pub role: Box<str>,
+    pub content: Box<str>,
+}
+
 /// Data passed from PHP via X-Handoff-Data header.
 /// Uses `Box<str>` instead of `String` for immutable string fields
 /// to save 8 bytes per field (no capacity needed since we never grow them).
@@ -26,6 +33,9 @@ pub struct HandoffData {
     pub user_id: Option<i64>,
     #[serde(default)]
     pub prompt: Option<Box<str>>,
+    /// Full conversation history (takes precedence over prompt if present).
+    #[serde(default)]
+    pub messages: Option<Vec<ChatMessage>>,
     #[serde(default)]
     pub model: Option<Box<str>>,
     #[serde(default)]

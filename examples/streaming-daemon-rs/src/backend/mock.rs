@@ -119,6 +119,7 @@ mod tests {
 
         let request = StreamRequest {
             prompt: "test".to_string(),
+            messages: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,

@@ -1,0 +1,38 @@
+# Example configuration for streaming-daemon
+# Copy to local.yaml and customize (local.yaml is gitignored)
+
+server:
+  socket_path: /var/run/streaming-daemon.sock
+  socket_mode: 0660
+  max_connections: 50000
+  # pprof_addr: localhost:6060  # Uncomment to enable profiling
+
+backend:
+  # Available providers: mock, openai, typing
+  provider: openai
+  default_model: gpt-4o-mini
+
+  # OpenAI-compatible API configuration
+  openai:
+    # SECURITY: Never store API keys in config files for production.
+    # Use OPENAI_API_KEY environment variable instead (recommended).
+    # api_key: sk-...
+    api_base: https://api.openai.com/v1
+    # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
+    http2_enabled: true
+    insecure_ssl: false
+
+  # Mock backend configuration
+  mock:
+    message_delay_ms: 50
+
+  # Typing backend configuration
+  typing: {}
+
+metrics:
+  enabled: true
+  listen_addr: 127.0.0.1:9090
+
+logging:
+  level: info    # debug, info, warn, error
+  format: text   # text, json

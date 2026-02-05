@@ -19,11 +19,20 @@ pub trait StreamingBackend: Send + Sync {
     async fn health_check(&self) -> Result<(), BackendError>;
 }
 
+/// A message in the conversation (role + content).
+#[derive(Debug, Clone)]
+pub struct RequestMessage {
+    pub role: String,
+    pub content: String,
+}
+
 /// Request to stream a response.
 #[derive(Debug, Clone)]
 pub struct StreamRequest {
-    /// The prompt to respond to.
+    /// The prompt to respond to (legacy, used if messages is empty).
     pub prompt: String,
+    /// Full conversation history (takes precedence over prompt if present).
+    pub messages: Vec<RequestMessage>,
     /// Model to use (optional, uses backend default).
     pub model: Option<String>,
     /// Maximum tokens to generate.
@@ -44,12 +53,27 @@ impl StreamRequest {
     /// Create a stream request from handoff data.
     /// Converts Box<str> fields to String for API use.
     pub fn from_handoff(data: &HandoffData, conn_id: u64) -> Self {
+        // Convert messages if present
+        let messages = data
+            .messages
+            .as_ref()
+            .map(|msgs| {
+                msgs.iter()
+                    .map(|m| RequestMessage {
+                        role: m.role.to_string(),
+                        content: m.content.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Self {
             prompt: data
                 .prompt
                 .as_ref()
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            messages,
             model: data.model.as_ref().map(|s| s.to_string()),
             max_tokens: data.max_tokens,
             temperature: data.temperature,
