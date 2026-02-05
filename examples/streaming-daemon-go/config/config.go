@@ -19,10 +19,11 @@ type Config struct {
 
 // ServerConfig contains server-level settings.
 type ServerConfig struct {
-	SocketPath     string `yaml:"socket_path"`
-	SocketMode     uint32 `yaml:"socket_mode"`
-	MaxConnections int    `yaml:"max_connections"`
-	PprofAddr      string `yaml:"pprof_addr"`
+	SocketPath          string `yaml:"socket_path"`
+	SocketMode          uint32 `yaml:"socket_mode"`
+	MaxConnections      int    `yaml:"max_connections"`
+	MaxStreamDurationMs int    `yaml:"max_stream_duration_ms"`
+	PprofAddr           string `yaml:"pprof_addr"`
 }
 
 // BackendConfig contains backend selection and configuration.
@@ -105,6 +106,9 @@ func (c *Config) Validate() error {
 	if c.Server.MaxConnections < 0 {
 		return fmt.Errorf("server.max_connections must be non-negative")
 	}
+	if c.Server.MaxStreamDurationMs < 0 {
+		return fmt.Errorf("server.max_stream_duration_ms must be non-negative")
+	}
 
 	// Validate socket paths for security.
 	// Requiring absolute paths prevents path traversal; filepath.Clean()
@@ -140,9 +144,10 @@ func Default() *Config {
 	http2 := true
 	return &Config{
 		Server: ServerConfig{
-			SocketPath:     "/var/run/streaming-daemon.sock",
-			SocketMode:     0660,
-			MaxConnections: 50000,
+			SocketPath:          "/var/run/streaming-daemon.sock",
+			SocketMode:          0660,
+			MaxConnections:      50000,
+			MaxStreamDurationMs: 300000,
 		},
 		Backend: BackendConfig{
 			Provider:     "mock",

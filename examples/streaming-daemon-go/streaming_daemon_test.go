@@ -16,6 +16,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -425,5 +427,37 @@ func TestLargeHandoffData(t *testing.T) {
 	}
 	if parsed["user_id"].(float64) != 789 {
 		t.Errorf("user_id mismatch: got %v, want 789", parsed["user_id"])
+	}
+}
+
+func TestHealthHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	healthHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode JSON body: %v", err)
+	}
+
+	if body["status"] != "ok" {
+		t.Errorf("status = %v, want %q", body["status"], "ok")
+	}
+	if _, ok := body["active_streams"]; !ok {
+		t.Error("missing active_streams field")
+	}
+	if _, ok := body["active_connections"]; !ok {
+		t.Error("missing active_connections field")
 	}
 }

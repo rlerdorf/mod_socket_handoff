@@ -296,7 +296,8 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 
 	if resp.StatusCode != http.StatusOK {
 		RecordBackendError("openai")
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		// Limit error body size to prevent memory exhaustion from large error payloads
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -428,7 +429,7 @@ func extractContentFast(data []byte) string {
 	return string(content)
 }
 
-// unescapeJSON unescapes a JSON string value.
+// unescapeJSON unescapes a JSON string value, including surrogate pairs.
 func unescapeJSON(b []byte) string {
 	if bytes.IndexByte(b, '\\') < 0 {
 		return string(b)
@@ -452,13 +453,42 @@ func unescapeJSON(b []byte) string {
 			case '"', '\\', '/':
 				result = append(result, b[i])
 			case 'u':
-				if i+5 <= len(b) {
-					hexStr := string(b[i+1 : i+5])
-					if codepoint, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
-						var buf [4]byte
-						n := utf8.EncodeRune(buf[:], rune(codepoint))
-						result = append(result, buf[:n]...)
+				if i+4 > len(b) {
+					break
+				}
+				hexStr := string(b[i+1 : i+5])
+				codepoint, parseErr := strconv.ParseUint(hexStr, 16, 32)
+				if parseErr != nil {
+					break
+				}
+				if codepoint >= 0xD800 && codepoint <= 0xDBFF {
+					// High surrogate — look for low surrogate \uXXXX
+					if i+10 < len(b) && b[i+5] == '\\' && b[i+6] == 'u' {
+						loHex := string(b[i+7 : i+11])
+						if lo, loErr := strconv.ParseUint(loHex, 16, 32); loErr == nil && lo >= 0xDC00 && lo <= 0xDFFF {
+							combined := 0x10000 + (codepoint-0xD800)*0x400 + (lo - 0xDC00)
+							var ubuf [4]byte
+							n := utf8.EncodeRune(ubuf[:], rune(combined))
+							result = append(result, ubuf[:n]...)
+							i += 10
+							break
+						}
 					}
+					// Orphan high surrogate — emit replacement character
+					var ubuf [4]byte
+					n := utf8.EncodeRune(ubuf[:], utf8.RuneError)
+					result = append(result, ubuf[:n]...)
+					i += 4
+				} else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
+					// Orphan low surrogate — emit replacement character
+					var ubuf [4]byte
+					n := utf8.EncodeRune(ubuf[:], utf8.RuneError)
+					result = append(result, ubuf[:n]...)
+					i += 4
+				} else {
+					var ubuf [4]byte
+					n := utf8.EncodeRune(ubuf[:], rune(codepoint))
+					result = append(result, ubuf[:n]...)
 					i += 4
 				}
 			default:

@@ -5,6 +5,7 @@ server:
   socket_path: /var/run/streaming-daemon.sock
   socket_mode: 0660
   max_connections: 50000
+  max_stream_duration_ms: 300000  # Max per-stream duration in ms (0 = no timeout, default: 300000 = 5 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
 
 backend:
