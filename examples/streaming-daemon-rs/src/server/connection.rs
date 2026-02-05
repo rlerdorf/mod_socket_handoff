@@ -1,5 +1,6 @@
 //! Connection handler for processing handoffs and streaming responses.
 
+use std::net::TcpStream as StdTcpStream;
 use std::os::unix::io::AsRawFd;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use std::time::Instant;
 
 use futures::FutureExt;
 use tokio::net::UnixStream;
+use tracing::Instrument;
 
 use crate::backend::StreamingBackend;
 use crate::config::ServerConfig;
@@ -37,10 +39,10 @@ impl ConnectionHandler {
     pub async fn handle(&self, stream: UnixStream, guard: ConnectionGuard) {
         let conn_id = guard.id();
         let span = tracing::info_span!("connection", id = conn_id);
-        let _enter = span.enter();
 
-        // Wrap in panic catcher
-        let result = AssertUnwindSafe(self.handle_inner(stream, &guard)).catch_unwind().await;
+        // Wrap in panic catcher, using .instrument() instead of span.enter()
+        // to avoid holding a span guard across .await points.
+        let result = AssertUnwindSafe(self.handle_inner(stream, &guard)).catch_unwind().instrument(span).await;
 
         match result {
             Ok(Ok(())) => {
@@ -100,7 +102,10 @@ impl ConnectionHandler {
         let HandoffResult { client_fd, data, raw_data_len: _ } = handoff;
 
         // Convert OwnedFd to std::net::TcpStream using safe ownership transfer (Rust 1.80+)
-        let std_stream = std::net::TcpStream::from(client_fd);
+        let std_stream = StdTcpStream::from(client_fd);
+
+        // Disable Nagle's algorithm for low-latency SSE token streaming
+        std_stream.set_nodelay(true).map_err(|e| ConnectionError::Stream(format!("Failed to set TCP_NODELAY: {}", e)))?;
 
         // Set non-blocking for tokio
         std_stream.set_nonblocking(true).map_err(|e| ConnectionError::Stream(format!("Failed to set non-blocking: {}", e)))?;
@@ -110,25 +115,38 @@ impl ConnectionHandler {
         // Create SSE writer
         let mut writer = SseWriter::new(tcp_stream, self.config.write_timeout());
 
-        // Send HTTP headers
-        writer.send_headers().await.map_err(|e| ConnectionError::Stream(format!("Failed to send headers: {}", e)))?;
-
         // Create stream request
         let request = StreamRequest::from_handoff(&data, guard.id());
 
-        // Get stream from backend
-        let mut shutdown_rx = guard.subscribe();
-
-        // Stream chunks to client
+        // Create backend stream BEFORE sending headers so we can return a
+        // proper HTTP error (502/504) if the backend is unavailable.
+        // This timeout covers stream *creation* only (connection establishment
+        // and initial response). Individual chunk write timeouts are governed
+        // by write_timeout_secs via SseWriter.
         let backend_timer = Timer::new();
         let mut ttfb_recorded = false;
 
-        let mut chunk_stream = self.backend.stream(request).await.map_err(|e| {
-            metrics::record_backend_error(self.backend.name());
-            ConnectionError::Backend(e.to_string())
-        })?;
+        let mut chunk_stream = match tokio::time::timeout(self.config.backend_timeout(), self.backend.stream(request)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                metrics::record_backend_error(self.backend.name());
+                writer.send_error_response(502, "Backend unavailable").await;
+                return Err(ConnectionError::Backend(e.to_string()));
+            }
+            Err(_) => {
+                metrics::record_backend_error(self.backend.name());
+                writer.send_error_response(504, "Backend timeout").await;
+                return Err(ConnectionError::Backend("backend stream creation timed out".to_string()));
+            }
+        };
 
         metrics::record_backend_request(self.backend.name());
+
+        // Send HTTP 200 headers only after backend stream is established
+        writer.send_headers().await.map_err(|e| ConnectionError::Stream(format!("Failed to send headers: {}", e)))?;
+
+        // Get stream from backend
+        let mut shutdown_rx = guard.subscribe();
 
         // Stream chunks - track whether we completed normally
         let mut stream_completed_normally = false;

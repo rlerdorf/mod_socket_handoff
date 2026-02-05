@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Increase file descriptor limit to handle many concurrent connections
-    increase_fd_limit();
+    let fd_limit = increase_fd_limit();
 
     // Load configuration
     let mut config = Config::load(args.config.as_ref())?;
@@ -89,6 +89,24 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.debug {
         config.logging.level = "debug".to_string();
+    }
+
+    // Cap max_connections to actual fd limit minus a reserve for system fds
+    const FD_RESERVE: u64 = 100;
+    if fd_limit > FD_RESERVE {
+        let max_from_fds = (fd_limit - FD_RESERVE) as usize;
+        if config.server.max_connections > max_from_fds {
+            eprintln!(
+                "Warning: max_connections ({}) exceeds fd limit ({}), capping to {}",
+                config.server.max_connections, fd_limit, max_from_fds
+            );
+            config.server.max_connections = max_from_fds;
+        }
+    } else if fd_limit > 0 {
+        // fd limit is critically low; cap to what's available
+        let max_from_fds = (fd_limit - 1) as usize; // leave at least 1 for the listener
+        eprintln!("Warning: fd limit ({}) is at or below reserve ({}), capping max_connections to {}", fd_limit, FD_RESERVE, max_from_fds);
+        config.server.max_connections = max_from_fds;
     }
 
     // Initialize logging
@@ -193,7 +211,8 @@ fn init_logging(config: &streaming_daemon_rs::config::LoggingConfig) -> anyhow::
 }
 
 /// Increase the file descriptor limit to handle many concurrent connections.
-fn increase_fd_limit() {
+/// Returns the achieved soft limit.
+fn increase_fd_limit() -> u64 {
     use std::mem::MaybeUninit;
 
     const DESIRED_LIMIT: u64 = 100_000;
@@ -202,6 +221,7 @@ fn increase_fd_limit() {
         let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
         if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) == 0 {
             let mut rlim = rlim.assume_init();
+            let original_cur = rlim.rlim_cur;
             if rlim.rlim_cur < DESIRED_LIMIT {
                 rlim.rlim_cur = DESIRED_LIMIT;
                 if rlim.rlim_max < DESIRED_LIMIT {
@@ -213,8 +233,17 @@ fn increase_fd_limit() {
                     eprintln!("Warning: could not increase fd limit");
                 }
             }
+            // Re-read to get the actual achieved limit
+            let mut actual = MaybeUninit::<libc::rlimit>::uninit();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, actual.as_mut_ptr()) == 0 {
+                return actual.assume_init().rlim_cur;
+            }
+            // Second getrlimit failed; return what we know was the original
+            return original_cur;
         }
     }
+    // Fallback: assume a conservative default
+    1024
 }
 
 /// Handle Unix signals.

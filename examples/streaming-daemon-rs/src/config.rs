@@ -41,6 +41,10 @@ pub struct ServerConfig {
 
     /// Buffer size for receiving handoff data.
     pub handoff_buffer_size: usize,
+
+    /// Timeout for backend stream creation (seconds).
+    /// Prevents indefinite blocking when the upstream API hangs.
+    pub backend_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +57,7 @@ impl Default for ServerConfig {
             write_timeout_secs: 30,
             shutdown_timeout_secs: 120,
             handoff_buffer_size: 65536,
+            backend_timeout_secs: 30,
         }
     }
 }
@@ -68,6 +73,10 @@ impl ServerConfig {
 
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout_secs)
+    }
+
+    pub fn backend_timeout(&self) -> Duration {
+        Duration::from_secs(self.backend_timeout_secs)
     }
 }
 
@@ -306,6 +315,11 @@ impl Config {
         if let Ok(v) = std::env::var("DAEMON_HANDOFF_BUFFER_SIZE") {
             if let Ok(n) = v.parse() {
                 self.server.handoff_buffer_size = n;
+            }
+        }
+        if let Ok(v) = std::env::var("DAEMON_BACKEND_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse() {
+                self.server.backend_timeout_secs = n;
             }
         }
 
