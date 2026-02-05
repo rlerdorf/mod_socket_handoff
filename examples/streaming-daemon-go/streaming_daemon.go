@@ -90,10 +90,16 @@ var (
 		"Enable benchmark mode: skip Prometheus updates, print summary on shutdown")
 	backendType = flag.String("backend", "",
 		"Backend type: langgraph, mock, openai, typing (overrides config file)")
+	maxStreamDurationFlag = flag.Int("max-stream-duration-ms", 0,
+		"Maximum per-stream duration in ms (overrides config file, 0 = use config)")
 )
 
 // activeBackend holds the initialized backend for streaming
 var activeBackend backends.Backend
+
+// maxStreamDuration is the maximum duration for a single stream.
+// Set once in main(), read-only after. Zero means no timeout.
+var maxStreamDuration time.Duration
 
 // Benchmark stats (only updated in benchmark mode)
 // Uses atomic operations instead of mutex for better performance under high concurrency.
@@ -210,9 +216,8 @@ var (
 	activeConns    int64
 	activeStreams  int64
 	peakStreams    int64
-	connSemaphore  chan struct{}
-	connWg         sync.WaitGroup
-	peakStreamsMux sync.Mutex
+	connSemaphore chan struct{}
+	connWg        sync.WaitGroup
 )
 
 // handoffBufPool reuses large buffers for receiving handoff data to reduce
@@ -276,6 +281,16 @@ func main() {
 	}
 	if *backendType != "" {
 		cfg.Backend.Provider = *backendType
+	}
+
+	// Resolve per-stream timeout: flag overrides config
+	if *maxStreamDurationFlag > 0 {
+		maxStreamDuration = time.Duration(*maxStreamDurationFlag) * time.Millisecond
+	} else if cfg.Server.MaxStreamDurationMs > 0 {
+		maxStreamDuration = time.Duration(cfg.Server.MaxStreamDurationMs) * time.Millisecond
+	}
+	if maxStreamDuration > 0 {
+		log.Printf("Max stream duration: %v", maxStreamDuration)
 	}
 
 	// Initialize the selected backend
@@ -393,29 +408,36 @@ func main() {
 
 	log.Printf("Streaming daemon listening on %s (max %d connections)", cfg.Server.SocketPath, cfg.Server.MaxConnections)
 
-	// Start Prometheus metrics server
+	// Start Prometheus metrics server (keep reference for graceful shutdown)
+	var metricsServer *http.Server
 	if cfg.Metrics.Enabled && cfg.Metrics.ListenAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		mux.HandleFunc("/healthz", healthHandler)
+		metricsServer = &http.Server{
+			Addr:              cfg.Metrics.ListenAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 		go func() {
-			mux := http.NewServeMux()
-			mux.Handle("/metrics", promhttp.Handler())
-			server := &http.Server{
-				Addr:              cfg.Metrics.ListenAddr,
-				Handler:           mux,
-				ReadHeaderTimeout: 10 * time.Second,
-			}
 			log.Printf("Metrics server listening on %s", cfg.Metrics.ListenAddr)
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("Metrics server error: %v", err)
 			}
 		}()
 	}
 
 	// Start pprof server for profiling (heap, goroutine, GC analysis)
+	var pprofServer *http.Server
 	if cfg.Server.PprofAddr != "" {
+		pprofServer = &http.Server{
+			Addr:              cfg.Server.PprofAddr,
+			Handler:           nil, // Uses default mux which has pprof handlers registered via import
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 		go func() {
 			log.Printf("pprof server listening on %s", cfg.Server.PprofAddr)
-			// Uses default mux which has pprof handlers registered via import
-			if err := http.ListenAndServe(cfg.Server.PprofAddr, nil); err != nil && err != http.ErrServerClosed {
+			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("pprof server error: %v", err)
 			}
 		}()
@@ -500,6 +522,20 @@ func main() {
 	// as a safety net for panics. Calling Close() twice is safe (second returns error).
 	listener.Close()
 
+	// Shut down HTTP servers gracefully
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if metricsServer != nil {
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Metrics server shutdown error: %v", err)
+		}
+	}
+	if pprofServer != nil {
+		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("pprof server shutdown error: %v", err)
+		}
+	}
+
 	// Wait for active connections to finish
 	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
 	done := make(chan struct{})
@@ -565,7 +601,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		metricHandoffsTotal.Inc()
 	}
 
-	// Wrap fd in os.File immediately to ensure cleanup on any error path.
+	// Wrap fd in os.File to use net.FileConn below.
 	// os.NewFile takes ownership only on success; if it returns nil (invalid fd),
 	// we must close the fd ourselves with syscall.Close().
 	clientFile := os.NewFile(uintptr(clientFd), "client")
@@ -574,18 +610,39 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		syscall.Close(clientFd)
 		return
 	}
-	defer clientFile.Close()
 
 	// Validate that the received fd is actually a stream socket.
 	// This defends against malicious or buggy senders passing non-socket fds.
 	sockType, sockErr := syscall.GetsockoptInt(clientFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
 	if sockErr != nil {
 		log.Printf("fd %d is not a valid socket: %v", clientFd, sockErr)
+		clientFile.Close()
 		return
 	}
 	if sockType != syscall.SOCK_STREAM {
 		log.Printf("fd %d has unexpected socket type %d (expected SOCK_STREAM)", clientFd, sockType)
+		clientFile.Close()
 		return
+	}
+
+	// Create net.Conn from file (dups the fd). Close clientFile immediately
+	// after — the dup is independent, so only one fd is held during streaming.
+	clientConn, err := net.FileConn(clientFile)
+	clientFile.Close() // original fd no longer needed
+	if err != nil {
+		log.Printf("Failed to create conn from fd %d: %v", clientFd, err)
+		return
+	}
+	defer clientConn.Close()
+
+	// Enable TCP keepalive to detect dead connections during long streams
+	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+		if err := tcpConn.SetKeepAlive(true); err != nil {
+			log.Printf("Warning: could not enable TCP keepalive: %v", err)
+		}
+		if err := tcpConn.SetKeepAlivePeriod(15 * time.Second); err != nil {
+			log.Printf("Warning: could not set TCP keepalive period: %v", err)
+		}
 	}
 
 	// Panic recovery with error response to client. This runs after we have
@@ -600,7 +657,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 				"Connection: close\r\n" +
 				"\r\n" +
 				"Internal server error\n"
-			if _, err := clientFile.Write([]byte(errorResponse)); err != nil {
+			if _, err := clientConn.Write([]byte(errorResponse)); err != nil {
 				log.Printf("Failed to send error response to client: %v", err)
 			}
 		}
@@ -617,22 +674,34 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}
 
+	// Per-stream context timeout (Issue 2)
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	if maxStreamDuration > 0 {
+		streamCtx, streamCancel = context.WithTimeout(ctx, maxStreamDuration)
+	}
+	defer streamCancel()
+
 	// Stream response to client
 	if *benchmarkMode {
 		benchStats.streamStart()
 	} else {
 		current := atomic.AddInt64(&activeStreams, 1)
 		metricActiveStreams.Set(float64(current))
-		peakStreamsMux.Lock()
-		if current > peakStreams {
-			peakStreams = current
-			metricPeakStreams.Set(float64(current))
+		// Update peak using CAS loop (lock-free)
+		for {
+			peak := atomic.LoadInt64(&peakStreams)
+			if current <= peak {
+				break
+			}
+			if atomic.CompareAndSwapInt64(&peakStreams, peak, current) {
+				metricPeakStreams.Set(float64(current))
+				break
+			}
 		}
-		peakStreamsMux.Unlock()
 	}
 
 	streamStart := time.Now()
-	bytesSent, err := streamToClientWithBytes(ctx, clientFile, handoff)
+	bytesSent, err := streamToClientWithBytes(streamCtx, clientConn, handoff)
 	success := err == nil
 	if err != nil {
 		if !*benchmarkMode {
@@ -771,17 +840,8 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 }
 
 // streamToClientWithBytes sends an SSE response and returns bytes sent.
-func streamToClientWithBytes(ctx context.Context, clientFile *os.File, handoff backends.HandoffData) (int64, error) {
+func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backends.HandoffData) (int64, error) {
 	var totalBytes int64
-
-	// Create net.Conn from file to enable write deadlines.
-	// We must write to this conn (not clientFile) for the deadline to apply.
-	// Note: net.FileConn dups the fd, so conn has its own fd that must be closed.
-	conn, err := net.FileConn(clientFile)
-	if err != nil {
-		return 0, fmt.Errorf("failed to create conn from file: %w", err)
-	}
-	defer conn.Close()
 
 	// Set initial write timeout - fail fast if we can't set deadline
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
@@ -815,6 +875,14 @@ func streamToClientWithBytes(ctx context.Context, clientFile *os.File, handoff b
 		metricBytesSent.Add(float64(bodyBytes))
 	}
 	return totalBytes, err
+}
+
+// healthHandler returns a JSON health check response with active stream/connection counts.
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	conns := atomic.LoadInt64(&activeConns)
+	streams := atomic.LoadInt64(&activeStreams)
+	fmt.Fprintf(w, `{"status":"ok","active_streams":%d,"active_connections":%d}`, streams, conns)
 }
 
 // classifyError returns a short label for the error type for metrics.

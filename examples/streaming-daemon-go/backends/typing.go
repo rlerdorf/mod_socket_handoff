@@ -159,6 +159,13 @@ This is the end of my response. Have a great day!`
 	}
 
 	// Stream character by character like typing
+	// Use a reusable timer to avoid leaking timers from time.After
+	delayTimer := time.NewTimer(0)
+	if !delayTimer.Stop() {
+		<-delayTimer.C
+	}
+	defer delayTimer.Stop()
+
 	for i, char := range response {
 		select {
 		case <-ctx.Done():
@@ -217,8 +224,9 @@ This is the end of my response. Have a great day!`
 			delay = 25 * time.Millisecond // Fast typing
 		}
 
+		delayTimer.Reset(delay)
 		select {
-		case <-time.After(delay):
+		case <-delayTimer.C:
 		case <-ctx.Done():
 			return totalBytes, ctx.Err()
 		}
