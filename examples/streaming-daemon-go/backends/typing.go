@@ -3,17 +3,30 @@ package backends
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"examples/config"
 )
+
+// fortuneTimeout is the maximum time to wait for fortune command.
+const fortuneTimeout = 2 * time.Second
+
+// sseCharBufPool reuses buffers for SSE character messages.
+var sseCharBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 64)
+		return &buf
+	},
+}
 
 // Typing is a backend that streams characters one at a time with a typewriter effect.
 // Uses fortune for dynamic content when the prompt is not recognized.
@@ -65,8 +78,10 @@ The connection handoff is transparent to the client - you see a single HTTP requ
 
 This is the end of my response. Have a great day!`
 	} else {
-		// Unknown prompt - run fortune
-		fortune, err := exec.Command("/usr/games/fortune", "literature").Output()
+		// Unknown prompt - run fortune with timeout
+		fortuneCtx, cancel := context.WithTimeout(ctx, fortuneTimeout)
+		fortune, err := exec.CommandContext(fortuneCtx, "/usr/games/fortune", "literature").Output()
+		cancel()
 		if err != nil {
 			fortune = []byte("(fortune command not available)")
 		}
@@ -103,15 +118,18 @@ This is the end of my response. Have a great day!`
 
 		// Send each character as a separate SSE event
 		// Uses typing daemon format: {"char": "x", "index": 0}
-		data, err := json.Marshal(map[string]interface{}{
-			"char":  string(char),
-			"index": i,
-		})
-		if err != nil {
-			return totalBytes, fmt.Errorf("json marshal failed: %w", err)
-		}
+		// Build JSON manually to avoid allocations from json.Marshal
+		bufPtr := sseCharBufPool.Get().(*[]byte)
+		buf := (*bufPtr)[:0]
+		buf = append(buf, `data: {"char":"`...)
+		buf = appendJSONEscapedRune(buf, char)
+		buf = append(buf, `","index":`...)
+		buf = strconv.AppendInt(buf, int64(i), 10)
+		buf = append(buf, "}\n\n"...)
 
-		n, err := fmt.Fprintf(writer, "data: %s\n\n", data)
+		n, err := writer.Write(buf)
+		*bufPtr = buf
+		sseCharBufPool.Put(bufPtr)
 		totalBytes += int64(n)
 		if err != nil {
 			return totalBytes, fmt.Errorf("write failed: %w", err)
@@ -164,6 +182,34 @@ This is the end of my response. Have a great day!`
 		return totalBytes, fmt.Errorf("flush failed: %w", err)
 	}
 	return totalBytes, nil
+}
+
+// appendJSONEscapedRune appends a JSON-escaped rune to the buffer.
+func appendJSONEscapedRune(buf []byte, r rune) []byte {
+	switch r {
+	case '"':
+		return append(buf, `\"`...)
+	case '\\':
+		return append(buf, `\\`...)
+	case '\n':
+		return append(buf, `\n`...)
+	case '\r':
+		return append(buf, `\r`...)
+	case '\t':
+		return append(buf, `\t`...)
+	default:
+		if r < 0x20 {
+			// Control characters: use \uXXXX format
+			buf = append(buf, `\u00`...)
+			buf = append(buf, "0123456789abcdef"[r>>4])
+			buf = append(buf, "0123456789abcdef"[r&0xf])
+			return buf
+		}
+		// Normal character - append UTF-8 bytes
+		var tmp [4]byte
+		n := utf8.EncodeRune(tmp[:], r)
+		return append(buf, tmp[:n]...)
+	}
 }
 
 // lowercaseFirstIfAppropriate lowercases the first letter of a string

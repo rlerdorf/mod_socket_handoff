@@ -147,7 +147,7 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 			AllowHTTP:          true,
 			DisableCompression: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				d := net.Dialer{KeepAlive: 30 * 1e9} // 30s
+				d := net.Dialer{KeepAlive: 30 * time.Second}
 				return d.DialContext(ctx, network, addr)
 			},
 		}
@@ -163,10 +163,10 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * 1e9, // 90s
+			IdleConnTimeout:     90 * time.Second,
 			DialContext: (&net.Dialer{
-				Timeout:   30 * 1e9, // 30s
-				KeepAlive: 30 * 1e9, // 30s
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
 			}).DialContext,
 		}
 		log.Printf("OpenAI backend: %s (HTTP/2 ALPN)", openaiAPIBase)
@@ -175,13 +175,13 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 		roundTripper = &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return (&net.Dialer{
-					Timeout:   30 * 1e9, // 30s
-					KeepAlive: 30 * 1e9, // 30s
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
 				}).DialContext(ctx, "unix", socketPath)
 			},
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * 1e9, // 90s
+			IdleConnTimeout:     90 * time.Second,
 		}
 		log.Printf("OpenAI backend: %s (HTTP/1.1 via unix:%s)", openaiAPIBase, socketPath)
 	} else {
@@ -189,7 +189,7 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 		transport := &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * 1e9, // 90s
+			IdleConnTimeout:     90 * time.Second,
 		}
 		if strings.HasPrefix(openaiAPIBase, "https://") && openaiInsecure {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}

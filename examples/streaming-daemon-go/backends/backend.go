@@ -24,6 +24,11 @@ type HandoffData struct {
 
 // Backend defines the interface for streaming backends.
 // Each backend is responsible for streaming content to the client connection.
+//
+// Thread safety:
+//   - Init() is called once at startup before any Stream() calls.
+//   - Stream() may be called concurrently from multiple goroutines.
+//   - Backends must ensure Stream() is safe for concurrent use.
 type Backend interface {
 	// Name returns the unique identifier for this backend (used with -backend flag).
 	Name() string
@@ -31,14 +36,16 @@ type Backend interface {
 	// Description returns a human-readable description for help text.
 	Description() string
 
-	// Init initializes the backend (called once at startup).
+	// Init initializes the backend (called once at startup before any Stream calls).
 	// Use this for setting up HTTP clients, loading configuration, etc.
 	// The config parameter contains backend-specific settings from the config file.
+	// Not safe for concurrent use - must complete before Stream() is called.
 	Init(cfg *config.BackendConfig) error
 
 	// Stream sends the response to the client connection.
 	// Returns bytes written and any error.
 	// The connection already has SSE headers sent; backends should send SSE data events.
+	// Must be safe for concurrent use from multiple goroutines.
 	Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error)
 }
 

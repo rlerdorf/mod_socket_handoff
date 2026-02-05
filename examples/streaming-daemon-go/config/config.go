@@ -61,6 +61,7 @@ type MetricsConfig struct {
 }
 
 // LoggingConfig contains logging settings.
+// Note: Currently unused but reserved for future structured logging support.
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
@@ -78,7 +79,37 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config file: %w", err)
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
 	return &cfg, nil
+}
+
+// Validate checks the configuration for errors.
+func (c *Config) Validate() error {
+	// Validate server config
+	if c.Server.MaxConnections < 0 {
+		return fmt.Errorf("server.max_connections must be non-negative")
+	}
+
+	// Validate metrics config
+	if c.Metrics.Enabled && c.Metrics.ListenAddr == "" {
+		return fmt.Errorf("metrics.listen_addr required when metrics.enabled is true")
+	}
+
+	// Validate backend config
+	validProviders := map[string]bool{"mock": true, "openai": true, "typing": true}
+	if c.Backend.Provider != "" && !validProviders[c.Backend.Provider] {
+		return fmt.Errorf("unknown backend.provider: %s (valid: mock, openai, typing)", c.Backend.Provider)
+	}
+
+	// Validate mock backend
+	if c.Backend.Mock.MessageDelayMs < 0 {
+		return fmt.Errorf("backend.mock.message_delay_ms must be non-negative")
+	}
+
+	return nil
 }
 
 // Default returns a Config with sensible defaults.
