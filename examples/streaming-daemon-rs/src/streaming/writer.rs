@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use super::sse::{format_sse_chunk, format_sse_done, format_sse_error, SSE_HEADERS};
+use super::sse::{format_error_response, format_sse_chunk, format_sse_done, format_sse_error, SSE_HEADERS};
 use crate::metrics;
 
 /// Unbuffered SSE writer with per-write timeout.
@@ -50,6 +50,13 @@ impl SseWriter {
     pub async fn send_error(&mut self, error: &str) -> io::Result<()> {
         let data = format_sse_error(error);
         self.write_with_timeout(&data).await
+    }
+
+    /// Send an HTTP error response (non-200 status).
+    /// Used when the backend is unavailable before headers are sent.
+    pub async fn send_error_response(&mut self, status: u16, reason: &str) {
+        let response = format_error_response(status, reason);
+        let _ = self.write_with_timeout(response.as_bytes()).await;
     }
 
     /// Write raw bytes with timeout.

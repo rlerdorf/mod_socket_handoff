@@ -3,7 +3,7 @@
 mod sse;
 mod writer;
 
-pub use sse::{format_sse_chunk, format_sse_done, format_sse_error};
+pub use sse::{format_error_response, format_sse_chunk, format_sse_done, format_sse_error};
 pub use writer::SseWriter;
 
 // Re-export for convenience
