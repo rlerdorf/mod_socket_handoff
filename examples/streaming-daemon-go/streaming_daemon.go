@@ -675,9 +675,12 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}
 
 	// Per-stream context timeout (Issue 2)
-	streamCtx, streamCancel := context.WithCancel(ctx)
+	var streamCtx context.Context
+	var streamCancel context.CancelFunc
 	if maxStreamDuration > 0 {
 		streamCtx, streamCancel = context.WithTimeout(ctx, maxStreamDuration)
+	} else {
+		streamCtx, streamCancel = context.WithCancel(ctx)
 	}
 	defer streamCancel()
 
