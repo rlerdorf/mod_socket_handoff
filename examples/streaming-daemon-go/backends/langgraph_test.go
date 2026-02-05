@@ -80,6 +80,22 @@ func TestParseLangGraphEventEOF(t *testing.T) {
 	}
 }
 
+func TestParseLangGraphEventEOFAfterEventLine(t *testing.T) {
+	// Test case: EOF occurs after reading event type but before data line
+	// This is valid - the event type is returned with nil data
+	scanner := bufio.NewScanner(strings.NewReader("event: messages\n"))
+	eventType, data, err := parseLangGraphEvent(scanner)
+	if err != nil {
+		t.Errorf("parseLangGraphEvent() unexpected error: %v", err)
+	}
+	if eventType != "messages" {
+		t.Errorf("parseLangGraphEvent() eventType = %q, want %q", eventType, "messages")
+	}
+	if data != nil {
+		t.Errorf("parseLangGraphEvent() data = %v, want nil", data)
+	}
+}
+
 func TestExtractContentFromMessages(t *testing.T) {
 	tests := []struct {
 		name    string
