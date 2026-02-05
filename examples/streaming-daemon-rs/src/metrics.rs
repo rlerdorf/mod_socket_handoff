@@ -254,17 +254,23 @@ pub async fn start_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     let builder = PrometheusBuilder::new()
         .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full("daemon_handoff_duration_seconds".to_string()),
+            metrics_exporter_prometheus::Matcher::Full(
+                "daemon_handoff_duration_seconds".to_string(),
+            ),
             &handoff_buckets,
         )
         .expect("valid handoff buckets")
         .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full("daemon_stream_duration_seconds".to_string()),
+            metrics_exporter_prometheus::Matcher::Full(
+                "daemon_stream_duration_seconds".to_string(),
+            ),
             &duration_buckets,
         )
         .expect("valid stream buckets")
         .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full("daemon_backend_duration_seconds".to_string()),
+            metrics_exporter_prometheus::Matcher::Full(
+                "daemon_backend_duration_seconds".to_string(),
+            ),
             &duration_buckets,
         )
         .expect("valid backend duration buckets")
