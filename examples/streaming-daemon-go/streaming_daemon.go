@@ -598,7 +598,9 @@ func main() {
 
 	// Close listener to unblock accept loop immediately. The defer above is kept
 	// as a safety net for panics. Calling Close() twice is safe (second returns error).
-	listener.Close()
+	if err := listener.Close(); err != nil {
+		slog.Debug("listener close during shutdown", "error", err)
+	}
 
 	// Wait for the accept loop to exit before calling connWg.Wait, so no new
 	// connWg.Go (internally Add(1)) calls race with Wait.
@@ -639,7 +641,9 @@ func main() {
 	}
 
 	// Cleanup
-	os.Remove(cfg.Server.SocketPath)
+	if err := os.Remove(cfg.Server.SocketPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to remove socket file", "path", cfg.Server.SocketPath, "error", err)
+	}
 	slog.Info("daemon stopped")
 }
 
@@ -650,6 +654,10 @@ func main() {
 func safeHandleConnection(ctx context.Context, conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
+			// Close the Apache handoff connection on panic to avoid fd leaks.
+			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				slog.Error("error closing Apache connection after panic", "error", closeErr)
+			}
 			slog.Error("panic in connection handler (pre-client)", "panic", r, "stack", string(debug.Stack()))
 		}
 	}()

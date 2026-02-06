@@ -27,7 +27,7 @@ type ServerConfig struct {
 	MaxConnections      int    `yaml:"max_connections"`
 	MaxStreamDurationMs int    `yaml:"max_stream_duration_ms"`
 	PprofAddr           string `yaml:"pprof_addr"`
-	MemLimit            string `yaml:"memlimit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
+	MemLimit            string `yaml:"mem_limit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
 	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 = not set (use -gc-percent flag for GOGC=0)
 }
 
@@ -138,7 +138,7 @@ func (c *Config) Validate() error {
 	// Validate memory limit format early so config-file typos are caught at load time
 	if c.Server.MemLimit != "" {
 		if ParseMemLimit(c.Server.MemLimit) <= 0 {
-			return fmt.Errorf("server.memlimit: invalid value %q (expected positive integer with optional suffix: B, K, KB, KiB, M, MB, MiB, G, GB, GiB, T, TB, TiB, or no suffix)", c.Server.MemLimit)
+			return fmt.Errorf("server.mem_limit: invalid value %q (expected positive integer with optional suffix: B, K, KB, KiB, M, MB, MiB, G, GB, GiB, T, TB, TiB, or no suffix)", c.Server.MemLimit)
 		}
 	}
 
