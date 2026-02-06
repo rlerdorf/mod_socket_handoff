@@ -4,10 +4,10 @@ Production-ready Go daemon for receiving Apache socket handoffs and streaming re
 
 ## Overview
 
-This daemon receives client connections from Apache via `mod_socket_handoff` using Unix domain socket fd passing (`SCM_RIGHTS`). Once the connection is handed off, the daemon streams responses directly to the client while the Apache worker is freed immediately.
+This daemon receives client connections from Apache via `mod_socket_handoff` using Unix domain socket fd passing (`SCM_RIGHTS`). Once the connection is handed off, the daemon streams responses from the LLM API directly to the client while the Apache worker is freed immediately.
 
 ```
-Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go
+Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ──HTTP/2──> LLM API
                   │         (fd pass)           │
                   │                             │
             Worker freed              Streams SSE to client
@@ -115,6 +115,7 @@ Configuration options:
 | - | `OPENAI_API_KEY` | `backend.openai.api_key` | API key |
 | `-openai-socket` | `OPENAI_API_SOCKET` | `backend.openai.api_socket` | Unix socket for API |
 | `-http2-enabled` | `OPENAI_HTTP2_ENABLED` | `backend.openai.http2_enabled` | Enable HTTP/2 |
+| - | `OPENAI_INSECURE_SSL` | `backend.openai.insecure_ssl` | Skip TLS verification |
 
 ### LangGraph Backend
 
@@ -203,6 +204,7 @@ server:
   socket_path: /var/run/streaming-daemon.sock
   socket_mode: 0660
   max_connections: 50000
+  max_stream_duration_ms: 300000  # Max per-stream duration (0 = no timeout, default: 5 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
 
 backend:
@@ -212,14 +214,18 @@ backend:
   openai:
     # api_key: sk-...  # Better to use OPENAI_API_KEY env var
     api_base: https://api.openai.com/v1
+    # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
     http2_enabled: true
+    insecure_ssl: false
 
   langgraph:
     # api_key: lgk_...  # Better to use LANGGRAPH_API_KEY env var
     api_base: https://api.langchain.com/v1
+    # api_socket: /var/run/langgraph-proxy.sock  # Unix socket for high concurrency
     assistant_id: agent
     stream_mode: messages-tuple
     http2_enabled: true
+    insecure_ssl: false
 
   mock:
     message_delay_ms: 50
@@ -259,6 +265,7 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | `-metrics-addr` | `127.0.0.1:9090` | Metrics server address (empty to disable) |
 | `-pprof-addr` | - | pprof server address (empty to disable) |
 | `-benchmark` | `false` | Enable benchmark mode |
+| `-max-stream-duration-ms` | `300000` | Max per-stream duration in ms (0 = no limit) |
 | `-message-delay` | `50ms` | Delay between mock messages |
 | `-openai-base` | - | OpenAI API base URL |
 | `-openai-socket` | - | Unix socket for OpenAI API |
@@ -286,7 +293,9 @@ streaming-daemon-go/
 │   ├── langgraph_test.go    # LangGraph backend tests
 │   ├── mock.go              # Mock demo backend
 │   ├── openai.go            # OpenAI streaming backend
+│   ├── openai_test.go       # OpenAI backend tests
 │   ├── typing.go            # Typewriter effect backend
+│   ├── transport.go         # Shared HTTP transport builder
 │   ├── sse.go               # Shared SSE utilities
 │   └── metrics.go           # Backend metrics helpers
 └── config/
@@ -331,6 +340,52 @@ header('X-Handoff-Data: ' . $data);
 // Exit - mod_socket_handoff takes over
 exit;
 ```
+
+## How It Works
+
+This section traces a single request through the system, from client to LLM API and back, with the relevant filenames and function names.
+
+### Prerequisites
+
+Socket handoff requires that Apache receives **plain HTTP/1.1** connections. TLS must be terminated upstream (e.g., by HAProxy, nginx, or a CDN) before reaching Apache. There are two reasons for this:
+
+1. **TLS sockets cannot be passed** — The crypto state (session keys, sequence numbers) is internal to OpenSSL and cannot be extracted for transfer to another process.
+2. **HTTP/2 multiplexed streams cannot be split** — A single HTTP/2 connection carries multiple streams that share flow control and header compression state, so individual streams cannot be isolated into separate socket fds.
+
+### Request Flow (OpenAI Backend)
+
+```
+Client ──TLS──> Terminator ──HTTP/1.1──> Apache ──Unix Socket──> Daemon ──HTTP/2──> OpenAI API
+                                           │         (fd pass)       │
+                                           │                        │
+                                     Worker freed          Streams SSE to client
+```
+
+1. **Apache receives HTTP/1.1 request** — The upstream TLS terminator has already decrypted the connection and forwards plain HTTP/1.1 to Apache.
+
+2. **PHP authenticates and sets handoff headers** — The PHP handler validates the user session, prepares a JSON payload with the prompt and user context, and sets `X-Socket-Handoff` (daemon socket path) and `X-Handoff-Data` (JSON payload) response headers.
+
+3. **mod_socket_handoff intercepts the headers** — The Apache output filter connects to the daemon's Unix socket, sends the client's TCP socket fd via `SCM_RIGHTS` along with the handoff data, then swaps in a dummy socket so Apache doesn't close the real client connection.
+
+4. **Daemon accept loop** — `main()` in `streaming_daemon.go` runs an accept loop on the Unix socket. Each connection is dispatched to a goroutine after acquiring the connection semaphore (bounded to `max_connections`).
+
+5. **Panic recovery** — `safeHandleConnection()` in `streaming_daemon.go` wraps the handler with `defer recover()` so that a panic in one connection doesn't crash the daemon.
+
+6. **Receive fd handoff** — `handleConnection()` in `streaming_daemon.go` calls `receiveFd()`, which uses `ReadMsgUnix()` to receive the client socket fd via `SCM_RIGHTS`. It validates that neither `MSG_TRUNC` nor `MSG_CTRUNC` flags are set (detecting truncated data or control messages), parses the control messages, and extracts the file descriptor. Buffer pools (`handoffBufPool`, `oobBufPool`) reduce allocation pressure.
+
+7. **Close Apache socket, create client connection** — `handleConnection()` closes the Apache Unix socket immediately after receiving the fd to avoid holding it open during long streams (10-30+ seconds). It validates the fd is `SOCK_STREAM`, converts it to a `net.Conn` via `net.FileConn()`, enables TCP keepalive, and sets up a deferred panic handler that can send HTTP 500 to the client.
+
+8. **Parse handoff data** — The handoff JSON is unmarshalled into `HandoffData` (defined in `backends/backend.go`), which contains the prompt (or full message history), model selection, user ID, and backend-specific fields.
+
+9. **Write SSE headers and start streaming** — `streamToClientWithBytes()` in `streaming_daemon.go` writes pre-allocated HTTP response headers (`HTTP/1.1 200 OK`, `Content-Type: text/event-stream`, etc.) directly to the client socket, then calls `activeBackend.Stream()`.
+
+10. **Build and send API request** — `OpenAI.Stream()` in `backends/openai.go` builds the JSON request body manually using append operations (avoiding `encoding/json` reflection overhead), sets the `Authorization` header, and POSTs to the OpenAI `/chat/completions` endpoint with `"stream": true`. The HTTP client uses HTTP/2 multiplexing by default (configured via shared `NewHTTPClient()` in `backends/transport.go`).
+
+11. **Parse upstream SSE stream** — The API response is parsed line-by-line with `bufio.Scanner`. Lines with the `data: ` prefix are extracted; `extractContentFast()` uses byte-level pattern matching on `"content":"` to extract the content string without full JSON parsing. The `unescapeJSON()` function handles JSON escape sequences including UTF-16 surrogate pairs.
+
+12. **Forward chunks to client** — Each extracted content string is re-wrapped as an SSE event by `SendSSE()` in `backends/sse.go` (format: `data: {"content":"..."}\n\n`) and written directly to the client socket. Write deadlines are refreshed every 10 chunks to balance between timeout protection and syscall overhead.
+
+13. **Stream completion** — When the API sends `[DONE]` or the scanner reaches EOF, a `data: [DONE]\n\n` completion marker is sent to the client. Backend duration and TTFB metrics are recorded. The client connection is closed, the goroutine exits, and the connection semaphore slot is released.
 
 ## Prometheus Metrics
 

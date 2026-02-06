@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -19,7 +18,6 @@ import (
 	"unicode/utf8"
 
 	"examples/config"
-	"golang.org/x/net/http2"
 )
 
 // OpenAI backend configuration flags (can override config file)
@@ -143,70 +141,14 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 		log.Println("Warning: TLS certificate verification disabled")
 	}
 
-	// Create HTTP transport based on configuration
-	var roundTripper http.RoundTripper
-
-	if useHTTP2 && strings.HasPrefix(openaiAPIBase, "http://") {
-		// HTTP/2 with h2c (prior knowledge) for http:// endpoints
-		roundTripper = &http2.Transport{
-			AllowHTTP:          true,
-			DisableCompression: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				d := net.Dialer{KeepAlive: 30 * time.Second}
-				return d.DialContext(ctx, network, addr)
-			},
-		}
-		log.Printf("OpenAI backend: %s (HTTP/2 h2c)", openaiAPIBase)
-	} else if useHTTP2 && strings.HasPrefix(openaiAPIBase, "https://") {
-		// HTTP/2 with ALPN negotiation for https:// endpoints
-		tlsConfig := &tls.Config{}
-		if openaiInsecure {
-			tlsConfig.InsecureSkipVerify = true
-		}
-		roundTripper = &http.Transport{
-			TLSClientConfig:     tlsConfig,
-			ForceAttemptHTTP2:   true,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		}
-		log.Printf("OpenAI backend: %s (HTTP/2 ALPN)", openaiAPIBase)
-	} else if socketPath != "" {
-		// HTTP/1.1 with Unix socket for high-concurrency
-		roundTripper = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return (&net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext(ctx, "unix", socketPath)
-			},
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		}
-		log.Printf("OpenAI backend: %s (HTTP/1.1 via unix:%s)", openaiAPIBase, socketPath)
-	} else {
-		// HTTP/1.1 with TCP
-		transport := &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		}
-		if strings.HasPrefix(openaiAPIBase, "https://") && openaiInsecure {
-			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		}
-		roundTripper = transport
-		log.Printf("OpenAI backend: %s (HTTP/1.1)", openaiAPIBase)
-	}
-
-	// Create HTTP client with connection pooling
-	httpClient = &http.Client{
-		Transport: roundTripper,
-	}
+	// Create HTTP client with shared transport builder
+	httpClient = NewHTTPClient(TransportConfig{
+		BaseURL:     openaiAPIBase,
+		SocketPath:  socketPath,
+		UseHTTP2:    useHTTP2,
+		InsecureSSL: openaiInsecure,
+		Label:       "OpenAI",
+	})
 
 	return nil
 }
