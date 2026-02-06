@@ -7,7 +7,7 @@
 APXS ?= apxs
 MODULE = mod_socket_handoff
 
-.PHONY: all install clean test test-go test-rust test-daemons
+.PHONY: all install clean test test-go build-go test-rust test-daemons
 
 all: $(MODULE).la
 
@@ -42,11 +42,13 @@ disable:
 test-compile: $(MODULE).la
 	@echo "Compilation successful!"
 
+# Build Go daemon
+build-go:
+	$(MAKE) -C examples/streaming-daemon-go build
+
 # Test Go daemon
-# Uses /var/tmp for temp directory because /tmp is often mounted noexec
 test-go:
-	@echo "Running Go daemon tests..."
-	cd examples/streaming-daemon-go && TMPDIR=/var/tmp go test -v ./...
+	$(MAKE) -C examples/streaming-daemon-go test
 
 # Test Rust daemon
 test-rust:
@@ -69,6 +71,7 @@ help:
 	@echo "  make clean      - Remove build artifacts"
 	@echo ""
 	@echo "Testing:"
+	@echo "  make build-go     - Build Go daemon"
 	@echo "  make test-go      - Run Go daemon tests"
 	@echo "  make test-rust    - Run Rust daemon tests"
 	@echo "  make test-daemons - Run all daemon tests"
