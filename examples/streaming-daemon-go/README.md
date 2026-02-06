@@ -59,7 +59,7 @@ the latest Go from go.dev into a local `.goroot/` directory with SHA256
 verification. Set `MIN_GO_VERSION` to override the minimum:
 
 ```bash
-make MIN_GO_VERSION=1.25.8
+make MIN_GO_VERSION=1.26.0
 ```
 
 ## Quick Start

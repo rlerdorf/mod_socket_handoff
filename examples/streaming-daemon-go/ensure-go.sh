@@ -173,6 +173,23 @@ info "Downloading $DL_URL ..."
 mkdir -p "$GOROOT_CACHE"
 TARBALL_PATH="$GOROOT_CACHE/$TARBALL"
 
+# Serialize concurrent download/install operations with flock.
+LOCKFILE="$GOROOT_CACHE/.lock"
+lock_fd=9
+eval "exec $lock_fd>\"$LOCKFILE\""
+if ! flock -w 300 $lock_fd; then
+    die "timed out waiting for lock on $LOCKFILE"
+fi
+# Re-check cached Go under lock — another process may have installed it.
+if [ -x "$CACHED_GO" ]; then
+    _ver="$(parse_go_version "$CACHED_GO")"
+    if [ -n "$_ver" ] && version_ge "$_ver" "$MIN_VERSION"; then
+        info "Cached Go $_ver >= $MIN_VERSION (installed by another process) — using $CACHED_GO"
+        printf '%s\n' "$CACHED_GO"
+        exit 0
+    fi
+fi
+
 download "$DL_URL" "$TARBALL_PATH"
 
 # Verify checksum
@@ -189,8 +206,6 @@ else
 fi
 
 # Extract to a temp directory first, then atomically swap into place.
-# This avoids destroying a working cached Go if extraction fails, and
-# serializes concurrent invocations via rename.
 EXTRACT_TMP="$GOROOT_CACHE/go.tmp.$$"
 rm -rf "$EXTRACT_TMP"
 mkdir -p "$EXTRACT_TMP"
