@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"examples/config"
-	"golang.org/x/net/http2"
 )
 
 // LangGraph backend configuration flags (can override config file)
@@ -140,70 +138,14 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 		log.Println("Warning: TLS certificate verification disabled for LangGraph")
 	}
 
-	// Create HTTP transport based on configuration (same pattern as OpenAI)
-	var roundTripper http.RoundTripper
-
-	if useHTTP2 && strings.HasPrefix(langgraphAPIBase, "http://") {
-		// HTTP/2 with h2c (prior knowledge) for http:// endpoints
-		roundTripper = &http2.Transport{
-			AllowHTTP:          true,
-			DisableCompression: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				d := net.Dialer{KeepAlive: 30 * time.Second}
-				return d.DialContext(ctx, network, addr)
-			},
-		}
-		log.Printf("LangGraph backend: %s (HTTP/2 h2c)", langgraphAPIBase)
-	} else if useHTTP2 && strings.HasPrefix(langgraphAPIBase, "https://") {
-		// HTTP/2 with ALPN negotiation for https:// endpoints
-		tlsConfig := &tls.Config{}
-		if langgraphInsecure {
-			tlsConfig.InsecureSkipVerify = true
-		}
-		roundTripper = &http.Transport{
-			TLSClientConfig:     tlsConfig,
-			ForceAttemptHTTP2:   true,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		}
-		log.Printf("LangGraph backend: %s (HTTP/2 ALPN)", langgraphAPIBase)
-	} else if socketPath != "" {
-		// HTTP/1.1 with Unix socket for high-concurrency
-		roundTripper = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return (&net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext(ctx, "unix", socketPath)
-			},
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		}
-		log.Printf("LangGraph backend: %s (HTTP/1.1 via unix:%s)", langgraphAPIBase, socketPath)
-	} else {
-		// HTTP/1.1 with TCP
-		transport := &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		}
-		if strings.HasPrefix(langgraphAPIBase, "https://") && langgraphInsecure {
-			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		}
-		roundTripper = transport
-		log.Printf("LangGraph backend: %s (HTTP/1.1)", langgraphAPIBase)
-	}
-
-	// Create HTTP client with connection pooling
-	langgraphHTTPClient = &http.Client{
-		Transport: roundTripper,
-	}
+	// Create HTTP client with shared transport builder
+	langgraphHTTPClient = NewHTTPClient(TransportConfig{
+		BaseURL:     langgraphAPIBase,
+		SocketPath:  socketPath,
+		UseHTTP2:    useHTTP2,
+		InsecureSSL: langgraphInsecure,
+		Label:       "LangGraph",
+	})
 
 	return nil
 }
@@ -228,64 +170,8 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		assistantID = handoff.AssistantID
 	}
 
-	// Get buffer from pool and build request JSON manually (same pattern as OpenAI backend)
-	bufPtr := langgraphBufPool.Get().(*[]byte)
-	buf := (*bufPtr)[:0]
-
-	buf = append(buf, `{"assistant_id":"`...)
-	buf = appendJSONEscaped(buf, assistantID)
-	buf = append(buf, `","input":{"messages":[`...)
-
-	// Use messages array if provided, otherwise fall back to single prompt
-	if len(handoff.Messages) > 0 {
-		for i, msg := range handoff.Messages {
-			if i > 0 {
-				buf = append(buf, ',')
-			}
-			buf = append(buf, `{"type":"`...)
-			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
-			buf = append(buf, `","content":"`...)
-			buf = appendJSONEscaped(buf, msg.Content)
-			buf = append(buf, `"}`...)
-		}
-	} else {
-		prompt := handoff.Prompt
-		if prompt == "" {
-			prompt = "Hello"
-		}
-		buf = append(buf, `{"type":"human","content":"`...)
-		buf = appendJSONEscaped(buf, prompt)
-		buf = append(buf, `"}`...)
-	}
-
-	buf = append(buf, `]`...)
-
-	// Add custom LangGraph input fields if provided (sorted for deterministic output)
-	if n := len(handoff.LangGraphInput); n > 0 {
-		// Use stack-allocated array for common case (<=8 keys) to avoid heap allocation
-		var stackKeys [8]string
-		var keys []string
-		if n <= 8 {
-			keys = stackKeys[:0]
-		} else {
-			keys = make([]string, 0, n)
-		}
-		for key := range handoff.LangGraphInput {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			buf = append(buf, ',')
-			buf = append(buf, '"')
-			buf = appendJSONEscaped(buf, key)
-			buf = append(buf, `":`...)
-			buf = appendJSONValue(buf, handoff.LangGraphInput[key])
-		}
-	}
-
-	buf = append(buf, `},"stream_mode":["`...)
-	buf = appendJSONEscaped(buf, langgraphStreamMode)
-	buf = append(buf, `"],"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
+	// Build request body (shared with tests via buildLangGraphRequestBody)
+	buf := buildLangGraphRequestBody(handoff, assistantID)
 
 	// Determine endpoint: stateful (with thread_id) or stateless
 	var reqURL string
@@ -299,8 +185,6 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(buf))
 	if err != nil {
-		*bufPtr = buf
-		langgraphBufPool.Put(bufPtr)
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -316,10 +200,6 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 
 	// Make request
 	resp, err := langgraphHTTPClient.Do(req)
-
-	// Return buffer to pool after request is sent
-	*bufPtr = buf
-	langgraphBufPool.Put(bufPtr)
 
 	if err != nil {
 		RecordBackendError("langgraph")
@@ -513,7 +393,7 @@ func extractContentFromMessages(data []byte) string {
 }
 
 // buildLangGraphRequestBody builds the JSON request body for a LangGraph API call.
-// This is used by tests; the Stream() method inlines this logic for better performance.
+// Used by both Stream() and tests.
 func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	bufPtr := langgraphBufPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
