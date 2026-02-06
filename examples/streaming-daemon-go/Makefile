@@ -35,7 +35,8 @@ build:
 	$(GO) build -ldflags="-s -w" -o $(BINARY) .
 
 # Build with Profile-Guided Optimization (requires a collected CPU profile)
-build-pgo: $(PGO_PROFILE)
+build-pgo:
+	@test -f "$(PGO_PROFILE)" || { echo "error: $(PGO_PROFILE) not found. Run 'make profile' for collection instructions." >&2; exit 1; }
 	$(eval GO := $(resolve_go))
 	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) build -pgo=$(PGO_PROFILE) -ldflags="-s -w" -o $(BINARY) .
