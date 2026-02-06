@@ -24,6 +24,8 @@ type ServerConfig struct {
 	MaxConnections      int    `yaml:"max_connections"`
 	MaxStreamDurationMs int    `yaml:"max_stream_duration_ms"`
 	PprofAddr           string `yaml:"pprof_addr"`
+	MemLimit            string `yaml:"memlimit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
+	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 means use Go default
 }
 
 // BackendConfig contains backend selection and configuration.
@@ -74,8 +76,7 @@ type MetricsConfig struct {
 	ListenAddr string `yaml:"listen_addr"`
 }
 
-// LoggingConfig contains logging settings.
-// Note: Currently unused but reserved for future structured logging support.
+// LoggingConfig contains logging settings for slog configuration.
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`

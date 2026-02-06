@@ -23,7 +23,9 @@ BINARY         ?= streaming-daemon
 # targets like `clean` never trigger a Go download.
 resolve_go = $(shell ./ensure-go.sh $(MIN_GO_VERSION))
 
-.PHONY: all build test fmt vet clean clean-go clean-all install uninstall
+PGO_PROFILE ?= default.pgo
+
+.PHONY: all build build-pgo profile test fmt vet clean clean-go clean-all install uninstall
 
 all: build
 
@@ -31,6 +33,18 @@ build:
 	$(eval GO := $(resolve_go))
 	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) build -ldflags="-s -w" -o $(BINARY) .
+
+# Build with Profile-Guided Optimization (requires a collected CPU profile)
+build-pgo: $(PGO_PROFILE)
+	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
+	$(GO) build -pgo=$(PGO_PROFILE) -ldflags="-s -w" -o $(BINARY) .
+
+# Print instructions for collecting a CPU profile for PGO
+profile:
+	@echo "Collect a CPU profile from a running daemon:"
+	@echo "  curl -o $(PGO_PROFILE) 'http://localhost:6060/debug/pprof/profile?seconds=30'"
+	@echo "Then build with: make build-pgo"
 
 # Use /var/tmp because /tmp is often mounted noexec
 test:

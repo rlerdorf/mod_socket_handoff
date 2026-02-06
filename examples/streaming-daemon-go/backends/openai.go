@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -134,11 +134,11 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 
 	// Validate API key
 	if openaiAPIKey == "" {
-		log.Println("Warning: OPENAI_API_KEY not set, API calls will fail")
+		slog.Warn("OPENAI_API_KEY not set, API calls will fail")
 	}
 
 	if openaiInsecure {
-		log.Println("Warning: TLS certificate verification disabled")
+		slog.Warn("TLS certificate verification disabled")
 	}
 
 	// Create HTTP client with shared transport builder

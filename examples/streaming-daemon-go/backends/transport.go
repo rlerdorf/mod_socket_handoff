@@ -6,7 +6,7 @@ package backends
 import (
 	"context"
 	"crypto/tls"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -44,7 +44,7 @@ func NewHTTPClient(cfg TransportConfig) *http.Client {
 				return d.DialContext(ctx, network, addr)
 			},
 		}
-		log.Printf("%s backend: %s (HTTP/2 h2c)", cfg.Label, cfg.BaseURL)
+		slog.Info("backend transport configured", "backend", cfg.Label, "url", cfg.BaseURL, "mode", "HTTP/2 h2c")
 	} else if cfg.UseHTTP2 && strings.HasPrefix(cfg.BaseURL, "https://") {
 		// HTTP/2 with ALPN negotiation for https:// endpoints
 		tlsConfig := &tls.Config{}
@@ -62,7 +62,7 @@ func NewHTTPClient(cfg TransportConfig) *http.Client {
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 		}
-		log.Printf("%s backend: %s (HTTP/2 ALPN)", cfg.Label, cfg.BaseURL)
+		slog.Info("backend transport configured", "backend", cfg.Label, "url", cfg.BaseURL, "mode", "HTTP/2 ALPN")
 	} else if cfg.SocketPath != "" {
 		// HTTP/1.1 with Unix socket for high-concurrency
 		roundTripper = &http.Transport{
@@ -76,7 +76,7 @@ func NewHTTPClient(cfg TransportConfig) *http.Client {
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
 		}
-		log.Printf("%s backend: %s (HTTP/1.1 via unix:%s)", cfg.Label, cfg.BaseURL, cfg.SocketPath)
+		slog.Info("backend transport configured", "backend", cfg.Label, "url", cfg.BaseURL, "mode", "HTTP/1.1 unix", "socket", cfg.SocketPath)
 	} else {
 		// HTTP/1.1 with TCP
 		transport := &http.Transport{
@@ -88,7 +88,7 @@ func NewHTTPClient(cfg TransportConfig) *http.Client {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
 		roundTripper = transport
-		log.Printf("%s backend: %s (HTTP/1.1)", cfg.Label, cfg.BaseURL)
+		slog.Info("backend transport configured", "backend", cfg.Label, "url", cfg.BaseURL, "mode", "HTTP/1.1")
 	}
 
 	return &http.Client{

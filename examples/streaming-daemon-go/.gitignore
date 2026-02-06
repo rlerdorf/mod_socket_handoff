@@ -4,6 +4,9 @@ streaming-daemon
 # Downloaded Go toolchain (from ensure-go.sh)
 .goroot/
 
+# PGO profiles (collected for Profile-Guided Optimization builds)
+*.pgo
+
 # Local config files (may contain API keys)
 config/local.yaml
 config/local.yml
