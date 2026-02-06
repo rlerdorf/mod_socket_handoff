@@ -7,9 +7,10 @@ Production-ready Rust daemon for receiving Apache socket handoffs and streaming 
 This daemon receives client connections from Apache via `mod_socket_handoff` using Unix domain socket fd passing (`SCM_RIGHTS`). Once the connection is handed off, the daemon streams responses directly to the client while the Apache worker is freed immediately.
 
 ```
-Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-rs
-                  │         (fd pass)           │
+Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-rs ──────HTTP/2──────> LLM
+                  │         (fd pass)           │           <---SSE response--- API
                   │                             │
+                  │                             v
             Worker freed              Streams SSE to client
 ```
 
