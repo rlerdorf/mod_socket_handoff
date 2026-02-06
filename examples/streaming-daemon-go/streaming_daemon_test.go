@@ -12,6 +12,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -559,13 +560,13 @@ func TestInitLogging(t *testing.T) {
 			}
 
 			// Verify log level by checking if the handler is enabled for the expected level
-			if !handler.Enabled(nil, tc.wantLevel) {
+			if !handler.Enabled(context.Background(), tc.wantLevel) {
 				t.Errorf("handler not enabled for expected level %v", tc.wantLevel)
 			}
 			// Verify one level below is disabled (except for debug which is the lowest)
 			if tc.wantLevel > slog.LevelDebug {
 				belowLevel := tc.wantLevel - 4 // slog levels are spaced by 4
-				if handler.Enabled(nil, belowLevel) {
+				if handler.Enabled(context.Background(), belowLevel) {
 					t.Errorf("handler should not be enabled for level %v (below %v)", belowLevel, tc.wantLevel)
 				}
 			}
