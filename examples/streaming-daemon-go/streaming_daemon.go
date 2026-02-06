@@ -24,12 +24,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // Register pprof handlers for profiling
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -281,7 +283,8 @@ func initLogging(cfg config.LoggingConfig) {
 
 // parseMemLimit parses a memory limit string like "768MiB" or "1GiB" into bytes.
 // Supported suffixes: B, KiB, MiB, GiB, TiB (case-insensitive).
-// Returns -1 on parse error.
+// The numeric part must be a non-negative integer (no fractional values).
+// Returns -1 on parse error or overflow.
 func parseMemLimit(s string) int64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -290,7 +293,7 @@ func parseMemLimit(s string) int64 {
 
 	// Find where the numeric part ends
 	i := 0
-	for i < len(s) && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.') {
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
 		i++
 	}
 	if i == 0 {
@@ -300,17 +303,14 @@ func parseMemLimit(s string) int64 {
 	numStr := s[:i]
 	suffix := strings.TrimSpace(s[i:])
 
-	// Parse the number
-	var num float64
-	if _, err := fmt.Sscanf(numStr, "%f", &num); err != nil {
-		return -1
-	}
-	if num < 0 {
+	// Parse the number as uint64 (catches overflow and negative values)
+	num, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil {
 		return -1
 	}
 
 	// Parse the suffix
-	var multiplier float64
+	var multiplier uint64
 	switch strings.ToLower(suffix) {
 	case "", "b":
 		multiplier = 1
@@ -326,7 +326,16 @@ func parseMemLimit(s string) int64 {
 		return -1
 	}
 
-	return int64(num * multiplier)
+	// Check for overflow before multiplying
+	if num > 0 && multiplier > math.MaxInt64/num {
+		return -1
+	}
+	result := num * multiplier
+	if result > math.MaxInt64 {
+		return -1
+	}
+
+	return int64(result)
 }
 
 func main() {
