@@ -416,9 +416,9 @@ Socket handoff requires that Apache receives **plain HTTP/1.1** connections. TLS
 ### Request Flow (OpenAI Backend)
 
 ```
-Client ──TLS──> Terminator ──HTTP/1.1──> Apache ──Unix Socket──> Daemon ──HTTP/2──> OpenAI API
-                                           │         (fd pass)       │
-                                           │                        │
+Client ──TLS──> Terminator ──HTTP/1.1──> Apache ──Unix Socket──> Daemon ──HTTP/2──> OpenAI
+                                           │         (fd pass)       │  <---SSE---- API
+                                           │                         │
                                      Worker freed          Streams SSE to client
 ```
 
