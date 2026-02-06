@@ -828,7 +828,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	// Debug: log if control message was truncated
 	if recvflags&syscall.MSG_CTRUNC != 0 {
-		slog.Debug("MSG_CTRUNC set", "oobn", oobn, "n", n, "recvflags", fmt.Sprintf("0x%x", recvflags))
+		slog.Debug("MSG_CTRUNC set", "oobn", oobn, "n", n, "recvflags", recvflags)
 	}
 
 	// Parse control message to extract fd (do this early so we can close on error).

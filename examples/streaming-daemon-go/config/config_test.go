@@ -12,7 +12,6 @@ func TestParseMemLimit(t *testing.T) {
 	}{
 		// Valid: bytes (no suffix)
 		{"bare number", "1024", 1024},
-		{"zero", "0", -1},
 		{"B suffix", "512B", 512},
 		{"b lowercase", "512b", 512},
 
@@ -49,6 +48,9 @@ func TestParseMemLimit(t *testing.T) {
 		// Valid: large values within int64 range
 		{"8 TiB", "8TiB", 8 * 1024 * 1024 * 1024 * 1024},
 		{"max safe GiB", "8388607GiB", 8388607 * 1024 * 1024 * 1024}, // ~8 PiB, fits int64
+
+		// Invalid: zero (treated as error; callers reject <= 0)
+		{"zero", "0", -1},
 
 		// Invalid: empty / whitespace-only
 		{"empty string", "", -1},

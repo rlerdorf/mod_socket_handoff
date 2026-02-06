@@ -138,7 +138,7 @@ func (c *Config) Validate() error {
 	// Validate memory limit format early so config-file typos are caught at load time
 	if c.Server.MemLimit != "" {
 		if ParseMemLimit(c.Server.MemLimit) <= 0 {
-			return fmt.Errorf("server.memlimit: invalid value %q (expected positive integer with optional suffix B, KiB, MiB, GiB, TiB)", c.Server.MemLimit)
+			return fmt.Errorf("server.memlimit: invalid value %q (expected positive integer with optional suffix: B, K, KB, KiB, M, MB, MiB, G, GB, GiB, T, TB, TiB, or no suffix)", c.Server.MemLimit)
 		}
 	}
 
@@ -158,7 +158,13 @@ func (c *Config) Validate() error {
 }
 
 // ParseMemLimit parses a memory limit string like "768MiB" or "1GiB" into bytes.
-// Supported suffixes: B, KiB, MiB, GiB, TiB (case-insensitive).
+// Supported suffixes (case-insensitive):
+//   - no suffix or "B": bytes
+//   - "KiB", "K", "KB": kibibytes (1024 bytes)
+//   - "MiB", "M", "MB": mebibytes (1024^2 bytes)
+//   - "GiB", "G", "GB": gibibytes (1024^3 bytes)
+//   - "TiB", "T", "TB": tebibytes (1024^4 bytes)
+//
 // The numeric part must be a positive integer (no zero, negative, or fractional values).
 // Returns -1 on parse error or overflow.
 func ParseMemLimit(s string) int64 {
