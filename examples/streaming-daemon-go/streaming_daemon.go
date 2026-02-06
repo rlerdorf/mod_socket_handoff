@@ -305,7 +305,7 @@ func parseMemLimit(s string) int64 {
 
 	// Parse the number as uint64 (catches overflow and negative values)
 	num, err := strconv.ParseUint(numStr, 10, 64)
-	if err != nil {
+	if err != nil || num == 0 {
 		return -1
 	}
 
@@ -326,16 +326,13 @@ func parseMemLimit(s string) int64 {
 		return -1
 	}
 
-	// Check for overflow before multiplying
-	if num > 0 && multiplier > math.MaxInt64/num {
-		return -1
-	}
-	result := num * multiplier
-	if result > math.MaxInt64 {
+	// Check for overflow before multiplying.
+	// If num > MaxInt64/multiplier, the product would exceed MaxInt64.
+	if multiplier > math.MaxInt64/num {
 		return -1
 	}
 
-	return int64(result)
+	return int64(num * multiplier)
 }
 
 func main() {

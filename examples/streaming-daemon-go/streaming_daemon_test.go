@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"examples/backends"
+	"examples/config"
 )
 
 // sendFd sends a file descriptor over a Unix socket along with data.
@@ -463,6 +464,115 @@ func TestHealthHandler(t *testing.T) {
 	}
 }
 
+func TestInitLogging(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        config.LoggingConfig
+		wantLevel  slog.Level
+		wantJSON   bool
+	}{
+		{
+			name:      "defaults to info text",
+			cfg:       config.LoggingConfig{},
+			wantLevel: slog.LevelInfo,
+			wantJSON:  false,
+		},
+		{
+			name:      "debug level",
+			cfg:       config.LoggingConfig{Level: "debug", Format: "text"},
+			wantLevel: slog.LevelDebug,
+			wantJSON:  false,
+		},
+		{
+			name:      "warn level",
+			cfg:       config.LoggingConfig{Level: "warn", Format: "text"},
+			wantLevel: slog.LevelWarn,
+			wantJSON:  false,
+		},
+		{
+			name:      "warning alias",
+			cfg:       config.LoggingConfig{Level: "warning", Format: "text"},
+			wantLevel: slog.LevelWarn,
+			wantJSON:  false,
+		},
+		{
+			name:      "error level",
+			cfg:       config.LoggingConfig{Level: "error", Format: "text"},
+			wantLevel: slog.LevelError,
+			wantJSON:  false,
+		},
+		{
+			name:      "unknown level defaults to info",
+			cfg:       config.LoggingConfig{Level: "bogus", Format: "text"},
+			wantLevel: slog.LevelInfo,
+			wantJSON:  false,
+		},
+		{
+			name:      "case insensitive level",
+			cfg:       config.LoggingConfig{Level: "DEBUG", Format: "text"},
+			wantLevel: slog.LevelDebug,
+			wantJSON:  false,
+		},
+		{
+			name:      "json format",
+			cfg:       config.LoggingConfig{Level: "info", Format: "json"},
+			wantLevel: slog.LevelInfo,
+			wantJSON:  true,
+		},
+		{
+			name:      "json format case insensitive",
+			cfg:       config.LoggingConfig{Level: "info", Format: "JSON"},
+			wantLevel: slog.LevelInfo,
+			wantJSON:  true,
+		},
+		{
+			name:      "unknown format defaults to text",
+			cfg:       config.LoggingConfig{Level: "info", Format: "xml"},
+			wantLevel: slog.LevelInfo,
+			wantJSON:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Save and restore the default logger
+			original := slog.Default()
+			defer slog.SetDefault(original)
+
+			initLogging(tc.cfg)
+
+			logger := slog.Default()
+			handler := logger.Handler()
+
+			// Verify handler type
+			switch handler.(type) {
+			case *slog.JSONHandler:
+				if !tc.wantJSON {
+					t.Errorf("got JSONHandler, want TextHandler")
+				}
+			case *slog.TextHandler:
+				if tc.wantJSON {
+					t.Errorf("got TextHandler, want JSONHandler")
+				}
+			default:
+				t.Errorf("unexpected handler type: %T", handler)
+			}
+
+			// Verify log level by checking if the handler is enabled for the expected level
+			if !handler.Enabled(nil, tc.wantLevel) {
+				t.Errorf("handler not enabled for expected level %v", tc.wantLevel)
+			}
+			// Verify one level below is disabled (except for debug which is the lowest)
+			if tc.wantLevel > slog.LevelDebug {
+				belowLevel := tc.wantLevel - 4 // slog levels are spaced by 4
+				if handler.Enabled(nil, belowLevel) {
+					t.Errorf("handler should not be enabled for level %v (below %v)", belowLevel, tc.wantLevel)
+				}
+			}
+		})
+	}
+}
+
 func TestParseMemLimit(t *testing.T) {
 	tests := []struct {
 		name string
@@ -471,7 +581,7 @@ func TestParseMemLimit(t *testing.T) {
 	}{
 		// Valid: bytes (no suffix)
 		{"bare number", "1024", 1024},
-		{"zero", "0", 0},
+		{"zero", "0", -1},
 		{"B suffix", "512B", 512},
 		{"b lowercase", "512b", 512},
 
@@ -541,14 +651,4 @@ func TestParseMemLimit(t *testing.T) {
 			}
 		})
 	}
-
-	// Verify the result is always within valid range for debug.SetMemoryLimit
-	t.Run("all valid results fit int64", func(t *testing.T) {
-		for _, tc := range tests {
-			got := parseMemLimit(tc.input)
-			if got > 0 && got > math.MaxInt64 {
-				t.Errorf("parseMemLimit(%q) = %d, exceeds MaxInt64", tc.input, got)
-			}
-		}
-	})
 }
