@@ -325,8 +325,8 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | `-pprof-addr` | - | pprof server address (empty to disable) |
 | `-benchmark` | `false` | Enable benchmark mode |
 | `-max-stream-duration-ms` | `300000` | Max per-stream duration in ms (0 = no limit) |
-| `-memlimit` | - | Soft memory limit, e.g. `512MiB`, `1GiB` (sets `GOMEMLIMIT`) |
-| `-gc-percent` | - | GOGC value; -1 = Go default, 0 = disable GC (sets `GOGC`) |
+| `-memlimit` | - | Soft memory limit, e.g. `512MiB`, `1GiB` (equivalent to `GOMEMLIMIT`) |
+| `-gc-percent` | - | GC target percentage; -1 = Go default, 0 = disable GC (equivalent to `GOGC`) |
 | `-message-delay` | `50ms` | Delay between mock messages |
 | `-openai-base` | - | OpenAI API base URL |
 | `-openai-socket` | - | Unix socket for OpenAI API |

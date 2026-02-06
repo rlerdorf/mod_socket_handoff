@@ -283,7 +283,7 @@ func initLogging(cfg config.LoggingConfig) {
 
 // parseMemLimit parses a memory limit string like "768MiB" or "1GiB" into bytes.
 // Supported suffixes: B, KiB, MiB, GiB, TiB (case-insensitive).
-// The numeric part must be a non-negative integer (no fractional values).
+// The numeric part must be a positive integer (no zero, negative, or fractional values).
 // Returns -1 on parse error or overflow.
 func parseMemLimit(s string) int64 {
 	s = strings.TrimSpace(s)
@@ -603,6 +603,7 @@ func main() {
 			// Acquire semaphore (limit concurrent connections)
 			select {
 			case connSemaphore <- struct{}{}:
+				conn := conn // local copy for goroutine closure
 				atomic.AddInt64(&activeConns, 1)
 				if !*benchmarkMode {
 					metricConnectionsTotal.Inc()
