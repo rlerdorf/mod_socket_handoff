@@ -34,6 +34,10 @@ shutdown_timeout_secs = 120
 # Should accommodate LLM prompts; Apache's LimitRequestFieldSize limits headers
 handoff_buffer_size = 65536
 
+# Timeout for backend stream creation (seconds)
+# Prevents indefinite blocking when the upstream API hangs
+backend_timeout_secs = 30
+
 [backend]
 # Backend provider: "mock" or "openai"
 # Use "mock" for testing/demos
@@ -52,8 +56,32 @@ timeout_secs = 120
 # OpenAI API base URL
 api_base = "https://api.openai.com/v1"
 
+# Unix socket path for API connections (HTTP/1.1 mode only)
+# Eliminates ephemeral port exhaustion under high concurrency
+# api_socket = "/var/run/openai-proxy.sock"
+
 # Maximum idle connections per host in the HTTP pool
 pool_max_idle_per_host = 100
+
+# Skip TLS certificate verification (for testing with self-signed certs only)
+# WARNING: Never enable in production
+insecure_ssl = false
+
+[backend.openai.http2]
+# Enable HTTP/2 multiplexing for upstream API connections (default: true)
+# ~100 concurrent streams share a single TCP connection, reducing overhead
+enabled = true
+
+# Flow control window sizes
+initial_stream_window_kb = 1024    # Per-stream window (1 MB)
+initial_connection_window_kb = 10240  # Per-connection window (10 MB)
+
+# Adaptive flow control adjusts windows based on actual throughput
+adaptive_window = true
+
+# HTTP/2 keep-alive PING frames (0 = disabled)
+keep_alive_interval_secs = 10
+keep_alive_timeout_secs = 20
 
 [metrics]
 # Enable Prometheus metrics endpoint

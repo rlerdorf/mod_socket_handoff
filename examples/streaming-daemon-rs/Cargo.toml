@@ -47,11 +47,6 @@ clap = { version = "4.5", features = ["derive"] }
 tempfile = "3"
 tokio-test = "0.4"
 
-[features]
-default = []
-# io_uring support (Linux 5.1+ only) - experimental
-# uring = ["tokio-uring"]
-
 [[bin]]
 name = "streaming-daemon-rs"
 path = "src/main.rs"
