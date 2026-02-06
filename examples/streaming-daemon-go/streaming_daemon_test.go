@@ -563,9 +563,9 @@ func TestInitLogging(t *testing.T) {
 			if !handler.Enabled(context.Background(), tc.wantLevel) {
 				t.Errorf("handler not enabled for expected level %v", tc.wantLevel)
 			}
-			// Verify one level below is disabled (except for debug which is the lowest)
+			// Verify a level just below is disabled (except for debug which is the lowest)
 			if tc.wantLevel > slog.LevelDebug {
-				belowLevel := tc.wantLevel - 4 // slog levels are spaced by 4
+				belowLevel := tc.wantLevel - 1
 				if handler.Enabled(context.Background(), belowLevel) {
 					t.Errorf("handler should not be enabled for level %v (below %v)", belowLevel, tc.wantLevel)
 				}

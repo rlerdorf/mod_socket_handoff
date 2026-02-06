@@ -519,8 +519,11 @@ func main() {
 		}()
 	}
 
-	// Accept connections
+	// Accept connections. acceptDone is closed when the loop exits, ensuring
+	// no new connWg.Go calls race with connWg.Wait during shutdown.
+	acceptDone := make(chan struct{})
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -596,6 +599,10 @@ func main() {
 	// Close listener to unblock accept loop immediately. The defer above is kept
 	// as a safety net for panics. Calling Close() twice is safe (second returns error).
 	listener.Close()
+
+	// Wait for the accept loop to exit before calling connWg.Wait, so no new
+	// connWg.Go (internally Add(1)) calls race with Wait.
+	<-acceptDone
 
 	// Shut down HTTP servers gracefully
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
