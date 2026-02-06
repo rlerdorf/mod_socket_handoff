@@ -273,32 +273,37 @@ impl Config {
 
     /// Apply environment variable overrides.
     fn apply_env_overrides(&mut self) {
+        // Helpers to reduce boilerplate for the two common patterns:
+        //   env_str!("VAR", field)  — assign string directly
+        //   env_parse!("VAR", field) — parse into the field's numeric type
+        macro_rules! env_str {
+            ($var:expr, $field:expr) => {
+                if let Ok(v) = std::env::var($var) {
+                    $field = v;
+                }
+            };
+        }
+        macro_rules! env_parse {
+            ($var:expr, $field:expr) => {
+                if let Ok(v) = std::env::var($var) {
+                    if let Ok(n) = v.parse() {
+                        $field = n;
+                    }
+                }
+            };
+        }
+
         // Server overrides
-        if let Ok(v) = std::env::var("DAEMON_SOCKET_PATH") {
-            self.server.socket_path = v;
-        }
-        if let Ok(v) = std::env::var("DAEMON_MAX_CONNECTIONS") {
-            if let Ok(n) = v.parse() {
-                self.server.max_connections = n;
-            }
-        }
-        if let Ok(v) = std::env::var("DAEMON_HANDOFF_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.server.handoff_timeout_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("DAEMON_WRITE_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.server.write_timeout_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("DAEMON_SHUTDOWN_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.server.shutdown_timeout_secs = n;
-            }
-        }
+        env_str!("DAEMON_SOCKET_PATH", self.server.socket_path);
+        env_parse!("DAEMON_MAX_CONNECTIONS", self.server.max_connections);
+        env_parse!("DAEMON_HANDOFF_TIMEOUT_SECS", self.server.handoff_timeout_secs);
+        env_parse!("DAEMON_WRITE_TIMEOUT_SECS", self.server.write_timeout_secs);
+        env_parse!("DAEMON_SHUTDOWN_TIMEOUT_SECS", self.server.shutdown_timeout_secs);
+        env_parse!("DAEMON_HANDOFF_BUFFER_SIZE", self.server.handoff_buffer_size);
+        env_parse!("DAEMON_BACKEND_TIMEOUT_SECS", self.server.backend_timeout_secs);
+
+        // Socket mode needs special octal parsing
         if let Ok(v) = std::env::var("DAEMON_SOCKET_MODE") {
-            // Parse as octal if prefixed with 0o or 0, otherwise decimal
             let v = v.trim();
             if let Some(stripped) = v.strip_prefix("0o") {
                 if let Ok(n) = u32::from_str_radix(stripped, 8) {
@@ -312,40 +317,22 @@ impl Config {
                 self.server.socket_mode = n;
             }
         }
-        if let Ok(v) = std::env::var("DAEMON_HANDOFF_BUFFER_SIZE") {
-            if let Ok(n) = v.parse() {
-                self.server.handoff_buffer_size = n;
-            }
-        }
-        if let Ok(v) = std::env::var("DAEMON_BACKEND_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.server.backend_timeout_secs = n;
-            }
-        }
 
         // Backend overrides
-        if let Ok(v) = std::env::var("DAEMON_BACKEND_PROVIDER") {
-            self.backend.provider = v;
-        }
-        if let Ok(v) = std::env::var("DAEMON_DEFAULT_MODEL") {
-            self.backend.default_model = v;
-        }
+        env_str!("DAEMON_BACKEND_PROVIDER", self.backend.provider);
+        env_str!("DAEMON_DEFAULT_MODEL", self.backend.default_model);
 
-        // OpenAI overrides (standard env var)
+        // OpenAI overrides
         if let Ok(v) = std::env::var("OPENAI_API_KEY") {
             self.backend.openai.api_key = Some(v);
         }
-        if let Ok(v) = std::env::var("OPENAI_API_BASE") {
-            self.backend.openai.api_base = v;
-        }
+        env_str!("OPENAI_API_BASE", self.backend.openai.api_base);
         if let Ok(v) = std::env::var("OPENAI_API_SOCKET") {
             self.backend.openai.api_socket = Some(v);
         }
-        // HTTP/2 overrides
         if let Ok(v) = std::env::var("OPENAI_HTTP2_ENABLED") {
             self.backend.openai.http2.enabled = v != "false" && v != "0";
         }
-        // TLS insecure mode (for testing with self-signed certificates)
         if let Ok(v) = std::env::var("OPENAI_INSECURE_SSL") {
             self.backend.openai.insecure_ssl = v.eq_ignore_ascii_case("true") || v == "1";
         }
@@ -354,17 +341,11 @@ impl Config {
         if let Ok(v) = std::env::var("DAEMON_METRICS_ENABLED") {
             self.metrics.enabled = v == "true" || v == "1";
         }
-        if let Ok(v) = std::env::var("DAEMON_METRICS_ADDR") {
-            self.metrics.listen_addr = v;
-        }
+        env_str!("DAEMON_METRICS_ADDR", self.metrics.listen_addr);
 
         // Logging overrides
-        if let Ok(v) = std::env::var("DAEMON_LOG_LEVEL") {
-            self.logging.level = v;
-        }
-        if let Ok(v) = std::env::var("DAEMON_LOG_FORMAT") {
-            self.logging.format = v;
-        }
+        env_str!("DAEMON_LOG_LEVEL", self.logging.level);
+        env_str!("DAEMON_LOG_FORMAT", self.logging.format);
     }
 }
 

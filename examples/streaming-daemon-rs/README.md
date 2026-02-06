@@ -23,10 +23,8 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-rs
 - **Graceful shutdown** - Drains connections on SIGTERM/SIGINT
 - **Connection limiting** - Configurable max connections (default: 100,000)
 - **Per-write timeouts** - Prevents hung connections from blocking resources
-
-### Future Enhancements
-
-- **io_uring support** - The Cargo.toml includes a commented `uring` feature for `tokio-uring` integration. When enabled, this would use Linux's io_uring (kernel 5.1+) for even higher throughput through reduced syscall overhead. Currently experimental and not enabled by default.
+- **HTTP/2 multiplexing** - Upstream API connections share TCP connections via HTTP/2
+- **Benchmark mode** - Skip Prometheus overhead for performance testing
 
 ## Requirements
 
@@ -79,14 +77,19 @@ export DAEMON_WRITE_TIMEOUT_SECS=30
 export DAEMON_SHUTDOWN_TIMEOUT_SECS=120
 export DAEMON_SOCKET_MODE=0o660          # Octal format supported
 export DAEMON_HANDOFF_BUFFER_SIZE=65536
+export DAEMON_BACKEND_TIMEOUT_SECS=30   # Backend stream creation timeout
 
 # Backend selection
 export DAEMON_BACKEND_PROVIDER=openai    # or "mock"
 export DAEMON_DEFAULT_MODEL=gpt-4o
+export DAEMON_TOKEN_DELAY_MS=50         # Mock backend: delay between tokens (ms)
 
 # OpenAI settings
 export OPENAI_API_KEY=sk-...
 export OPENAI_API_BASE=https://api.openai.com/v1
+export OPENAI_API_SOCKET=/var/run/proxy.sock  # Unix socket (HTTP/1.1 mode only)
+export OPENAI_HTTP2_ENABLED=true        # false or 0 to disable
+export OPENAI_INSECURE_SSL=false        # true or 1 for self-signed certs
 
 # Metrics
 export DAEMON_METRICS_ENABLED=true
@@ -110,6 +113,7 @@ Options:
   -s, --socket <SOCKET>    Override socket path
   -b, --backend <BACKEND>  Override backend provider (mock, openai)
   -d, --debug              Enable debug logging
+      --benchmark          Skip Prometheus updates, print summary on shutdown
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -126,6 +130,8 @@ max_connections = 100000
 handoff_timeout_secs = 5
 write_timeout_secs = 30
 shutdown_timeout_secs = 120
+handoff_buffer_size = 65536
+backend_timeout_secs = 30  # Timeout for backend stream creation
 
 [backend]
 provider = "mock"  # or "openai"
@@ -133,8 +139,19 @@ default_model = "gpt-4o"
 timeout_secs = 120
 
 [backend.openai]
+# api_key = "sk-..."          # Or set OPENAI_API_KEY env var
 api_base = "https://api.openai.com/v1"
+# api_socket = "/var/run/proxy.sock"  # Unix socket (HTTP/1.1 only)
 pool_max_idle_per_host = 100
+insecure_ssl = false           # Skip TLS verification (testing only)
+
+[backend.openai.http2]
+enabled = true                 # HTTP/2 multiplexing (default: true)
+initial_stream_window_kb = 1024
+initial_connection_window_kb = 10240
+adaptive_window = true
+keep_alive_interval_secs = 10  # HTTP/2 PING interval (0 = disabled)
+keep_alive_timeout_secs = 20
 
 [metrics]
 enabled = true
@@ -195,10 +212,13 @@ exit;
 
 ### Mock Backend
 
-Simulates streaming responses for testing. Streams a word at a time with configurable delays.
+Simulates streaming responses for testing. Streams a canned response word-by-word with configurable delay between tokens (default: 50ms).
 
 ```bash
 ./streaming-daemon-rs --backend mock
+
+# Custom token delay (ms) for benchmarking
+DAEMON_TOKEN_DELAY_MS=10 ./streaming-daemon-rs --backend mock
 ```
 
 ### OpenAI Backend
@@ -210,17 +230,36 @@ export OPENAI_API_KEY=sk-...
 ./streaming-daemon-rs --backend openai
 ```
 
-The handoff data can specify:
-- `prompt` - The user message
+The handoff data JSON can specify:
+- `prompt` - The user message (used if `messages` is absent)
+- `messages` - Full conversation history (`[{"role": "user", "content": "..."}]`)
 - `model` - Model to use (default: gpt-4o)
 - `system` - System prompt
 - `max_tokens` - Maximum response tokens
 - `temperature` - Sampling temperature
+- `user_id` - User ID for tracking
+- `request_id` - Request ID for log correlation
 
 ## Signals
 
 - **SIGTERM/SIGINT** - Initiates graceful shutdown, stops accepting new connections, waits for active streams to complete
 - **SIGHUP** - Logs current connection count (status report)
+
+## Benchmark Mode
+
+When started with `--benchmark`, the daemon skips all Prometheus metric updates to eliminate their overhead during performance testing. Instead, it tracks lightweight atomic counters and prints a summary on shutdown:
+
+```
+=== Benchmark Summary ===
+Peak concurrent streams: 5000
+Total started: 50000
+Total completed: 49998
+Total failed: 2
+Total bytes sent: 12500000
+=========================
+```
+
+This is useful for measuring raw throughput without Prometheus serialization costs.
 
 ## Prometheus Metrics
 
@@ -383,9 +422,12 @@ streaming-daemon-rs/
 ## Performance Considerations
 
 - **Connection limit**: Default 100,000 concurrent connections. Adjust `max_connections` based on available memory (~10KB per connection).
-- **File descriptors**: Ensure `ulimit -n` is high enough. The systemd service sets `LimitNOFILE=200000`.
-- **HTTP connection pooling**: The OpenAI backend maintains a connection pool to reduce latency.
+- **File descriptors**: The daemon automatically raises the fd limit to 100,000 on startup. The systemd service sets `LimitNOFILE=200000`. If `max_connections` exceeds the fd limit minus a safety reserve (100 fds), it is automatically capped.
+- **HTTP/2 multiplexing**: When enabled (default), upstream API connections use HTTP/2, allowing ~100 concurrent streams per TCP connection. This means 100k streams can share ~1000 connections instead of requiring 100k separate connections, dramatically reducing connection overhead and avoiding ephemeral port exhaustion.
+- **HTTP/1.1 Unix socket mode**: When HTTP/2 is disabled, the `api_socket` option routes API traffic through a Unix socket to avoid ephemeral port limits.
+- **Unbuffered SSE writes**: The SSE writer writes directly to the TCP socket without buffering, combined with `TCP_NODELAY`, for lowest-latency token delivery.
 - **Write timeouts**: Per-write timeouts prevent slow clients from blocking resources indefinitely.
+- **Benchmark mode**: Use `--benchmark` to skip Prometheus overhead when measuring raw throughput.
 
 ## Troubleshooting
 

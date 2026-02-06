@@ -10,13 +10,13 @@ use futures::FutureExt;
 use tokio::net::UnixStream;
 use tracing::Instrument;
 
-use crate::backend::StreamingBackend;
+use crate::backend::{StreamRequest, StreamingBackend};
 use crate::config::ServerConfig;
 use crate::error::HandoffError;
 use crate::metrics::{self, bench_stream_end, bench_stream_start, ErrorReason, Timer};
 use crate::server::handoff::{receive_handoff, HandoffResult};
 use crate::shutdown::ConnectionGuard;
-use crate::streaming::{SseWriter, StreamRequest};
+use crate::streaming::SseWriter;
 
 /// Connection handler that processes a single handoff.
 pub struct ConnectionHandler {
