@@ -23,13 +23,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // Register pprof handlers for profiling
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -92,6 +93,10 @@ var (
 		"Backend type: langgraph, mock, openai, typing (overrides config file)")
 	maxStreamDurationFlag = flag.Int("max-stream-duration-ms", 0,
 		"Maximum per-stream duration in ms (overrides config file, 0 = use config)")
+	memLimitFlag = flag.String("memlimit", "",
+		"Soft memory limit, e.g. 512MiB, 1GiB (overrides config file)")
+	gcPercentFlag = flag.Int("gc-percent", -1,
+		"GOGC value; -1 = use Go default, 0 = disable GC (overrides config file)")
 )
 
 // activeBackend holds the initialized backend for streaming
@@ -245,8 +250,36 @@ var sseHeadersBytes = []byte("HTTP/1.1 200 OK\r\n" +
 	"X-Accel-Buffering: no\r\n" +
 	"\r\n")
 
+// initLogging configures the default slog logger based on LoggingConfig.
+func initLogging(cfg config.LoggingConfig) {
+	var level slog.Level
+	switch strings.ToLower(cfg.Level) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{
+		Level:     level,
+		AddSource: true,
+	}
+
+	var handler slog.Handler
+	if strings.ToLower(cfg.Format) == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+
+	slog.SetDefault(slog.New(handler))
+}
+
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 
 	// Load configuration (defaults -> config file -> flags)
@@ -255,10 +288,17 @@ func main() {
 	if *configFile != "" {
 		fileCfg, err := config.Load(*configFile)
 		if err != nil {
-			log.Fatalf("Failed to load config file: %v", err)
+			fmt.Fprintf(os.Stderr, "Failed to load config file: %v\n", err)
+			os.Exit(1)
 		}
 		cfg = fileCfg
-		log.Printf("Loaded config from %s", *configFile)
+	}
+
+	// Initialize structured logging based on config (before any log output)
+	initLogging(cfg.Logging)
+
+	if *configFile != "" {
+		slog.Info("loaded config", "path", *configFile)
 	}
 
 	// Apply flag overrides (only if explicitly set, i.e., non-zero/non-empty)
@@ -290,19 +330,51 @@ func main() {
 		maxStreamDuration = time.Duration(cfg.Server.MaxStreamDurationMs) * time.Millisecond
 	}
 	if maxStreamDuration > 0 {
-		log.Printf("Max stream duration: %v", maxStreamDuration)
+		slog.Info("max stream duration configured", "duration", maxStreamDuration)
+	}
+
+	// Configure memory limit (flag > config)
+	memLimit := cfg.Server.MemLimit
+	if *memLimitFlag != "" {
+		memLimit = *memLimitFlag
+	}
+	if memLimit != "" {
+		limit := config.ParseMemLimit(memLimit)
+		if limit <= 0 {
+			slog.Error("invalid memlimit value", "value", memLimit)
+			os.Exit(1)
+		}
+		debug.SetMemoryLimit(limit)
+		slog.Info("memory limit set", "limit", memLimit, "bytes", limit)
+	}
+
+	// Configure GC percent (flag > config).
+	// GOGC=0 is valid (disables GC, useful with memlimit), so we track whether
+	// the value was explicitly set rather than testing > 0. The config struct's
+	// zero value (0) is ambiguous, so gc_percent=0 can only be set via the flag.
+	gcPercent := cfg.Server.GCPercent
+	gcPercentSet := cfg.Server.GCPercent != 0
+	if *gcPercentFlag >= 0 {
+		gcPercent = *gcPercentFlag
+		gcPercentSet = true
+	}
+	if gcPercentSet {
+		old := debug.SetGCPercent(gcPercent)
+		slog.Info("GC percent set", "value", gcPercent, "previous", old)
 	}
 
 	// Initialize the selected backend
 	activeBackend = backends.Get(cfg.Backend.Provider)
 	if activeBackend == nil {
 		available := backends.List()
-		log.Fatalf("Unknown backend: %s. Available backends: %v", cfg.Backend.Provider, available)
+		slog.Error("unknown backend", "provider", cfg.Backend.Provider, "available", available)
+		os.Exit(1)
 	}
 	if err := activeBackend.Init(&cfg.Backend); err != nil {
-		log.Fatalf("Failed to initialize backend %s: %v", cfg.Backend.Provider, err)
+		slog.Error("failed to initialize backend", "provider", cfg.Backend.Provider, "error", err)
+		os.Exit(1)
 	}
-	log.Printf("Using backend: %s (%s)", activeBackend.Name(), activeBackend.Description())
+	slog.Info("using backend", "name", activeBackend.Name(), "description", activeBackend.Description())
 
 	// Set benchmark mode for backends package (skips Prometheus updates)
 	if *benchmarkMode {
@@ -315,7 +387,7 @@ func main() {
 	// Add headroom for the upstream pool, listening socket, and system overhead.
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		log.Printf("Warning: could not get fd limit: %v", err)
+		slog.Warn("could not get fd limit", "error", err)
 	} else {
 		desiredLimit := uint64(cfg.Server.MaxConnections + 2000)
 		if rLimit.Cur < desiredLimit {
@@ -324,10 +396,9 @@ func main() {
 				rLimit.Max = desiredLimit
 			}
 			if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-				log.Printf("Warning: could not set fd limit to %d: %v (current: %d)",
-					desiredLimit, err, rLimit.Cur)
+				slog.Warn("could not set fd limit", "desired", desiredLimit, "error", err, "current", rLimit.Cur)
 			} else {
-				log.Printf("Increased fd limit to %d", desiredLimit)
+				slog.Info("increased fd limit", "limit", desiredLimit)
 			}
 		}
 	}
@@ -346,9 +417,9 @@ func main() {
 		for sig := range sigChan {
 			switch sig {
 			case syscall.SIGHUP:
-				log.Printf("Received SIGHUP, active connections: %d", atomic.LoadInt64(&activeConns))
+				slog.Info("received SIGHUP", "active_connections", atomic.LoadInt64(&activeConns))
 			default:
-				log.Printf("Received %v, shutting down...", sig)
+				slog.Info("received signal, shutting down", "signal", sig)
 				signal.Stop(sigChan)
 				cancel()
 				return
@@ -360,7 +431,8 @@ func main() {
 	if info, err := os.Lstat(cfg.Server.SocketPath); err == nil {
 		// Path exists - verify it's a socket before doing anything
 		if info.Mode().Type() != os.ModeSocket {
-			log.Fatalf("Path %s exists but is not a socket", cfg.Server.SocketPath)
+			slog.Error("path exists but is not a socket", "path", cfg.Server.SocketPath)
+			os.Exit(1)
 		}
 
 		// Probe to see if another daemon is listening
@@ -368,7 +440,8 @@ func main() {
 		if probeErr == nil {
 			// Connection succeeded - another daemon is running
 			probeConn.Close()
-			log.Fatalf("Socket %s is already in use by another process", cfg.Server.SocketPath)
+			slog.Error("socket already in use by another process", "path", cfg.Server.SocketPath)
+			os.Exit(1)
 		}
 
 		// Check if the error indicates a stale socket or benign race condition
@@ -378,22 +451,25 @@ func main() {
 			// Socket is stale - safe to remove
 			// Ignore NotFound errors (race with another process removing it)
 			if err := os.Remove(cfg.Server.SocketPath); err != nil && !os.IsNotExist(err) {
-				log.Fatalf("Failed to remove stale socket %s: %v", cfg.Server.SocketPath, err)
+				slog.Error("failed to remove stale socket", "path", cfg.Server.SocketPath, "error", err)
+				os.Exit(1)
 			}
-			log.Printf("Removed stale socket file %s", cfg.Server.SocketPath)
+			slog.Info("removed stale socket file", "path", cfg.Server.SocketPath)
 		} else if isNotExist(probeErr) {
 			// Socket was removed between Lstat and Dial - safe to proceed
-			log.Printf("Socket file %s was removed (race), proceeding", cfg.Server.SocketPath)
+			slog.Info("socket file was removed (race), proceeding", "path", cfg.Server.SocketPath)
 		} else {
 			// Other error (permission denied, etc.) - can't determine if socket is in use
-			log.Fatalf("Cannot determine if socket %s is in use: %v", cfg.Server.SocketPath, probeErr)
+			slog.Error("cannot determine if socket is in use", "path", cfg.Server.SocketPath, "error", probeErr)
+			os.Exit(1)
 		}
 	}
 
 	// Create Unix socket listener
 	listener, err := net.Listen("unix", cfg.Server.SocketPath)
 	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", cfg.Server.SocketPath, err)
+		slog.Error("failed to listen", "path", cfg.Server.SocketPath, "error", err)
+		os.Exit(1)
 	}
 	// Ensure listener is closed on exit (backup for panics); also closed explicitly
 	// after ctx.Done() during graceful shutdown to unblock the accept loop.
@@ -403,10 +479,10 @@ func main() {
 	// Apache (www-data) must be in the daemon's group to connect.
 	// Use -socket-mode=0666 only for testing, never in production.
 	if err := os.Chmod(cfg.Server.SocketPath, os.FileMode(cfg.Server.SocketMode)); err != nil {
-		log.Printf("Warning: Could not chmod socket: %v", err)
+		slog.Warn("could not chmod socket", "error", err)
 	}
 
-	log.Printf("Streaming daemon listening on %s (max %d connections)", cfg.Server.SocketPath, cfg.Server.MaxConnections)
+	slog.Info("streaming daemon listening", "socket", cfg.Server.SocketPath, "max_connections", cfg.Server.MaxConnections)
 
 	// Start Prometheus metrics server (keep reference for graceful shutdown)
 	var metricsServer *http.Server
@@ -420,9 +496,9 @@ func main() {
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {
-			log.Printf("Metrics server listening on %s", cfg.Metrics.ListenAddr)
+			slog.Info("metrics server listening", "addr", cfg.Metrics.ListenAddr)
 			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("Metrics server error: %v", err)
+				slog.Error("metrics server error", "error", err)
 			}
 		}()
 	}
@@ -436,15 +512,18 @@ func main() {
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {
-			log.Printf("pprof server listening on %s", cfg.Server.PprofAddr)
+			slog.Info("pprof server listening", "addr", cfg.Server.PprofAddr)
 			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("pprof server error: %v", err)
+				slog.Error("pprof server error", "error", err)
 			}
 		}()
 	}
 
-	// Accept connections
+	// Accept connections. acceptDone is closed when the loop exits, ensuring
+	// no new connWg.Go calls race with connWg.Wait during shutdown.
+	acceptDone := make(chan struct{})
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -452,7 +531,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				default:
-					log.Printf("Accept error: %v", err)
+					slog.Error("accept error", "error", err)
 					time.Sleep(100 * time.Millisecond) // Back off on errors
 					continue
 				}
@@ -462,7 +541,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				if err := conn.Close(); err != nil {
-					log.Printf("Error closing connection during shutdown: %v", err)
+					slog.Error("error closing connection during shutdown", "error", err)
 				}
 				return
 			default:
@@ -471,16 +550,15 @@ func main() {
 			// Acquire semaphore (limit concurrent connections)
 			select {
 			case connSemaphore <- struct{}{}:
-				connWg.Add(1)
+				conn := conn // local copy for goroutine closure
 				atomic.AddInt64(&activeConns, 1)
 				if !*benchmarkMode {
 					metricConnectionsTotal.Inc()
 					metricActiveConnections.Inc()
 				}
-				go func(c net.Conn) {
+				connWg.Go(func() {
 					defer func() {
 						<-connSemaphore
-						connWg.Done()
 						atomic.AddInt64(&activeConns, -1)
 						if !*benchmarkMode {
 							metricActiveConnections.Dec()
@@ -489,21 +567,21 @@ func main() {
 					// Check context again inside goroutine to handle race condition
 					select {
 					case <-ctx.Done():
-						if err := c.Close(); err != nil {
-							log.Printf("Error closing connection during shutdown: %v", err)
+						if err := conn.Close(); err != nil {
+							slog.Error("error closing connection during shutdown", "error", err)
 						}
 						return
 					default:
 					}
-					safeHandleConnection(ctx, c)
-				}(conn)
+					safeHandleConnection(ctx, conn)
+				})
 			default:
 				if !*benchmarkMode {
 					metricConnectionsRejected.Inc()
 				}
-				log.Printf("Connection limit reached (%d), rejecting", cfg.Server.MaxConnections)
+				slog.Warn("connection limit reached, rejecting", "max", cfg.Server.MaxConnections)
 				if err := conn.Close(); err != nil {
-					log.Printf("Error closing rejected connection: %v", err)
+					slog.Error("error closing rejected connection", "error", err)
 				}
 				// Back off slightly to avoid tight accept-reject loops under overload,
 				// but exit promptly if context is cancelled.
@@ -520,24 +598,30 @@ func main() {
 
 	// Close listener to unblock accept loop immediately. The defer above is kept
 	// as a safety net for panics. Calling Close() twice is safe (second returns error).
-	listener.Close()
+	if err := listener.Close(); err != nil {
+		slog.Debug("listener close during shutdown", "error", err)
+	}
+
+	// Wait for the accept loop to exit before calling connWg.Wait, so no new
+	// connWg.Go (internally Add(1)) calls race with Wait.
+	<-acceptDone
 
 	// Shut down HTTP servers gracefully
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if metricsServer != nil {
 		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("Metrics server shutdown error: %v", err)
+			slog.Error("metrics server shutdown error", "error", err)
 		}
 	}
 	if pprofServer != nil {
 		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("pprof server shutdown error: %v", err)
+			slog.Error("pprof server shutdown error", "error", err)
 		}
 	}
 
 	// Wait for active connections to finish
-	log.Printf("Waiting for %d active connections to finish...", atomic.LoadInt64(&activeConns))
+	slog.Info("waiting for active connections to finish", "count", atomic.LoadInt64(&activeConns))
 	done := make(chan struct{})
 	go func() {
 		connWg.Wait()
@@ -546,9 +630,9 @@ func main() {
 
 	select {
 	case <-done:
-		log.Println("All connections closed gracefully")
+		slog.Info("all connections closed gracefully")
 	case <-time.After(ShutdownTimeout):
-		log.Printf("Timeout waiting for connections, %d still active", atomic.LoadInt64(&activeConns))
+		slog.Warn("timeout waiting for connections", "still_active", atomic.LoadInt64(&activeConns))
 	}
 
 	// Print benchmark summary if in benchmark mode
@@ -557,8 +641,10 @@ func main() {
 	}
 
 	// Cleanup
-	os.Remove(cfg.Server.SocketPath)
-	log.Println("Daemon stopped")
+	if err := os.Remove(cfg.Server.SocketPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to remove socket file", "path", cfg.Server.SocketPath, "error", err)
+	}
+	slog.Info("daemon stopped")
 }
 
 // safeHandleConnection wraps handleConnection with panic recovery.
@@ -568,7 +654,11 @@ func main() {
 func safeHandleConnection(ctx context.Context, conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Panic in connection handler (pre-client): %v\n%s", r, debug.Stack())
+			// Close the Apache handoff connection on panic to avoid fd leaks.
+			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				slog.Error("error closing Apache connection after panic", "error", closeErr)
+			}
+			slog.Error("panic in connection handler (pre-client)", "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
 	handleConnection(ctx, conn)
@@ -585,14 +675,14 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// Keeping it open during streaming (10-30+ seconds) wastes file descriptors
 	// and can cause fd exhaustion under high concurrency.
 	if closeErr := conn.Close(); closeErr != nil {
-		log.Printf("Error closing Apache connection: %v", closeErr)
+		slog.Error("error closing Apache connection", "error", closeErr)
 	}
 
 	if err != nil {
 		if !*benchmarkMode {
 			metricHandoffErrors.WithLabelValues(classifyError(err)).Inc()
 		}
-		log.Printf("Failed to receive fd: %v", err)
+		slog.Error("failed to receive fd", "error", err)
 		return
 	}
 	handoffDuration := time.Since(handoffStart).Seconds()
@@ -606,7 +696,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// we must close the fd ourselves with syscall.Close().
 	clientFile := os.NewFile(uintptr(clientFd), "client")
 	if clientFile == nil {
-		log.Printf("Failed to create file from fd %d", clientFd)
+		slog.Error("failed to create file from fd", "fd", clientFd)
 		syscall.Close(clientFd)
 		return
 	}
@@ -615,12 +705,12 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// This defends against malicious or buggy senders passing non-socket fds.
 	sockType, sockErr := syscall.GetsockoptInt(clientFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
 	if sockErr != nil {
-		log.Printf("fd %d is not a valid socket: %v", clientFd, sockErr)
+		slog.Error("fd is not a valid socket", "fd", clientFd, "error", sockErr)
 		clientFile.Close()
 		return
 	}
 	if sockType != syscall.SOCK_STREAM {
-		log.Printf("fd %d has unexpected socket type %d (expected SOCK_STREAM)", clientFd, sockType)
+		slog.Error("fd has unexpected socket type", "fd", clientFd, "type", sockType, "expected", syscall.SOCK_STREAM)
 		clientFile.Close()
 		return
 	}
@@ -630,7 +720,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	clientConn, err := net.FileConn(clientFile)
 	clientFile.Close() // original fd no longer needed
 	if err != nil {
-		log.Printf("Failed to create conn from fd %d: %v", clientFd, err)
+		slog.Error("failed to create conn from fd", "fd", clientFd, "error", err)
 		return
 	}
 	defer clientConn.Close()
@@ -638,10 +728,10 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// Enable TCP keepalive to detect dead connections during long streams
 	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
 		if err := tcpConn.SetKeepAlive(true); err != nil {
-			log.Printf("Warning: could not enable TCP keepalive: %v", err)
+			slog.Warn("could not enable TCP keepalive", "error", err)
 		}
 		if err := tcpConn.SetKeepAlivePeriod(15 * time.Second); err != nil {
-			log.Printf("Warning: could not set TCP keepalive period: %v", err)
+			slog.Warn("could not set TCP keepalive period", "error", err)
 		}
 	}
 
@@ -649,7 +739,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// the client connection, so we can send a 500 error before closing.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Panic in connection handler: %v\n%s", r, debug.Stack())
+			slog.Error("panic in connection handler", "panic", r, "stack", string(debug.Stack()))
 			// Attempt to send error response to client. This may fail if
 			// headers were already sent, but we try anyway for better UX.
 			errorResponse := "HTTP/1.1 500 Internal Server Error\r\n" +
@@ -658,7 +748,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 				"\r\n" +
 				"Internal server error\n"
 			if _, err := clientConn.Write([]byte(errorResponse)); err != nil {
-				log.Printf("Failed to send error response to client: %v", err)
+				slog.Error("failed to send error response to client", "error", err)
 			}
 		}
 	}()
@@ -670,7 +760,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	trimmedData := bytes.Trim(data, "\x00")
 	if len(trimmedData) > 0 {
 		if err := json.Unmarshal(trimmedData, &handoff); err != nil {
-			log.Printf("Failed to parse handoff data: %v", err)
+			slog.Error("failed to parse handoff data", "error", err)
 		}
 	}
 
@@ -710,7 +800,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		if !*benchmarkMode {
 			metricStreamErrors.WithLabelValues(classifyError(err)).Inc()
 		}
-		log.Printf("Stream error: %v", err)
+		slog.Error("stream error", "error", err)
 	}
 
 	if *benchmarkMode {
@@ -753,7 +843,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	// Debug: log if control message was truncated
 	if recvflags&syscall.MSG_CTRUNC != 0 {
-		log.Printf("DEBUG: MSG_CTRUNC set, oobn=%d, n=%d, recvflags=0x%x", oobn, n, recvflags)
+		slog.Debug("MSG_CTRUNC set", "oobn", oobn, "n", n, "recvflags", recvflags)
 	}
 
 	// Parse control message to extract fd (do this early so we can close on error).
@@ -768,7 +858,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		for i := range msgs {
 			fds, err := syscall.ParseUnixRights(&msgs[i])
 			if err != nil {
-				log.Printf("Warning: failed to parse Unix rights for cleanup: %v", err)
+				slog.Warn("failed to parse Unix rights for cleanup", "error", err)
 				continue
 			}
 			for _, fd := range fds {
@@ -813,7 +903,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		fds, err := syscall.ParseUnixRights(&msgs[i])
 		if err != nil {
 			// Not an SCM_RIGHTS message or malformed; log for diagnostics and skip
-			log.Printf("Warning: failed to parse SCM_RIGHTS control message: %v", err)
+			slog.Warn("failed to parse SCM_RIGHTS control message", "error", err)
 			continue
 		}
 		allFds = append(allFds, fds...)
@@ -827,7 +917,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 
 	// Close any extra fds if multiple were received (we only use the first one)
 	if len(allFds) > 1 {
-		log.Printf("Warning: received %d fds, expected 1; closing extras", len(allFds))
+		slog.Warn("received multiple fds, expected 1; closing extras", "count", len(allFds))
 		for _, extraFd := range allFds[1:] {
 			syscall.Close(extraFd)
 		}

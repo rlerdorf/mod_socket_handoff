@@ -51,6 +51,12 @@ make clean
 
 # Remove downloaded Go toolchain
 make clean-go
+
+# Build with Profile-Guided Optimization (after collecting a profile)
+make build-pgo
+
+# Print instructions for collecting a CPU profile
+make profile
 ```
 
 The Makefile uses `ensure-go.sh` to verify that Go >= 1.25.7 is available.
@@ -225,6 +231,8 @@ server:
   max_connections: 50000
   max_stream_duration_ms: 300000  # Max per-stream duration (0 = no timeout, default: 5 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
+  # mem_limit: 768MiB            # Soft memory limit (e.g. 512MiB, 1GiB); empty = no limit
+  # gc_percent: 100             # GOGC value; 0 = not set (use -gc-percent=0 flag to disable GC)
 
 backend:
   provider: openai
@@ -254,9 +262,41 @@ metrics:
   listen_addr: 127.0.0.1:9090
 
 logging:
-  level: info
-  format: text
+  level: info    # debug, info, warn, error
+  format: text   # text or json
 ```
+
+#### Logging
+
+The daemon uses Go's `log/slog` structured logging. The `logging` section controls the output:
+
+- **`level`** - Minimum log level: `debug`, `info` (default), `warn`, `error`
+- **`format`** - Output format: `text` (default) or `json`
+
+JSON format is useful for log aggregation systems (ELK, Loki, Datadog):
+
+```yaml
+logging:
+  level: info
+  format: json
+```
+
+Source file and line information is included in all log output via `AddSource`.
+
+#### Memory Tuning
+
+The `mem_limit` and `gc_percent` settings configure Go's garbage collector for production workloads:
+
+- **`mem_limit`** - Sets a soft memory limit via `debug.SetMemoryLimit()`. The GC becomes more aggressive as memory approaches this limit. Accepts human-readable sizes: `B`, `KiB`, `MiB`, `GiB`, `TiB`. Example: `768MiB`, `1GiB`.
+- **`gc_percent`** - Sets `GOGC` via `debug.SetGCPercent()`. Controls how much the heap can grow before triggering GC. Default is 100 (GC when heap doubles). Set higher (e.g., 200) when using `mem_limit` to reduce GC frequency and let the memory limit drive collection instead. Note: `gc_percent: 0` in the config file is treated as "not set" (YAML zero value). To disable GC entirely (`GOGC=0`), use the `-gc-percent=0` flag.
+
+```yaml
+server:
+  mem_limit: 768MiB
+  gc_percent: 200
+```
+
+These can also be set via flags (`-memlimit`, `-gc-percent`) or environment variables (`GOMEMLIMIT`, `GOGC`).
 
 Run with config file:
 
@@ -285,6 +325,8 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | `-pprof-addr` | - | pprof server address (empty to disable) |
 | `-benchmark` | `false` | Enable benchmark mode |
 | `-max-stream-duration-ms` | `300000` | Max per-stream duration in ms (0 = no limit) |
+| `-memlimit` | - | Soft memory limit, e.g. `512MiB`, `1GiB` (equivalent to `GOMEMLIMIT`) |
+| `-gc-percent` | - | GC target percentage; -1 = Go default, 0 = disable GC (equivalent to `GOGC`) |
 | `-message-delay` | `50ms` | Delay between mock messages |
 | `-openai-base` | - | OpenAI API base URL |
 | `-openai-socket` | - | Unix socket for OpenAI API |
@@ -511,6 +553,23 @@ Benchmark mode:
 - Uses atomic counters for minimal overhead
 - Prints summary on shutdown (peak streams, total completed, bytes sent)
 
+## Profile-Guided Optimization (PGO)
+
+PGO uses a CPU profile collected from production to optimize the build. This typically improves throughput by 2-7%.
+
+```bash
+# 1. Run the daemon with pprof enabled
+./streaming-daemon -pprof-addr localhost:6060
+
+# 2. Collect a 30-second CPU profile under realistic load
+curl -o default.pgo 'http://localhost:6060/debug/pprof/profile?seconds=30'
+
+# 3. Rebuild with the profile
+make build-pgo
+```
+
+The `default.pgo` file is gitignored. Run `make profile` for a quick reminder of these steps.
+
 ## Systemd Installation
 
 ```bash
@@ -604,12 +663,17 @@ journalctl -u streaming-daemon -f
 If memory grows over time:
 
 ```bash
-# Enable pprof
+# Set a soft memory limit to keep GC aggressive
+./streaming-daemon -memlimit 768MiB
+
+# Enable pprof for profiling
 ./streaming-daemon -pprof-addr localhost:6060
 
 # Analyze heap
 go tool pprof http://localhost:6060/debug/pprof/heap
 ```
+
+See the [Memory Tuning](#memory-tuning) section for `mem_limit` and `gc_percent` configuration.
 
 ## License
 

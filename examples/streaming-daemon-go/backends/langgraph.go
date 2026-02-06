@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -131,11 +131,11 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 
 	// Validate API key
 	if langgraphAPIKey == "" {
-		log.Println("Warning: LANGGRAPH_API_KEY not set, API calls will fail")
+		slog.Warn("LANGGRAPH_API_KEY not set, API calls will fail")
 	}
 
 	if langgraphInsecure {
-		log.Println("Warning: TLS certificate verification disabled for LangGraph")
+		slog.Warn("TLS certificate verification disabled for LangGraph")
 	}
 
 	// Create HTTP client with shared transport builder
@@ -269,7 +269,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		default:
 			// Log unknown event types for forward compatibility debugging
 			if eventType != "" {
-				log.Printf("LangGraph: unknown event type %q, skipping", eventType)
+				slog.Warn("LangGraph: unknown event type, skipping", "event_type", eventType)
 			}
 		}
 	}
@@ -522,7 +522,7 @@ func appendJSONValue(buf []byte, v any) []byte {
 		// For complex types (maps, slices, structs), use json.Marshal
 		jsonBytes, err := json.Marshal(val)
 		if err != nil {
-			log.Printf("Warning: failed to marshal LangGraphInput value: %v", err)
+			slog.Warn("failed to marshal LangGraphInput value", "error", err)
 			buf = append(buf, "null"...)
 		} else {
 			buf = append(buf, jsonBytes...)

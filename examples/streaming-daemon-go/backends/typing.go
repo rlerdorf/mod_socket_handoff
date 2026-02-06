@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os/exec"
 	"strconv"
@@ -66,7 +66,7 @@ func (t *Typing) Description() string {
 }
 
 func (t *Typing) Init(cfg *config.BackendConfig) error {
-	log.Printf("Typing backend initialized")
+	slog.Info("typing backend initialized")
 	return nil
 }
 

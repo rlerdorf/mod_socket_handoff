@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -49,7 +49,7 @@ func (m *Mock) Init(cfg *config.BackendConfig) error {
 		m.messageDelay = *messageDelayFlag
 	}
 
-	log.Printf("Mock backend: message_delay=%v", m.messageDelay)
+	slog.Info("mock backend initialized", "message_delay", m.messageDelay)
 	return nil
 }
 
