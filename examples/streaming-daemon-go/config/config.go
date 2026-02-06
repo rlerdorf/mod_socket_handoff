@@ -3,8 +3,11 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -132,12 +135,80 @@ func (c *Config) Validate() error {
 	// Note: Backend provider validation is done in main.go against registered backends
 	// to avoid circular imports between config and backends packages.
 
+	// Validate memory limit format early so config-file typos are caught at load time
+	if c.Server.MemLimit != "" {
+		if ParseMemLimit(c.Server.MemLimit) <= 0 {
+			return fmt.Errorf("server.memlimit: invalid value %q (expected positive integer with optional suffix B, KiB, MiB, GiB, TiB)", c.Server.MemLimit)
+		}
+	}
+
+	// Validate GC percent: negative values have special meaning in the Go runtime
+	// (e.g. -1 disables the GOGC knob entirely), so reject them in config to avoid
+	// surprising behavior. Use the -gc-percent flag for advanced runtime tuning.
+	if c.Server.GCPercent < 0 {
+		return fmt.Errorf("server.gc_percent must be non-negative")
+	}
+
 	// Validate mock backend
 	if c.Backend.Mock.MessageDelayMs < 0 {
 		return fmt.Errorf("backend.mock.message_delay_ms must be non-negative")
 	}
 
 	return nil
+}
+
+// ParseMemLimit parses a memory limit string like "768MiB" or "1GiB" into bytes.
+// Supported suffixes: B, KiB, MiB, GiB, TiB (case-insensitive).
+// The numeric part must be a positive integer (no zero, negative, or fractional values).
+// Returns -1 on parse error or overflow.
+func ParseMemLimit(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return -1
+	}
+
+	// Find where the numeric part ends
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return -1
+	}
+
+	numStr := s[:i]
+	suffix := strings.TrimSpace(s[i:])
+
+	// Parse the number as uint64 (catches overflow and negative values)
+	num, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil || num == 0 {
+		return -1
+	}
+
+	// Parse the suffix
+	var multiplier uint64
+	switch strings.ToLower(suffix) {
+	case "", "b":
+		multiplier = 1
+	case "kib", "k", "kb":
+		multiplier = 1024
+	case "mib", "m", "mb":
+		multiplier = 1024 * 1024
+	case "gib", "g", "gb":
+		multiplier = 1024 * 1024 * 1024
+	case "tib", "t", "tb":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		return -1
+	}
+
+	// Check for overflow before multiplying.
+	// If multiplier > MaxInt64/num, the product would exceed MaxInt64.
+	if multiplier > math.MaxInt64/num {
+		return -1
+	}
+
+	return int64(num * multiplier)
 }
 
 // Default returns a Config with sensible defaults.

@@ -24,14 +24,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // Register pprof handlers for profiling
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -281,60 +279,6 @@ func initLogging(cfg config.LoggingConfig) {
 	slog.SetDefault(slog.New(handler))
 }
 
-// parseMemLimit parses a memory limit string like "768MiB" or "1GiB" into bytes.
-// Supported suffixes: B, KiB, MiB, GiB, TiB (case-insensitive).
-// The numeric part must be a positive integer (no zero, negative, or fractional values).
-// Returns -1 on parse error or overflow.
-func parseMemLimit(s string) int64 {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return -1
-	}
-
-	// Find where the numeric part ends
-	i := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	if i == 0 {
-		return -1
-	}
-
-	numStr := s[:i]
-	suffix := strings.TrimSpace(s[i:])
-
-	// Parse the number as uint64 (catches overflow and negative values)
-	num, err := strconv.ParseUint(numStr, 10, 64)
-	if err != nil || num == 0 {
-		return -1
-	}
-
-	// Parse the suffix
-	var multiplier uint64
-	switch strings.ToLower(suffix) {
-	case "", "b":
-		multiplier = 1
-	case "kib", "k", "kb":
-		multiplier = 1024
-	case "mib", "m", "mb":
-		multiplier = 1024 * 1024
-	case "gib", "g", "gb":
-		multiplier = 1024 * 1024 * 1024
-	case "tib", "t", "tb":
-		multiplier = 1024 * 1024 * 1024 * 1024
-	default:
-		return -1
-	}
-
-	// Check for overflow before multiplying.
-	// If num > MaxInt64/multiplier, the product would exceed MaxInt64.
-	if multiplier > math.MaxInt64/num {
-		return -1
-	}
-
-	return int64(num * multiplier)
-}
-
 func main() {
 	flag.Parse()
 
@@ -395,7 +339,7 @@ func main() {
 		memLimit = *memLimitFlag
 	}
 	if memLimit != "" {
-		limit := parseMemLimit(memLimit)
+		limit := config.ParseMemLimit(memLimit)
 		if limit <= 0 {
 			slog.Error("invalid memlimit value", "value", memLimit)
 			os.Exit(1)
