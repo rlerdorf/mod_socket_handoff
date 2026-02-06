@@ -29,18 +29,23 @@ all: build
 
 build:
 	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) build -ldflags="-s -w" -o $(BINARY) .
 
+# Use /var/tmp because /tmp is often mounted noexec
 test:
 	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	TMPDIR=/var/tmp $(GO) test -race -v ./...
 
 fmt:
 	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) fmt ./...
 
 vet:
 	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) vet ./...
 
 clean:

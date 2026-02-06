@@ -111,15 +111,21 @@ try_go "$CACHED_GO" "Cached" || true
 
 info "Downloading Go toolchain (need >= $MIN_VERSION)..."
 
+# Verify we're on Linux (this script downloads Linux tarballs)
+KERNEL="$(uname -s)"
+case "$KERNEL" in
+    Linux) ;;
+    *)     die "this script only supports Linux (detected: $KERNEL)" ;;
+esac
+OS=linux
+
 # Detect architecture
 ARCH="$(uname -m)"
 case "$ARCH" in
-    x86_64)  GOARCH=amd64 ;;
-    aarch64) GOARCH=arm64 ;;
-    *)       die "unsupported architecture: $ARCH" ;;
+    x86_64|amd64)   GOARCH=amd64 ;;
+    aarch64|arm64)   GOARCH=arm64 ;;
+    *)               die "unsupported architecture: $ARCH" ;;
 esac
-
-OS=linux
 
 # Fetch version list from go.dev
 DL_JSON="$(download_stdout "https://go.dev/dl/?mode=json")"
@@ -172,12 +178,15 @@ if [ -n "$GO_SHA256" ]; then
     fi
     info "SHA256 checksum verified."
 else
-    info "warning: could not extract checksum from API, skipping verification" >&2
+    rm -f "$TARBALL_PATH"
+    die "could not extract checksum from API; refusing to install unverified tarball"
 fi
 
 # Extract (remove any old install first)
 rm -rf "$GOROOT_CACHE/go"
-tar -C "$GOROOT_CACHE" -xzf "$TARBALL_PATH"
+if ! tar -C "$GOROOT_CACHE" -xzf "$TARBALL_PATH"; then
+    die "tar extraction failed; tarball kept at $TARBALL_PATH"
+fi
 rm -f "$TARBALL_PATH"
 
 # Verify the new binary works
