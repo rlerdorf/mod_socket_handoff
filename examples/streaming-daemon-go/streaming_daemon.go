@@ -398,12 +398,17 @@ func main() {
 		slog.Info("memory limit set", "limit", memLimit, "bytes", limit)
 	}
 
-	// Configure GC percent (flag > config)
+	// Configure GC percent (flag > config).
+	// GOGC=0 is valid (disables GC, useful with memlimit), so we track whether
+	// the value was explicitly set rather than testing > 0. The config struct's
+	// zero value (0) is ambiguous, so gc_percent=0 can only be set via the flag.
 	gcPercent := cfg.Server.GCPercent
+	gcPercentSet := cfg.Server.GCPercent != 0
 	if *gcPercentFlag >= 0 {
 		gcPercent = *gcPercentFlag
+		gcPercentSet = true
 	}
-	if gcPercent > 0 {
+	if gcPercentSet {
 		old := debug.SetGCPercent(gcPercent)
 		slog.Info("GC percent set", "value", gcPercent, "previous", old)
 	}

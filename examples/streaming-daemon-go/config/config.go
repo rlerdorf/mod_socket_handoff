@@ -25,7 +25,7 @@ type ServerConfig struct {
 	MaxStreamDurationMs int    `yaml:"max_stream_duration_ms"`
 	PprofAddr           string `yaml:"pprof_addr"`
 	MemLimit            string `yaml:"memlimit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
-	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 means use Go default
+	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 = not set (use -gc-percent flag for GOGC=0)
 }
 
 // BackendConfig contains backend selection and configuration.

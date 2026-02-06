@@ -232,7 +232,7 @@ server:
   max_stream_duration_ms: 300000  # Max per-stream duration (0 = no timeout, default: 5 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
   # memlimit: 768MiB            # Soft memory limit (e.g. 512MiB, 1GiB); empty = no limit
-  # gc_percent: 100             # GOGC value; 0 = use Go default (100)
+  # gc_percent: 100             # GOGC value; 0 = not set (use -gc-percent=0 flag to disable GC)
 
 backend:
   provider: openai
@@ -288,7 +288,7 @@ Source file and line information is included in all log output via `AddSource`.
 The `memlimit` and `gc_percent` settings configure Go's garbage collector for production workloads:
 
 - **`memlimit`** - Sets a soft memory limit via `debug.SetMemoryLimit()`. The GC becomes more aggressive as memory approaches this limit. Accepts human-readable sizes: `B`, `KiB`, `MiB`, `GiB`, `TiB`. Example: `768MiB`, `1GiB`.
-- **`gc_percent`** - Sets `GOGC` via `debug.SetGCPercent()`. Controls how much the heap can grow before triggering GC. Default is 100 (GC when heap doubles). Set higher (e.g., 200) when using `memlimit` to reduce GC frequency and let the memory limit drive collection instead.
+- **`gc_percent`** - Sets `GOGC` via `debug.SetGCPercent()`. Controls how much the heap can grow before triggering GC. Default is 100 (GC when heap doubles). Set higher (e.g., 200) when using `memlimit` to reduce GC frequency and let the memory limit drive collection instead. Note: `gc_percent: 0` in the config file is treated as "not set" (YAML zero value). To disable GC entirely (`GOGC=0`), use the `-gc-percent=0` flag.
 
 ```yaml
 server:
