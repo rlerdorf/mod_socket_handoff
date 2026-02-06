@@ -73,12 +73,13 @@ try_go() {
 }
 
 # Portable download: prefers curl, falls back to wget.
+# Uses connect timeout and overall timeout to avoid hanging on slow networks.
 download() {
     _url="$1"; _out="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$_out" "$_url"
+        curl -fsSL --connect-timeout 30 --max-time 300 --retry 2 -o "$_out" "$_url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$_out" "$_url"
+        wget -q --connect-timeout=30 --timeout=300 --tries=3 -O "$_out" "$_url"
     else
         die "neither curl nor wget found"
     fi
@@ -88,9 +89,9 @@ download() {
 download_stdout() {
     _url="$1"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$_url"
+        curl -fsSL --connect-timeout 30 --max-time 60 --retry 2 "$_url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O- "$_url"
+        wget -q --connect-timeout=30 --timeout=60 --tries=3 -O- "$_url"
     else
         die "neither curl nor wget found"
     fi
@@ -136,6 +137,9 @@ if command -v jq >/dev/null 2>&1; then
     GO_VERSION="$(printf '%s' "$DL_JSON" | jq -r '.[0].version')"
     GO_SHA256="$(printf '%s' "$DL_JSON" \
         | jq -r ".[0].files[] | select(.os==\"$OS\" and .arch==\"$GOARCH\" and .kind==\"archive\") | .sha256")"
+    # jq outputs literal "null" for missing fields
+    case "$GO_VERSION" in "null"|"") GO_VERSION="" ;; esac
+    case "$GO_SHA256" in "null"|"") GO_SHA256="" ;; esac
 else
     # Fallback: extract from JSON with grep/sed.  The first "version" key
     # in the array is the latest stable release.
@@ -148,9 +152,11 @@ else
     # The JSON block for each file looks like:
     #   "filename":"go1.X.Y.linux-amd64.tar.gz", ... "sha256":"abc..."
     FILENAME="${GO_VERSION}.${OS}-${GOARCH}.tar.gz"
+    # Escape dots for use in grep regex (dots are the only metachar in Go filenames)
+    FILENAME_RE="$(printf '%s' "$FILENAME" | sed 's/\./\\./g')"
     GO_SHA256="$(printf '%s' "$DL_JSON" \
         | tr '\n' ' ' \
-        | grep -o "\"filename\" *: *\"${FILENAME}\"[^}]*" \
+        | grep -o "\"filename\" *: *\"${FILENAME_RE}\"[^}]*" \
         | grep -o '"sha256" *: *"[0-9a-f]*"' \
         | sed 's/.*"\([0-9a-f]*\)".*/\1/')"
 fi
@@ -206,10 +212,23 @@ if ! version_ge "$NEW_VER" "$MIN_VERSION"; then
     die "downloaded Go $NEW_VER still < $MIN_VERSION"
 fi
 
-# Atomic swap: remove old, rename new into place
-rm -rf "$GOROOT_CACHE/go"
-mv "$EXTRACT_TMP/go" "$GOROOT_CACHE/go"
-rm -rf "$EXTRACT_TMP"
+# Atomic swap: move old aside, install new, then clean up.
+# If mv fails, restore the previous version.
+OLD_GO="$GOROOT_CACHE/go.old.$$"
+if [ -d "$GOROOT_CACHE/go" ]; then
+    mv "$GOROOT_CACHE/go" "$OLD_GO" || {
+        rm -rf "$EXTRACT_TMP"
+        die "failed to move existing cached Go aside"
+    }
+fi
+if mv "$EXTRACT_TMP/go" "$GOROOT_CACHE/go"; then
+    rm -rf "$EXTRACT_TMP" "$OLD_GO"
+else
+    # Restore previous version on failure
+    [ -d "$OLD_GO" ] && mv "$OLD_GO" "$GOROOT_CACHE/go" 2>/dev/null || true
+    rm -rf "$EXTRACT_TMP"
+    die "failed to install new Go into $GOROOT_CACHE/go"
+fi
 
 info "Installed Go $NEW_VER to $CACHED_GO"
 printf '%s\n' "$CACHED_GO"

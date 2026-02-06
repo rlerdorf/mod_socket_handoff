@@ -27,7 +27,7 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ─�
 
 ## Requirements
 
-- Go 1.18+
+- Go 1.25.7+ (automatically downloaded if missing — see below)
 - Linux (for SCM_RIGHTS support)
 - Apache with `mod_socket_handoff` enabled
 
@@ -36,11 +36,30 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ─�
 ```bash
 cd examples/streaming-daemon-go
 
-# Build
-go build -o streaming-daemon .
+# Build (downloads Go toolchain if needed)
+make
 
-# Build optimized
-go build -ldflags="-s -w" -o streaming-daemon .
+# Run tests
+make test
+
+# Format and vet
+make fmt
+make vet
+
+# Clean build artifacts
+make clean
+
+# Remove downloaded Go toolchain
+make clean-go
+```
+
+The Makefile uses `ensure-go.sh` to verify that Go >= 1.25.7 is available.
+If the system Go is missing or too old, the script automatically downloads
+the latest Go from go.dev into a local `.goroot/` directory with SHA256
+verification. Set `MIN_GO_VERSION` to override the minimum:
+
+```bash
+make MIN_GO_VERSION=1.25.8
 ```
 
 ## Quick Start
