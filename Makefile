@@ -7,7 +7,7 @@
 APXS ?= apxs
 MODULE = mod_socket_handoff
 
-.PHONY: all install clean test test-go build-go test-rust test-daemons
+.PHONY: all install clean test-go build-go test-rust test-daemons
 
 all: $(MODULE).la
 

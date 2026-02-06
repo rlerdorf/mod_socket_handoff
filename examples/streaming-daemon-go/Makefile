@@ -36,7 +36,7 @@ build:
 test:
 	$(eval GO := $(resolve_go))
 	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
-	TMPDIR=/var/tmp $(GO) test -race -v ./...
+	TMPDIR=$${TMPDIR:-/var/tmp} $(GO) test -race -v ./...
 
 fmt:
 	$(eval GO := $(resolve_go))

@@ -182,21 +182,34 @@ else
     die "could not extract checksum from API; refusing to install unverified tarball"
 fi
 
-# Extract (remove any old install first)
-rm -rf "$GOROOT_CACHE/go"
-if ! tar -C "$GOROOT_CACHE" -xzf "$TARBALL_PATH"; then
+# Extract to a temp directory first, then atomically swap into place.
+# This avoids destroying a working cached Go if extraction fails, and
+# serializes concurrent invocations via rename.
+EXTRACT_TMP="$GOROOT_CACHE/go.tmp.$$"
+rm -rf "$EXTRACT_TMP"
+mkdir -p "$EXTRACT_TMP"
+if ! tar -C "$EXTRACT_TMP" -xzf "$TARBALL_PATH"; then
+    rm -rf "$EXTRACT_TMP"
     die "tar extraction failed; tarball kept at $TARBALL_PATH"
 fi
 rm -f "$TARBALL_PATH"
 
-# Verify the new binary works
-NEW_VER="$(parse_go_version "$CACHED_GO")"
+# Verify the new binary works before swapping
+NEW_GO="$EXTRACT_TMP/go/bin/go"
+NEW_VER="$(parse_go_version "$NEW_GO")"
 if [ -z "$NEW_VER" ]; then
-    die "downloaded Go binary at $CACHED_GO does not work"
+    rm -rf "$EXTRACT_TMP"
+    die "downloaded Go binary does not work"
 fi
 if ! version_ge "$NEW_VER" "$MIN_VERSION"; then
+    rm -rf "$EXTRACT_TMP"
     die "downloaded Go $NEW_VER still < $MIN_VERSION"
 fi
+
+# Atomic swap: remove old, rename new into place
+rm -rf "$GOROOT_CACHE/go"
+mv "$EXTRACT_TMP/go" "$GOROOT_CACHE/go"
+rm -rf "$EXTRACT_TMP"
 
 info "Installed Go $NEW_VER to $CACHED_GO"
 printf '%s\n' "$CACHED_GO"
