@@ -43,10 +43,28 @@ var (
 	langgraphHTTPClient   *http.Client
 )
 
+// lgEventType represents a LangGraph SSE event type as an integer
+// to avoid string allocation in the hot loop.
+type lgEventType int
+
+const (
+	lgEventUnknown  lgEventType = iota
+	lgEventMessages
+	lgEventEnd
+	lgEventMetadata
+	lgEventValues
+	lgEventUpdates
+)
+
 // Package-level byte slices to avoid allocation in hot paths
 var (
-	eventPrefix = []byte("event:")
-	dataColonPrefix  = []byte("data:")
+	eventPrefix     = []byte("event:")
+	dataColonPrefix = []byte("data:")
+	evMessages      = []byte("messages")
+	evEnd           = []byte("end")
+	evMetadata      = []byte("metadata")
+	evValues        = []byte("values")
+	evUpdates       = []byte("updates")
 )
 
 // LangGraph is a backend that streams responses from the LangGraph Platform API.
@@ -231,7 +249,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 
 	writeCount := 0
 	for {
-		eventType, data, err := parseLangGraphEvent(scanner)
+		etype, data, err := parseLangGraphEvent(scanner)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -240,12 +258,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		}
 
 		// Handle different event types
-		switch eventType {
-		case "end":
+		switch etype {
+		case lgEventEnd:
 			// Stream complete
 			goto done
-		case "messages":
-			// Extract content from messages-tuple format
+		case lgEventMessages:
+			// Extract content from messages-tuple format.
+			// data is a slice of scanner's buffer — valid until next parseLangGraphEvent call.
 			content := extractContentFromMessages(data)
 			if content != "" {
 				// Record TTFB on first chunk
@@ -269,14 +288,12 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 					}
 				}
 			}
-		case "metadata", "values", "updates":
+		case lgEventMetadata, lgEventValues, lgEventUpdates:
 			// These event types don't contain streamable content
 			continue
-		default:
+		case lgEventUnknown:
 			// Log unknown event types for forward compatibility debugging
-			if eventType != "" {
-				slog.Warn("LangGraph: unknown event type, skipping", "event_type", eventType)
-			}
+			slog.Warn("LangGraph: unknown event type, skipping")
 		}
 	}
 
@@ -296,15 +313,18 @@ done:
 
 // parseLangGraphEvent parses a single LangGraph SSE event.
 // LangGraph format: "event: type\ndata: json\n\n"
-// Returns event type, data payload, and any error.
+// Returns event type as lgEventType, data payload, and any error.
 // Returns io.EOF when stream ends.
-func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte, err error) {
+//
+// The returned data slice is only valid until the next call to this function,
+// as it points into the scanner's internal buffer.
+func parseLangGraphEvent(scanner *bufio.Scanner) (etype lgEventType, data []byte, err error) {
 	// Read event line
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return "", nil, err
+			return lgEventUnknown, nil, err
 		}
-		return "", nil, io.EOF
+		return lgEventUnknown, nil, io.EOF
 	}
 	line := scanner.Bytes()
 
@@ -312,38 +332,52 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte,
 	for len(line) == 0 {
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
-				return "", nil, err
+				return lgEventUnknown, nil, err
 			}
-			return "", nil, io.EOF
+			return lgEventUnknown, nil, io.EOF
 		}
 		line = scanner.Bytes()
 	}
 
-	// Parse event type from "event: type" line
-	if bytes.HasPrefix(line, eventPrefix) {
-		eventType = strings.TrimSpace(string(line[6:]))
-	} else {
+	// Parse event type from "event: type" line.
+	// Compare as bytes before the next Scan() invalidates the buffer.
+	if !bytes.HasPrefix(line, eventPrefix) {
 		// Fail fast on protocol violations to catch integration issues early
-		return "", nil, fmt.Errorf("unexpected event line format: %q", string(line))
+		return lgEventUnknown, nil, fmt.Errorf("unexpected event line format: %q", string(line))
+	}
+	eventBytes := bytes.TrimSpace(line[6:])
+	switch {
+	case bytes.Equal(eventBytes, evMessages):
+		etype = lgEventMessages
+	case bytes.Equal(eventBytes, evEnd):
+		etype = lgEventEnd
+	case bytes.Equal(eventBytes, evMetadata):
+		etype = lgEventMetadata
+	case bytes.Equal(eventBytes, evValues):
+		etype = lgEventValues
+	case bytes.Equal(eventBytes, evUpdates):
+		etype = lgEventUpdates
+	default:
+		etype = lgEventUnknown
 	}
 
-	// Read data line
+	// Read data line (may overwrite the event line in scanner's buffer)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return "", nil, err
+			return etype, nil, err
 		}
-		return eventType, nil, nil
+		return etype, nil, nil
 	}
 	line = scanner.Bytes()
 
-	// Parse data from "data: json" line
+	// Parse data from "data: json" line.
+	// Return a slice of the scanner's buffer directly — caller must
+	// consume it before the next call to parseLangGraphEvent.
 	if bytes.HasPrefix(line, dataColonPrefix) {
-		dataStr := bytes.TrimSpace(line[5:])
-		data = make([]byte, len(dataStr))
-		copy(data, dataStr)
+		data = bytes.TrimSpace(line[5:])
 	}
 
-	return eventType, data, nil
+	return etype, data, nil
 }
 
 // extractContentFromMessages extracts content from LangGraph messages-tuple format.

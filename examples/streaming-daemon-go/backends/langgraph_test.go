@@ -11,44 +11,44 @@ func TestParseLangGraphEvent(t *testing.T) {
 	tests := []struct {
 		name          string
 		input         string
-		wantEventType string
+		wantEventType lgEventType
 		wantData      string
 		wantErr       error
 	}{
 		{
 			name:          "messages event",
 			input:         "event: messages\ndata: [{\"content\":\"Hello\",\"type\":\"AIMessageChunk\"},{\"run_id\":\"123\"}]\n\n",
-			wantEventType: "messages",
+			wantEventType: lgEventMessages,
 			wantData:      `[{"content":"Hello","type":"AIMessageChunk"},{"run_id":"123"}]`,
 		},
 		{
 			name:          "metadata event",
 			input:         "event: metadata\ndata: {\"run_id\":\"abc-123\"}\n\n",
-			wantEventType: "metadata",
+			wantEventType: lgEventMetadata,
 			wantData:      `{"run_id":"abc-123"}`,
 		},
 		{
 			name:          "end event",
 			input:         "event: end\ndata: null\n\n",
-			wantEventType: "end",
+			wantEventType: lgEventEnd,
 			wantData:      "null",
 		},
 		{
 			name:          "values event",
 			input:         "event: values\ndata: {\"messages\":[{\"type\":\"ai\",\"content\":\"test\"}]}\n\n",
-			wantEventType: "values",
+			wantEventType: lgEventValues,
 			wantData:      `{"messages":[{"type":"ai","content":"test"}]}`,
 		},
 		{
 			name:          "updates event",
 			input:         "event: updates\ndata: {\"node\":\"agent\"}\n\n",
-			wantEventType: "updates",
+			wantEventType: lgEventUpdates,
 			wantData:      `{"node":"agent"}`,
 		},
 		{
 			name:          "event with leading empty lines",
 			input:         "\n\nevent: messages\ndata: {\"content\":\"test\"}\n\n",
-			wantEventType: "messages",
+			wantEventType: lgEventMessages,
 			wantData:      `{"content":"test"}`,
 		},
 	}
@@ -56,14 +56,14 @@ func TestParseLangGraphEvent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scanner := bufio.NewScanner(strings.NewReader(tt.input))
-			eventType, data, err := parseLangGraphEvent(scanner)
+			etype, data, err := parseLangGraphEvent(scanner)
 
 			if err != tt.wantErr {
 				t.Errorf("parseLangGraphEvent() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if eventType != tt.wantEventType {
-				t.Errorf("parseLangGraphEvent() eventType = %v, want %v", eventType, tt.wantEventType)
+			if etype != tt.wantEventType {
+				t.Errorf("parseLangGraphEvent() eventType = %v, want %v", etype, tt.wantEventType)
 			}
 			if string(data) != tt.wantData {
 				t.Errorf("parseLangGraphEvent() data = %v, want %v", string(data), tt.wantData)
@@ -84,12 +84,12 @@ func TestParseLangGraphEventEOFAfterEventLine(t *testing.T) {
 	// Test case: EOF occurs after reading event type but before data line
 	// This is valid - the event type is returned with nil data
 	scanner := bufio.NewScanner(strings.NewReader("event: messages\n"))
-	eventType, data, err := parseLangGraphEvent(scanner)
+	etype, data, err := parseLangGraphEvent(scanner)
 	if err != nil {
 		t.Errorf("parseLangGraphEvent() unexpected error: %v", err)
 	}
-	if eventType != "messages" {
-		t.Errorf("parseLangGraphEvent() eventType = %q, want %q", eventType, "messages")
+	if etype != lgEventMessages {
+		t.Errorf("parseLangGraphEvent() eventType = %v, want %v", etype, lgEventMessages)
 	}
 	if data != nil {
 		t.Errorf("parseLangGraphEvent() data = %v, want nil", data)
