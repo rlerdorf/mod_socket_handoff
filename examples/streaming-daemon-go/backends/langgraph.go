@@ -43,6 +43,12 @@ var (
 	langgraphHTTPClient   *http.Client
 )
 
+// Package-level byte slices to avoid allocation in hot paths
+var (
+	eventPrefix = []byte("event:")
+	dataColonPrefix  = []byte("data:")
+)
+
 // LangGraph is a backend that streams responses from the LangGraph Platform API.
 type LangGraph struct{}
 
@@ -276,7 +282,6 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 
 done:
 	// Send completion marker
-	doneMsg := []byte("data: [DONE]\n\n")
 	n, err := conn.Write(doneMsg)
 	totalBytes += int64(n)
 	if err != nil {
@@ -315,7 +320,7 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte,
 	}
 
 	// Parse event type from "event: type" line
-	if bytes.HasPrefix(line, []byte("event:")) {
+	if bytes.HasPrefix(line, eventPrefix) {
 		eventType = strings.TrimSpace(string(line[6:]))
 	} else {
 		// Fail fast on protocol violations to catch integration issues early
@@ -332,7 +337,7 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (eventType string, data []byte,
 	line = scanner.Bytes()
 
 	// Parse data from "data: json" line
-	if bytes.HasPrefix(line, []byte("data:")) {
+	if bytes.HasPrefix(line, dataColonPrefix) {
 		dataStr := bytes.TrimSpace(line[5:])
 		data = make([]byte, len(dataStr))
 		copy(data, dataStr)
