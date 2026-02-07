@@ -32,6 +32,10 @@ type HandoffData struct {
 	ThreadID       string         `json:"thread_id,omitempty"`       // For stateful runs (uses /threads/{id}/runs/stream)
 	AssistantID    string         `json:"assistant_id,omitempty"`    // Override default assistant ID
 	LangGraphInput map[string]any `json:"langgraph_input,omitempty"` // Custom input fields (seller_id, shop_id, etc.)
+
+	// Image handoff fields (for multimodal requests)
+	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
+	ImageMimeType string `json:"image_mime_type,omitempty"` // MIME type of the image (e.g., "image/jpeg")
 }
 
 // Backend defines the interface for streaming backends.
