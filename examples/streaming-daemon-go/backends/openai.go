@@ -37,7 +37,11 @@ const (
 )
 
 // Package-level byte slices to avoid allocation in hot paths
-var contentFieldPattern = []byte(`"content":"`)
+var (
+	contentFieldPattern = []byte(`"content":"`)
+	dataPrefix          = []byte("data: ")
+	doneMarker          = []byte("[DONE]")
+)
 
 // OpenAI configuration (set during Init).
 //
@@ -252,10 +256,6 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, scannerInitialBufferSize), scannerMaxBufferSize)
 
-	// Pre-allocate byte slices for comparisons to avoid allocations
-	dataPrefix := []byte("data: ")
-	doneMarker := []byte("[DONE]")
-
 	writeCount := 0
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -308,7 +308,6 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	}
 
 	// Send completion marker
-	doneMsg := []byte("data: [DONE]\n\n")
 	n, err := conn.Write(doneMsg)
 	totalBytes += int64(n)
 	if err != nil {
