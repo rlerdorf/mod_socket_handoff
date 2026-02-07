@@ -12,7 +12,7 @@ import (
 // WriteTimeout is the maximum time for a single write to client.
 const WriteTimeout = 30 * time.Second
 
-// Pre-allocated byte slices shared across backends to avoid allocation in hot paths.
+// Pre-allocated completion marker shared across backends to avoid allocation in hot paths.
 var doneMsg = []byte("data: [DONE]\n\n")
 
 // sseBufPool reuses buffers for SSE message construction to reduce allocations.

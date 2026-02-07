@@ -292,8 +292,8 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 			// These event types don't contain streamable content
 			continue
 		case lgEventUnknown:
-			// Log unknown event types for forward compatibility debugging
-			slog.Warn("LangGraph: unknown event type, skipping")
+			// Already logged with event name inside parseLangGraphEvent
+			continue
 		}
 	}
 
@@ -345,7 +345,7 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (etype lgEventType, data []byte
 		// Fail fast on protocol violations to catch integration issues early
 		return lgEventUnknown, nil, fmt.Errorf("unexpected event line format: %q", string(line))
 	}
-	eventBytes := bytes.TrimSpace(line[6:])
+	eventBytes := bytes.TrimSpace(line[len(eventPrefix):])
 	switch {
 	case bytes.Equal(eventBytes, evMessages):
 		etype = lgEventMessages
@@ -359,6 +359,7 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (etype lgEventType, data []byte
 		etype = lgEventUpdates
 	default:
 		etype = lgEventUnknown
+		slog.Warn("LangGraph: unknown event type", "event_type", string(eventBytes))
 	}
 
 	// Read data line (may overwrite the event line in scanner's buffer)
@@ -374,7 +375,7 @@ func parseLangGraphEvent(scanner *bufio.Scanner) (etype lgEventType, data []byte
 	// Return a slice of the scanner's buffer directly — caller must
 	// consume it before the next call to parseLangGraphEvent.
 	if bytes.HasPrefix(line, dataColonPrefix) {
-		data = bytes.TrimSpace(line[5:])
+		data = bytes.TrimSpace(line[len(dataColonPrefix):])
 	}
 
 	return etype, data, nil
