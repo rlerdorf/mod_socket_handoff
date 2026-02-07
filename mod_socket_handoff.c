@@ -737,19 +737,20 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
     apr_bucket *e;
     apr_bucket *next;
 
-    /* Get module config */
-    conf = ap_get_module_config(r->server->module_config,
-                                &socket_handoff_module);
-
-    /* Check if enabled and if this is a main request */
-    if (!conf->enabled || r->main != NULL) {
-        ap_remove_output_filter(f);
-        return ap_pass_brigade(f->next, bb);
-    }
-
     /* Look for redirect header in response */
     socket_path = apr_table_get(r->headers_out, HANDOFF_HEADER);
     if (!socket_path) {
+        /*
+         * We could potentially save a hash lookup here by not checking err_headers_out.
+         * I copied this from mod_xsendfile to cover cases where you have a non 2xx response
+         * which clears the regular headers_out. Like if you did:
+         *
+         *   header("X-Socket-Handoff: ...", true, 503)
+         *
+         * although I have no idea why you might do that. Other modules can set a non-2xx
+         * status too, so there could be circumstances where without this we wouldn't get
+         * the handoff we were expecting.
+         */
         socket_path = apr_table_get(r->err_headers_out, HANDOFF_HEADER);
     }
 
@@ -759,15 +760,21 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         return ap_pass_brigade(f->next, bb);
     }
 
+    /* Get module config - deferred to here so non-handoff requests skip it */
+    conf = ap_get_module_config(r->server->module_config,
+                                &socket_handoff_module);
+
     ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
         "mod_socket_handoff: Handoff requested to %s", socket_path);
 
     /*
      * Reject HTTP/2 connections. The module hands off the underlying TCP
      * socket, but HTTP/2 multiplexes many streams over a single connection.
-     * Handing off the socket would break all other concurrent streams.
+     * Handing off the socket would break all other concurrent streams. Also,
+     * With mod_http2, each stream uses a secondary connection so ap_get_conn_socket()
+     * won't return the real TCP socket, so fd handoff is not possible
      */
-    if (r->protocol && strncmp(r->protocol, "HTTP/2", 6) == 0) {
+    if (r->proto_num >= 2000) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "mod_socket_handoff: handoff not supported over HTTP/2 "
             "(would break other multiplexed streams)");
@@ -792,12 +799,6 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
         status = HTTP_INTERNAL_SERVER_ERROR;
         goto cleanup;
     }
-
-    /* Remove our headers so client never sees them */
-    apr_table_unset(r->headers_out, HANDOFF_HEADER);
-    apr_table_unset(r->err_headers_out, HANDOFF_HEADER);
-    apr_table_unset(r->headers_out, HANDOFF_DATA_HEADER);
-    apr_table_unset(r->err_headers_out, HANDOFF_DATA_HEADER);
 
     /* Discard any response body that PHP might have generated */
     for (e = APR_BRIGADE_FIRST(bb);
@@ -875,10 +876,6 @@ static apr_status_t socket_handoff_output_filter(ap_filter_t *f,
      * The daemon now owns the client connection.
      * This trick is borrowed from mod_proxy_fdpass.
      */
-    /*
-     * Replace the connection's socket with our dummy.
-     * The core module stores the socket in conn_config.
-     */
     ap_set_core_module_config(c->conn_config, dummy_socket);
 
     /*
@@ -907,10 +904,10 @@ cleanup:
          * connection. This lets load balancers and clients distinguish
          * between "daemon unavailable" (503, retry elsewhere) and
          * "network failure" (connection reset).
+         *
+         * First discard any leftover brigade content (may still have PHP
+         * response if error occurred before the bucket deletion loop).
          */
-
-        /* Discard any leftover brigade content (may still have PHP
-         * response if error occurred before the bucket deletion loop) */
         for (e = APR_BRIGADE_FIRST(bb);
              e != APR_BRIGADE_SENTINEL(bb);
              e = next) {
@@ -947,6 +944,11 @@ cleanup:
 static void socket_handoff_insert_filter(request_rec *r)
 {
     socket_handoff_config *conf;
+
+    /* Skip subrequests - handoff only makes sense for main requests */
+    if (r->main != NULL) {
+        return;
+    }
 
     conf = ap_get_module_config(r->server->module_config,
                                 &socket_handoff_module);
