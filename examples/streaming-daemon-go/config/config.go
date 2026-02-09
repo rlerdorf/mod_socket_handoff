@@ -70,7 +70,8 @@ type MockConfig struct {
 
 // TypingConfig contains typing backend settings.
 type TypingConfig struct {
-	// Future: typing speed settings, fortune category, etc.
+	UseAPI       bool   `yaml:"use_api"`
+	DefaultModel string `yaml:"default_model"`
 }
 
 // MetricsConfig contains Prometheus metrics settings.

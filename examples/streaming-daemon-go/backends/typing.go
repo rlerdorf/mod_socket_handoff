@@ -2,10 +2,14 @@ package backends
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -51,7 +55,15 @@ var sseCharBufPool = sync.Pool{
 
 // Typing is a backend that streams characters one at a time with a typewriter effect.
 // Uses fortune for dynamic content when the prompt is not recognized.
-type Typing struct{}
+// When configured with use_api: true and an OpenAI API key, fetches responses
+// from the API (non-streaming) and then types them out character by character.
+type Typing struct {
+	useAPI       bool
+	defaultModel string
+	httpClient   *http.Client
+	apiBase      string
+	apiKey       string
+}
 
 func init() {
 	Register(&Typing{})
@@ -66,8 +78,117 @@ func (t *Typing) Description() string {
 }
 
 func (t *Typing) Init(cfg *config.BackendConfig) error {
-	slog.Info("typing backend initialized")
+	if cfg != nil && cfg.Typing.UseAPI && cfg.OpenAI.APIKey != "" {
+		t.useAPI = true
+		t.apiKey = cfg.OpenAI.APIKey
+		t.apiBase = cfg.OpenAI.APIBase
+		if t.apiBase == "" {
+			t.apiBase = "https://api.openai.com/v1"
+		}
+		t.defaultModel = cfg.Typing.DefaultModel
+		if t.defaultModel == "" {
+			t.defaultModel = cfg.DefaultModel
+		}
+		if t.defaultModel == "" {
+			t.defaultModel = "gpt-4o-mini"
+		}
+
+		useHTTP2 := true
+		if cfg.OpenAI.HTTP2Enabled != nil {
+			useHTTP2 = *cfg.OpenAI.HTTP2Enabled
+		}
+		t.httpClient = NewHTTPClient(TransportConfig{
+			BaseURL:     t.apiBase,
+			SocketPath:  cfg.OpenAI.APISocket,
+			UseHTTP2:    useHTTP2,
+			InsecureSSL: cfg.OpenAI.InsecureSSL,
+			Label:       "Typing",
+		})
+		slog.Info("typing backend initialized with API", "api_base", t.apiBase, "model", t.defaultModel)
+	} else {
+		slog.Info("typing backend initialized (fortune/fallback mode)")
+	}
 	return nil
+}
+
+// fetchAPIResponse makes a non-streaming request to the OpenAI-compatible API
+// and returns the full response text.
+func (t *Typing) fetchAPIResponse(ctx context.Context, handoff HandoffData) (string, error) {
+	model := handoff.Model
+	if model == "" {
+		model = t.defaultModel
+	}
+
+	// Build request JSON manually using the shared buffer pool
+	bufPtr := requestBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	buf = append(buf, `{"model":"`...)
+	buf = appendJSONEscaped(buf, model)
+	buf = append(buf, `","messages":[`...)
+
+	if len(handoff.Messages) > 0 {
+		for i, msg := range handoff.Messages {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, `{"role":"`...)
+			buf = appendJSONEscaped(buf, msg.Role)
+			buf = append(buf, `","content":"`...)
+			buf = appendJSONEscaped(buf, msg.Content)
+			buf = append(buf, `"}`...)
+		}
+	} else {
+		prompt := handoff.Prompt
+		if prompt == "" {
+			prompt = "Hello"
+		}
+		buf = append(buf, `{"role":"user","content":"`...)
+		buf = appendJSONEscaped(buf, prompt)
+		buf = append(buf, `"}`...)
+	}
+
+	buf = append(buf, `],"stream":false}`...)
+
+	url := t.apiBase + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(buf))
+	if err != nil {
+		*bufPtr = buf
+		requestBufPool.Put(bufPtr)
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.apiKey)
+
+	resp, err := t.httpClient.Do(req)
+
+	*bufPtr = buf
+	requestBufPool.Put(bufPtr)
+
+	if err != nil {
+		return "", fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse non-streaming response
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+	return result.Choices[0].Message.Content, nil
 }
 
 // Stream sends characters one at a time with realistic typing delays.
@@ -87,7 +208,14 @@ func (t *Typing) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 	writer := bufio.NewWriter(conn)
 
 	var response string
-	if handoff.Prompt == "Tell me about streaming" {
+	var err error
+	if t.useAPI {
+		response, err = t.fetchAPIResponse(ctx, handoff)
+		if err != nil {
+			RecordBackendError("typing")
+			return 0, fmt.Errorf("API request failed: %w", err)
+		}
+	} else if handoff.Prompt == "Tell me about streaming" {
 		// Known prompt - give the streaming explanation
 		response = `Hello! I received your request.
 
