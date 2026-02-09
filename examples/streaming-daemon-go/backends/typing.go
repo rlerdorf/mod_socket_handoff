@@ -283,6 +283,22 @@ func appendJSONEscapedRune(buf []byte, r rune) []byte {
 	}
 }
 
+// keepUppercase lists words that should remain capitalized mid-sentence.
+var keepUppercase = map[string]bool{
+	"I": true, "I'm": true, "I've": true, "I'll": true, "I'd": true,
+	"God": true, "Jesus": true, "Allah": true, "Buddha": true,
+	"Monday": true, "Tuesday": true, "Wednesday": true, "Thursday": true,
+	"Friday": true, "Saturday": true, "Sunday": true,
+	"January": true, "February": true, "March": true, "April": true,
+	"May": true, "June": true, "July": true, "August": true,
+	"September": true, "October": true, "November": true, "December": true,
+	"America": true, "American": true, "English": true, "French": true,
+	"German": true, "Chinese": true, "Japanese": true, "Russian": true,
+	"Linux": true, "Unix": true, "Windows": true, "Mac": true, "Apple": true,
+	"Google": true, "Microsoft": true, "Facebook": true, "Amazon": true,
+	"NASA": true, "FBI": true, "CIA": true, "USA": true, "UK": true,
+}
+
 // lowercaseFirstIfAppropriate lowercases the first letter of a string
 // unless it's a word that should remain capitalized mid-sentence
 func lowercaseFirstIfAppropriate(s string) string {
@@ -295,22 +311,6 @@ func lowercaseFirstIfAppropriate(s string) string {
 	firstWord = strings.TrimFunc(firstWord, func(r rune) bool {
 		return !unicode.IsLetter(r)
 	})
-
-	// Words that should stay uppercase mid-sentence
-	keepUppercase := map[string]bool{
-		"I": true, "I'm": true, "I've": true, "I'll": true, "I'd": true,
-		"God": true, "Jesus": true, "Allah": true, "Buddha": true,
-		"Monday": true, "Tuesday": true, "Wednesday": true, "Thursday": true,
-		"Friday": true, "Saturday": true, "Sunday": true,
-		"January": true, "February": true, "March": true, "April": true,
-		"May": true, "June": true, "July": true, "August": true,
-		"September": true, "October": true, "November": true, "December": true,
-		"America": true, "American": true, "English": true, "French": true,
-		"German": true, "Chinese": true, "Japanese": true, "Russian": true,
-		"Linux": true, "Unix": true, "Windows": true, "Mac": true, "Apple": true,
-		"Google": true, "Microsoft": true, "Facebook": true, "Amazon": true,
-		"NASA": true, "FBI": true, "CIA": true, "USA": true, "UK": true,
-	}
 
 	// Check if first word should stay uppercase
 	if keepUppercase[firstWord] {

@@ -39,6 +39,7 @@ const (
 // Package-level byte slices to avoid allocation in hot paths
 var (
 	contentFieldPattern = []byte(`"content":"`)
+	deltaFieldPattern   = []byte(`"delta":{`)
 	dataPrefix          = []byte("data: ")
 	doneMarker          = []byte("[DONE]")
 )
@@ -323,14 +324,23 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 // extractContentFast extracts the "content" field from an OpenAI SSE chunk
 // without full JSON parsing. Returns empty string if not found.
 func extractContentFast(data []byte) string {
-	// Look for "content":" pattern
-	idx := bytes.Index(data, contentFieldPattern)
+	// Anchor search to the delta object to avoid matching "content" fields
+	// elsewhere in the JSON (e.g., in tool call arguments or metadata).
+	// OpenAI format: {"choices":[{"delta":{"content":"..."},...}]}
+	deltaIdx := bytes.Index(data, deltaFieldPattern)
+	if deltaIdx < 0 {
+		return ""
+	}
+
+	// Search for "content":" only within the delta object
+	searchFrom := deltaIdx + len(deltaFieldPattern)
+	idx := bytes.Index(data[searchFrom:], contentFieldPattern)
 	if idx < 0 {
 		return ""
 	}
 
 	// Find the start of the content value
-	start := idx + len(contentFieldPattern)
+	start := searchFrom + idx + len(contentFieldPattern)
 	if start >= len(data) {
 		return ""
 	}
@@ -394,7 +404,7 @@ func unescapeJSON(b []byte) string {
 			case '"', '\\', '/':
 				result = append(result, b[i])
 			case 'u':
-				if i+4 > len(b) {
+				if i+4 >= len(b) {
 					break
 				}
 				hexStr := string(b[i+1 : i+5])

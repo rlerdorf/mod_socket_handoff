@@ -89,6 +89,13 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		return 0, fmt.Errorf("set write deadline: %w", err)
 	}
 
+	// Use a reusable timer to avoid leaking timers from time.After
+	delayTimer := time.NewTimer(0)
+	if !delayTimer.Stop() {
+		<-delayTimer.C
+	}
+	defer delayTimer.Stop()
+
 	for i, msg := range messages {
 		select {
 		case <-ctx.Done():
@@ -120,12 +127,11 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		}
 
 		// Simulate token generation delay (configurable via config or -message-delay flag).
-		// Use select to allow context cancellation to interrupt the delay,
-		// enabling faster shutdown with long message delays.
+		// Use a reusable timer to avoid leaking timers when context is cancelled.
 		if i < len(messages)-1 {
+			delayTimer.Reset(m.messageDelay)
 			select {
-			case <-time.After(m.messageDelay):
-				// Normal delay completed
+			case <-delayTimer.C:
 			case <-ctx.Done():
 				return totalBytes, ctx.Err()
 			}

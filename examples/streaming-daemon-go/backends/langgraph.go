@@ -65,6 +65,7 @@ var (
 	evMetadata      = []byte("metadata")
 	evValues        = []byte("values")
 	evUpdates       = []byte("updates")
+	elemSepPattern  = []byte("},{")
 )
 
 // LangGraph is a backend that streams responses from the LangGraph Platform API.
@@ -388,6 +389,14 @@ func extractContentFromMessages(data []byte) string {
 	// Fast path: look for "content":" pattern
 	idx := bytes.Index(data, contentFieldPattern)
 	if idx < 0 {
+		return ""
+	}
+
+	// Ensure the match is in the first array element of the messages-tuple.
+	// Format: [{"content":"...", ...}, {"run_id":"..."}]
+	// If "content" appears after a "},{" element separator, it's in a
+	// later element (e.g., metadata) and should be ignored.
+	if sep := bytes.Index(data, elemSepPattern); sep >= 0 && idx > sep {
 		return ""
 	}
 
