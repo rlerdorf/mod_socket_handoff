@@ -468,26 +468,31 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestReloadConfig(t *testing.T) {
-	// Save and restore flag values, logger, and runtime settings.
-	// SetMemoryLimit(-1) is read-only (negative values don't change the limit).
-	// SetGCPercent has no read-only mode, so we set-then-restore immediately.
+	// This test mutates global state (flags, logger, currentLogging,
+	// debug.SetMemoryLimit, debug.SetGCPercent). Subtests run serially
+	// (no t.Parallel) and the parent's t.Cleanup restores everything
+	// after all subtests complete.
 	origConfigFile := *configFile
 	origMemLimitFlag := *memLimitFlag
 	origGcPercentFlag := *gcPercentFlag
 	origLogger := slog.Default()
+	currentLoggingMu.Lock()
 	origLogging := currentLogging
+	currentLoggingMu.Unlock()
 	origMemLimit := debug.SetMemoryLimit(-1)
 	origGCPercent := debug.SetGCPercent(100)
 	debug.SetGCPercent(origGCPercent)
-	defer func() {
+	t.Cleanup(func() {
 		*configFile = origConfigFile
 		*memLimitFlag = origMemLimitFlag
 		*gcPercentFlag = origGcPercentFlag
 		slog.SetDefault(origLogger)
+		currentLoggingMu.Lock()
 		currentLogging = origLogging
+		currentLoggingMu.Unlock()
 		debug.SetMemoryLimit(origMemLimit)
 		debug.SetGCPercent(origGCPercent)
-	}()
+	})
 
 	t.Run("no config file warns", func(t *testing.T) {
 		*configFile = ""
@@ -529,7 +534,9 @@ func TestReloadConfig(t *testing.T) {
 		// Set up a known logger state first
 		knownCfg := config.LoggingConfig{Level: "error", Format: "json"}
 		initLogging(knownCfg)
+		currentLoggingMu.Lock()
 		currentLogging = knownCfg
+		currentLoggingMu.Unlock()
 		handlerBefore := slog.Default().Handler()
 
 		// Config with no logging section
@@ -556,7 +563,9 @@ func TestReloadConfig(t *testing.T) {
 		// Start with json format at error level
 		knownCfg := config.LoggingConfig{Level: "error", Format: "json"}
 		initLogging(knownCfg)
+		currentLoggingMu.Lock()
 		currentLogging = knownCfg
+		currentLoggingMu.Unlock()
 
 		// Reload with only level changed — format should stay json
 		tmpFile := filepath.Join(t.TempDir(), "config.yaml")

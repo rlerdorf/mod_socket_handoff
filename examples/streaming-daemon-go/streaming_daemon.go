@@ -106,8 +106,12 @@ var activeBackend backends.Backend
 var maxStreamDuration time.Duration
 
 // currentLogging tracks the last applied logging config so partial
-// config reloads can preserve unspecified fields.
-var currentLogging config.LoggingConfig
+// config reloads can preserve unspecified fields. Protected by
+// currentLoggingMu since reloadConfig runs on the SIGHUP goroutine.
+var (
+	currentLogging   config.LoggingConfig
+	currentLoggingMu sync.Mutex
+)
 
 // Benchmark stats (only updated in benchmark mode)
 // Uses atomic operations instead of mutex for better performance under high concurrency.
@@ -304,6 +308,7 @@ func reloadConfig() {
 	// Reload logging, merging with current config so partial reloads
 	// (e.g. only level specified) don't reset unspecified fields to defaults.
 	if newCfg.Logging.Level != "" || newCfg.Logging.Format != "" {
+		currentLoggingMu.Lock()
 		merged := currentLogging
 		if newCfg.Logging.Level != "" {
 			merged.Level = newCfg.Logging.Level
@@ -313,6 +318,7 @@ func reloadConfig() {
 		}
 		initLogging(merged)
 		currentLogging = merged
+		currentLoggingMu.Unlock()
 		slog.Info("logging config reloaded", "level", merged.Level, "format", merged.Format)
 	}
 
@@ -333,7 +339,10 @@ func reloadConfig() {
 		}
 	}
 
-	// Reload GC percent (flag overrides config)
+	// Reload GC percent (flag overrides config).
+	// Note: gc_percent=0 (disable GC) cannot be set via config file because
+	// the zero value is indistinguishable from "not set". Use the -gc-percent
+	// flag for GOGC=0. See config.go ServerConfig.GCPercent comment.
 	gcPercent := newCfg.Server.GCPercent
 	gcPercentSet := newCfg.Server.GCPercent != 0
 	if *gcPercentFlag >= 0 {
@@ -365,7 +374,9 @@ func main() {
 
 	// Initialize structured logging based on config (before any log output)
 	initLogging(cfg.Logging)
+	currentLoggingMu.Lock()
 	currentLogging = cfg.Logging
+	currentLoggingMu.Unlock()
 
 	if *configFile != "" {
 		slog.Info("loaded config", "path", *configFile)
