@@ -602,8 +602,10 @@ func TestReloadConfig(t *testing.T) {
 
 		reloadConfig()
 
-		// Verify the memory limit was actually applied
-		got := debug.SetMemoryLimit(-1) // read-only
+		// Verify the memory limit was actually applied.
+		// Per Go docs: "If a negative limit is provided, SetMemoryLimit does
+		// not change the limit, and returns the previously set value."
+		got := debug.SetMemoryLimit(-1)
 		want := config.ParseMemLimit("512MiB")
 		if got != want {
 			t.Errorf("memory limit = %d, want %d", got, want)
