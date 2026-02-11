@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -467,16 +468,23 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestReloadConfig(t *testing.T) {
-	// Save and restore flag values and logger
+	// Save and restore flag values, logger, and runtime settings.
+	// SetMemoryLimit(-1) is read-only (negative values don't change the limit).
+	// SetGCPercent has no read-only mode, so we set-then-restore immediately.
 	origConfigFile := *configFile
 	origMemLimitFlag := *memLimitFlag
 	origGcPercentFlag := *gcPercentFlag
 	origLogger := slog.Default()
+	origMemLimit := debug.SetMemoryLimit(-1)
+	origGCPercent := debug.SetGCPercent(100)
+	debug.SetGCPercent(origGCPercent)
 	defer func() {
 		*configFile = origConfigFile
 		*memLimitFlag = origMemLimitFlag
 		*gcPercentFlag = origGcPercentFlag
 		slog.SetDefault(origLogger)
+		debug.SetMemoryLimit(origMemLimit)
+		debug.SetGCPercent(origGCPercent)
 	}()
 
 	t.Run("no config file warns", func(t *testing.T) {

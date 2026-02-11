@@ -307,16 +307,18 @@ func reloadConfig() {
 
 	// Reload memory limit (flag overrides config)
 	memLimit := newCfg.Server.MemLimit
+	memLimitSource := "config"
 	if *memLimitFlag != "" {
 		memLimit = *memLimitFlag
+		memLimitSource = "flag"
 	}
 	if memLimit != "" {
 		limit := config.ParseMemLimit(memLimit)
 		if limit > 0 {
 			debug.SetMemoryLimit(limit)
-			slog.Info("memory limit reloaded", "limit", memLimit, "bytes", limit)
+			slog.Info("memory limit reloaded", "limit", memLimit, "bytes", limit, "source", memLimitSource)
 		} else {
-			slog.Warn("invalid memlimit value in config, skipping", "value", memLimit)
+			slog.Warn("invalid memlimit value, skipping", "value", memLimit, "source", memLimitSource)
 		}
 	}
 
