@@ -601,10 +601,10 @@ func TestReloadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid memlimit in config warns", func(t *testing.T) {
+	t.Run("invalid memlimit flag warns during reload", func(t *testing.T) {
+		// The -memlimit flag overrides config; test that an invalid flag
+		// value logs a warning instead of crashing.
 		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
-		// Use a value that passes config.Validate() but fails ParseMemLimit
-		// Actually, Validate catches bad memlimits, so test the flag override path
 		content := []byte("logging:\n  level: info\n")
 		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
 			t.Fatal(err)
@@ -614,7 +614,7 @@ func TestReloadConfig(t *testing.T) {
 		*memLimitFlag = "not-a-number"
 		*gcPercentFlag = -1
 
-		// Should not panic — logs warning about invalid memlimit
+		// Should not panic — logs warning about invalid memlimit from flag
 		reloadConfig()
 	})
 
