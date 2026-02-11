@@ -177,7 +177,7 @@ func TestConcurrentFdSends(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, numConnections)
 
-	for i := 0; i < numConnections; i++ {
+	for i := range numConnections {
 		wg.Add(1)
 		go func(connID int) {
 			defer wg.Done()
@@ -424,7 +424,7 @@ func TestLargeHandoffData(t *testing.T) {
 	}
 
 	// Verify JSON can be parsed
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(receivedData, &parsed); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestHealthHandler(t *testing.T) {
 		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
 	}
 
-	var body map[string]interface{}
+	var body map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode JSON body: %v", err)
 	}
@@ -467,10 +467,10 @@ func TestHealthHandler(t *testing.T) {
 
 func TestInitLogging(t *testing.T) {
 	tests := []struct {
-		name       string
-		cfg        config.LoggingConfig
-		wantLevel  slog.Level
-		wantJSON   bool
+		name      string
+		cfg       config.LoggingConfig
+		wantLevel slog.Level
+		wantJSON  bool
 	}{
 		{
 			name:      "defaults to info text",
@@ -573,4 +573,3 @@ func TestInitLogging(t *testing.T) {
 		})
 	}
 }
-

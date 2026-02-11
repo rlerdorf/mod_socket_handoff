@@ -4,8 +4,9 @@ package backends
 
 import (
 	"context"
+	"maps"
 	"net"
-	"sort"
+	"slices"
 	"sync"
 
 	"examples/config"
@@ -21,8 +22,8 @@ type Message struct {
 // Customize this struct to match your application's needs.
 type HandoffData struct {
 	UserID      int64     `json:"user_id"`
-	Prompt      string    `json:"prompt"`                 // Single prompt (legacy, used if Messages is empty)
-	Messages    []Message `json:"messages,omitempty"`     // Full conversation history
+	Prompt      string    `json:"prompt"`             // Single prompt (legacy, used if Messages is empty)
+	Messages    []Message `json:"messages,omitempty"` // Full conversation history
 	Model       string    `json:"model,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Timestamp   int64     `json:"timestamp,omitempty"`
@@ -98,7 +99,7 @@ func List() []string {
 	for name := range registry {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -107,8 +108,6 @@ func All() map[string]Backend {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 	result := make(map[string]Backend, len(registry))
-	for name, b := range registry {
-		result[name] = b
-	}
+	maps.Copy(result, registry)
 	return result
 }

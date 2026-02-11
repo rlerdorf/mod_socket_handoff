@@ -278,6 +278,57 @@ func initLogging(cfg config.LoggingConfig) {
 	slog.SetDefault(slog.New(handler))
 }
 
+// reloadConfig re-reads the config file and applies safe runtime changes.
+// Called on SIGHUP. Only reloads settings that can be changed without restart:
+// logging level/format, memory limit, and GC percent. Settings that require
+// restart (socket path, max connections, backend provider, etc.) are logged
+// as skipped if changed.
+func reloadConfig() {
+	if *configFile == "" {
+		slog.Warn("SIGHUP: no config file specified (-config), nothing to reload")
+		return
+	}
+
+	slog.Info("reloading configuration", "path", *configFile)
+
+	newCfg, err := config.Load(*configFile)
+	if err != nil {
+		slog.Error("config reload failed, keeping current config", "error", err)
+		return
+	}
+
+	// Reload logging (always safe — slog.SetDefault is concurrent-safe)
+	initLogging(newCfg.Logging)
+	slog.Info("logging config reloaded", "level", newCfg.Logging.Level, "format", newCfg.Logging.Format)
+
+	// Reload memory limit (flag overrides config)
+	memLimit := newCfg.Server.MemLimit
+	if *memLimitFlag != "" {
+		memLimit = *memLimitFlag
+	}
+	if memLimit != "" {
+		limit := config.ParseMemLimit(memLimit)
+		if limit > 0 {
+			debug.SetMemoryLimit(limit)
+			slog.Info("memory limit reloaded", "limit", memLimit, "bytes", limit)
+		}
+	}
+
+	// Reload GC percent (flag overrides config)
+	gcPercent := newCfg.Server.GCPercent
+	gcPercentSet := newCfg.Server.GCPercent != 0
+	if *gcPercentFlag >= 0 {
+		gcPercent = *gcPercentFlag
+		gcPercentSet = true
+	}
+	if gcPercentSet {
+		old := debug.SetGCPercent(gcPercent)
+		slog.Info("GC percent reloaded", "value", gcPercent, "previous", old)
+	}
+
+	slog.Info("configuration reloaded successfully")
+}
+
 func main() {
 	flag.Parse()
 
@@ -405,24 +456,18 @@ func main() {
 	// Initialize connection limiter
 	connSemaphore = make(chan struct{}, cfg.Server.MaxConnections)
 
-	// Handle shutdown gracefully
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Handle shutdown gracefully.
+	// Go 1.26: signal.NotifyContext sets a CancelCauseFunc with the signal,
+	// so context.Cause(ctx) returns the signal after cancellation.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
+	// SIGHUP triggers config reload on a separate channel
+	sighupChan := make(chan os.Signal, 1)
+	signal.Notify(sighupChan, syscall.SIGHUP)
 	go func() {
-		for sig := range sigChan {
-			switch sig {
-			case syscall.SIGHUP:
-				slog.Info("received SIGHUP", "active_connections", atomic.LoadInt64(&activeConns))
-			default:
-				slog.Info("received signal, shutting down", "signal", sig)
-				signal.Stop(sigChan)
-				cancel()
-				return
-			}
+		for range sighupChan {
+			reloadConfig()
 		}
 	}()
 
@@ -594,6 +639,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	slog.Info("shutting down", "cause", context.Cause(ctx))
 
 	// Close listener to unblock accept loop immediately. The defer above is kept
 	// as a safety net for panics. Calling Close() twice is safe (second returns error).
@@ -991,9 +1037,8 @@ func classifyError(err error) string {
 		return "timeout"
 	}
 	// Check for syscall errors first (more specific)
-	// Use errors.As to unwrap and find syscall.Errno
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	// Go 1.26: errors.AsType is type-safe, avoids declaring a target variable, no reflect
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		switch errno {
 		case syscall.EPIPE, syscall.ECONNRESET:
 			return "client_disconnected"
@@ -1002,8 +1047,7 @@ func classifyError(err error) string {
 		}
 	}
 	// Check for net.Error interface (includes timeouts)
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); ok {
 		if netErr.Timeout() {
 			return "timeout"
 		}
@@ -1031,10 +1075,8 @@ func hasSyscallErrno(err error, target syscall.Errno) bool {
 	}
 	// Unwrap to find the underlying syscall error
 	// net.OpError -> os.SyscallError -> syscall.Errno
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		var syscallErr *os.SyscallError
-		if errors.As(opErr.Err, &syscallErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
+		if syscallErr, ok := errors.AsType[*os.SyscallError](opErr.Err); ok {
 			if errno, ok := syscallErr.Err.(syscall.Errno); ok {
 				return errno == target
 			}

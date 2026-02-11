@@ -13,7 +13,7 @@
 
 set -e
 
-MIN_VERSION="${1:-1.25.7}"
+MIN_VERSION="${1:-1.26.0}"
 GOROOT_CACHE="$(cd "$(dirname "$0")" && pwd)/.goroot"
 CACHED_GO="$GOROOT_CACHE/go/bin/go"
 
