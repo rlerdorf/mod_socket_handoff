@@ -49,9 +49,8 @@ const (
 	DaemonSocket = "/var/run/streaming-daemon.sock"
 
 	// Timeouts for robustness
-	HandoffTimeout  = 5 * time.Second  // Max time to receive fd from Apache
-	WriteTimeout    = 30 * time.Second // Max time for a single write to client
-	ShutdownTimeout = 2 * time.Minute  // Graceful shutdown timeout; long enough for LLM streams to complete
+	HandoffTimeout  = 5 * time.Second // Max time to receive fd from Apache
+	ShutdownTimeout = 2 * time.Minute // Graceful shutdown timeout; long enough for LLM streams to complete
 
 	// DefaultMaxConnections is the default maximum concurrent connections.
 	// Can be overridden with -max-connections flag for benchmarking.
@@ -937,7 +936,7 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	var totalBytes int64
 
 	// Set initial write timeout - fail fast if we can't set deadline
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(backends.WriteTimeout)); err != nil {
 		return 0, fmt.Errorf("could not set write deadline: %w", err)
 	}
 

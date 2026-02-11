@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"time"
+	"unicode/utf8"
 
 	"examples/config"
 )
@@ -146,7 +147,6 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	}
 
 	// Send completion marker
-	doneMsg := []byte("data: [DONE]\n\n")
 	n, err := conn.Write(doneMsg)
 	totalBytes += int64(n)
 	if err != nil {
@@ -162,6 +162,13 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Find a valid UTF-8 boundary at or before byte n
+	for n > 0 && n < len(s) {
+		if utf8.RuneStart(s[n]) {
+			break
+		}
+		n--
 	}
 	return s[:n] + "..."
 }
