@@ -12,6 +12,7 @@
 #   make clean            - Remove the built binary
 #   make clean-go         - Remove downloaded Go toolchain (.goroot/)
 #   make clean-all        - Remove binary and downloaded Go toolchain
+#   make build-leak-debug - Build with goroutine leak profiler (Go 1.26)
 #   make install          - Install to PREFIX (default /usr/local)
 #   make uninstall        - Remove installed binary
 

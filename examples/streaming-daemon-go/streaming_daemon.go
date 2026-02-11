@@ -105,6 +105,10 @@ var activeBackend backends.Backend
 // Set once in main(), read-only after. Zero means no timeout.
 var maxStreamDuration time.Duration
 
+// currentLogging tracks the last applied logging config so partial
+// config reloads can preserve unspecified fields.
+var currentLogging config.LoggingConfig
+
 // Benchmark stats (only updated in benchmark mode)
 // Uses atomic operations instead of mutex for better performance under high concurrency.
 type BenchmarkStats struct {
@@ -297,12 +301,19 @@ func reloadConfig() {
 		return
 	}
 
-	// Reload logging only if the new config explicitly specifies logging options.
-	// This avoids resetting logging back to defaults when the logging section is
-	// omitted from a partial config reload.
+	// Reload logging, merging with current config so partial reloads
+	// (e.g. only level specified) don't reset unspecified fields to defaults.
 	if newCfg.Logging.Level != "" || newCfg.Logging.Format != "" {
-		initLogging(newCfg.Logging)
-		slog.Info("logging config reloaded", "level", newCfg.Logging.Level, "format", newCfg.Logging.Format)
+		merged := currentLogging
+		if newCfg.Logging.Level != "" {
+			merged.Level = newCfg.Logging.Level
+		}
+		if newCfg.Logging.Format != "" {
+			merged.Format = newCfg.Logging.Format
+		}
+		initLogging(merged)
+		currentLogging = merged
+		slog.Info("logging config reloaded", "level", merged.Level, "format", merged.Format)
 	}
 
 	// Reload memory limit (flag overrides config)
@@ -354,6 +365,7 @@ func main() {
 
 	// Initialize structured logging based on config (before any log output)
 	initLogging(cfg.Logging)
+	currentLogging = cfg.Logging
 
 	if *configFile != "" {
 		slog.Info("loaded config", "path", *configFile)
@@ -478,18 +490,12 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
-			case _, ok := <-sighupChan:
-				if !ok {
-					return
-				}
+			case <-sighupChan:
 				reloadConfig()
 			}
 		}
 	}()
-	defer func() {
-		signal.Stop(sighupChan)
-		close(sighupChan)
-	}()
+	defer signal.Stop(sighupChan)
 
 	// Handle existing socket file
 	if info, err := os.Lstat(cfg.Server.SocketPath); err == nil {

@@ -475,6 +475,7 @@ func TestReloadConfig(t *testing.T) {
 	origMemLimitFlag := *memLimitFlag
 	origGcPercentFlag := *gcPercentFlag
 	origLogger := slog.Default()
+	origLogging := currentLogging
 	origMemLimit := debug.SetMemoryLimit(-1)
 	origGCPercent := debug.SetGCPercent(100)
 	debug.SetGCPercent(origGCPercent)
@@ -483,6 +484,7 @@ func TestReloadConfig(t *testing.T) {
 		*memLimitFlag = origMemLimitFlag
 		*gcPercentFlag = origGcPercentFlag
 		slog.SetDefault(origLogger)
+		currentLogging = origLogging
 		debug.SetMemoryLimit(origMemLimit)
 		debug.SetGCPercent(origGCPercent)
 	}()
@@ -525,7 +527,9 @@ func TestReloadConfig(t *testing.T) {
 
 	t.Run("omitted logging section preserves current logger", func(t *testing.T) {
 		// Set up a known logger state first
-		initLogging(config.LoggingConfig{Level: "error", Format: "json"})
+		knownCfg := config.LoggingConfig{Level: "error", Format: "json"}
+		initLogging(knownCfg)
+		currentLogging = knownCfg
 		handlerBefore := slog.Default().Handler()
 
 		// Config with no logging section
@@ -548,6 +552,34 @@ func TestReloadConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("partial logging config preserves unspecified fields", func(t *testing.T) {
+		// Start with json format at error level
+		knownCfg := config.LoggingConfig{Level: "error", Format: "json"}
+		initLogging(knownCfg)
+		currentLogging = knownCfg
+
+		// Reload with only level changed — format should stay json
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		content := []byte("logging:\n  level: debug\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = ""
+		*gcPercentFlag = -1
+
+		reloadConfig()
+
+		handler := slog.Default().Handler()
+		if !handler.Enabled(context.Background(), slog.LevelDebug) {
+			t.Error("expected debug level after partial reload")
+		}
+		if _, ok := handler.(*slog.JSONHandler); !ok {
+			t.Errorf("expected format to stay JSON after partial reload, got %T", handler)
+		}
+	})
+
 	t.Run("valid config reloads memlimit", func(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
 		content := []byte("server:\n  mem_limit: 512MiB\n")
@@ -559,8 +591,14 @@ func TestReloadConfig(t *testing.T) {
 		*memLimitFlag = ""
 		*gcPercentFlag = -1
 
-		// Should not panic
 		reloadConfig()
+
+		// Verify the memory limit was actually applied
+		got := debug.SetMemoryLimit(-1) // read-only
+		want := config.ParseMemLimit("512MiB")
+		if got != want {
+			t.Errorf("memory limit = %d, want %d", got, want)
+		}
 	})
 
 	t.Run("invalid memlimit in config warns", func(t *testing.T) {
@@ -591,8 +629,15 @@ func TestReloadConfig(t *testing.T) {
 		*memLimitFlag = ""
 		*gcPercentFlag = -1
 
-		// Should not panic
 		reloadConfig()
+
+		// Verify the GC percent was actually applied.
+		// SetGCPercent returns the previous value, so we set a temp and check.
+		prev := debug.SetGCPercent(100)
+		debug.SetGCPercent(prev) // restore
+		if prev != 200 {
+			t.Errorf("GC percent = %d, want 200", prev)
+		}
 	})
 }
 
