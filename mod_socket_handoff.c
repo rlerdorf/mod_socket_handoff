@@ -923,9 +923,9 @@ cleanup:
         {
             const char *body = apr_psprintf(r->pool,
                 "<!DOCTYPE html>\n<html><body>"
-                "<h1>%d %s</h1>"
+                "<h1>%s</h1>"
                 "</body></html>\n",
-                status, ap_get_status_line(status));
+                ap_get_status_line(status));
             apr_bucket *b = apr_bucket_transient_create(
                 body, strlen(body), bb->bucket_alloc);
             APR_BRIGADE_INSERT_TAIL(bb, b);
