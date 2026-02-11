@@ -6,14 +6,14 @@
 # latest Go from go.dev if neither satisfies the minimum version.
 #
 # Usage:  ./ensure-go.sh [MIN_VERSION]
-#   MIN_VERSION defaults to 1.25.7
+#   MIN_VERSION defaults to 1.26.0
 #
 # Output: prints the path to a suitable `go` binary on stdout.
 #         All status/progress messages go to stderr.
 
 set -e
 
-MIN_VERSION="${1:-1.25.7}"
+MIN_VERSION="${1:-1.26.0}"
 GOROOT_CACHE="$(cd "$(dirname "$0")" && pwd)/.goroot"
 CACHED_GO="$GOROOT_CACHE/go/bin/go"
 

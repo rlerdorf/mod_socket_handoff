@@ -1,6 +1,6 @@
 # Makefile for streaming-daemon-go
 #
-# Automatically ensures a suitable Go toolchain (>= 1.25.7) is available,
+# Automatically ensures a suitable Go toolchain (>= 1.26.0) is available,
 # downloading one from go.dev if needed.  Status messages go to stderr;
 # the Go binary path is captured from stdout.
 #
@@ -12,10 +12,11 @@
 #   make clean            - Remove the built binary
 #   make clean-go         - Remove downloaded Go toolchain (.goroot/)
 #   make clean-all        - Remove binary and downloaded Go toolchain
+#   make build-leak-debug - Build with goroutine leak profiler (Go 1.26)
 #   make install          - Install to PREFIX (default /usr/local)
 #   make uninstall        - Remove installed binary
 
-MIN_GO_VERSION ?= 1.25.7
+MIN_GO_VERSION ?= 1.26.0
 PREFIX         ?= /usr/local
 BINARY         ?= streaming-daemon
 
@@ -25,7 +26,7 @@ resolve_go = $(shell ./ensure-go.sh $(MIN_GO_VERSION))
 
 PGO_PROFILE ?= default.pgo
 
-.PHONY: all build build-pgo profile test fmt vet clean clean-go clean-all install uninstall
+.PHONY: all build build-pgo build-leak-debug profile test fmt vet clean clean-go clean-all install uninstall
 
 all: build
 
@@ -40,6 +41,13 @@ build-pgo:
 	$(eval GO := $(resolve_go))
 	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
 	$(GO) build -pgo=$(PGO_PROFILE) -ldflags="-s -w" -o $(BINARY) .
+
+# Build with goroutine leak detection (Go 1.26 experimental).
+# The pprof server automatically exposes /debug/pprof/goroutineleak when built with this flag.
+build-leak-debug:
+	$(eval GO := $(resolve_go))
+	@test -n "$(GO)" || { echo "error: ensure-go.sh failed to resolve a Go binary" >&2; exit 1; }
+	GOEXPERIMENT=goroutineleakprofile $(GO) build -o $(BINARY) .
 
 # Print instructions for collecting a CPU profile for PGO
 profile:
