@@ -515,6 +515,31 @@ func TestReloadConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("omitted logging section preserves current logger", func(t *testing.T) {
+		// Set up a known logger state first
+		initLogging(config.LoggingConfig{Level: "error", Format: "json"})
+		handlerBefore := slog.Default().Handler()
+
+		// Config with no logging section
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		content := []byte("server:\n  gc_percent: 100\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = ""
+		*gcPercentFlag = -1
+
+		reloadConfig()
+
+		// Logger should not have changed
+		handlerAfter := slog.Default().Handler()
+		if handlerBefore != handlerAfter {
+			t.Error("expected logger to be preserved when logging section is omitted")
+		}
+	})
+
 	t.Run("valid config reloads memlimit", func(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
 		content := []byte("server:\n  mem_limit: 512MiB\n")

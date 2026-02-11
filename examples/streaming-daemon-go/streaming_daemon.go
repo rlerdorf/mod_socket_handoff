@@ -297,9 +297,13 @@ func reloadConfig() {
 		return
 	}
 
-	// Reload logging (always safe — slog.SetDefault is concurrent-safe)
-	initLogging(newCfg.Logging)
-	slog.Info("logging config reloaded", "level", newCfg.Logging.Level, "format", newCfg.Logging.Format)
+	// Reload logging only if the new config explicitly specifies logging options.
+	// This avoids resetting logging back to defaults when the logging section is
+	// omitted from a partial config reload.
+	if newCfg.Logging.Level != "" || newCfg.Logging.Format != "" {
+		initLogging(newCfg.Logging)
+		slog.Info("logging config reloaded", "level", newCfg.Logging.Level, "format", newCfg.Logging.Format)
+	}
 
 	// Reload memory limit (flag overrides config)
 	memLimit := newCfg.Server.MemLimit
@@ -468,9 +472,21 @@ func main() {
 	sighupChan := make(chan os.Signal, 1)
 	signal.Notify(sighupChan, syscall.SIGHUP)
 	go func() {
-		for range sighupChan {
-			reloadConfig()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-sighupChan:
+				if !ok {
+					return
+				}
+				reloadConfig()
+			}
 		}
+	}()
+	defer func() {
+		signal.Stop(sighupChan)
+		close(sighupChan)
 	}()
 
 	// Handle existing socket file
