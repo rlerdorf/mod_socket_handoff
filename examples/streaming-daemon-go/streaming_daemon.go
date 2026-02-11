@@ -280,9 +280,9 @@ func initLogging(cfg config.LoggingConfig) {
 
 // reloadConfig re-reads the config file and applies safe runtime changes.
 // Called on SIGHUP. Only reloads settings that can be changed without restart:
-// logging level/format, memory limit, and GC percent. Settings that require
-// restart (socket path, max connections, backend provider, etc.) are logged
-// as skipped if changed.
+// logging level/format, memory limit, and GC percent. Other settings (such as
+// socket path, max connections, backend provider, etc.) still require a daemon
+// restart to take effect.
 func reloadConfig() {
 	if *configFile == "" {
 		slog.Warn("SIGHUP: no config file specified (-config), nothing to reload")
@@ -311,6 +311,8 @@ func reloadConfig() {
 		if limit > 0 {
 			debug.SetMemoryLimit(limit)
 			slog.Info("memory limit reloaded", "limit", memLimit, "bytes", limit)
+		} else {
+			slog.Warn("invalid memlimit value in config, skipping", "value", memLimit)
 		}
 	}
 

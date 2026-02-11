@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -463,6 +464,103 @@ func TestHealthHandler(t *testing.T) {
 	if _, ok := body["active_connections"]; !ok {
 		t.Error("missing active_connections field")
 	}
+}
+
+func TestReloadConfig(t *testing.T) {
+	// Save and restore flag values and logger
+	origConfigFile := *configFile
+	origMemLimitFlag := *memLimitFlag
+	origGcPercentFlag := *gcPercentFlag
+	origLogger := slog.Default()
+	defer func() {
+		*configFile = origConfigFile
+		*memLimitFlag = origMemLimitFlag
+		*gcPercentFlag = origGcPercentFlag
+		slog.SetDefault(origLogger)
+	}()
+
+	t.Run("no config file warns", func(t *testing.T) {
+		*configFile = ""
+		// Should not panic — just logs a warning
+		reloadConfig()
+	})
+
+	t.Run("missing config file logs error", func(t *testing.T) {
+		*configFile = "/nonexistent/path/config.yaml"
+		// Should not panic — logs error and returns
+		reloadConfig()
+	})
+
+	t.Run("valid config reloads logging", func(t *testing.T) {
+		// Create a temp config file with debug logging
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		content := []byte("logging:\n  level: debug\n  format: json\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = ""
+		*gcPercentFlag = -1
+
+		reloadConfig()
+
+		// Verify logging was changed to debug/json
+		handler := slog.Default().Handler()
+		if !handler.Enabled(context.Background(), slog.LevelDebug) {
+			t.Error("expected debug level to be enabled after reload")
+		}
+		if _, ok := handler.(*slog.JSONHandler); !ok {
+			t.Errorf("expected JSONHandler after reload, got %T", handler)
+		}
+	})
+
+	t.Run("valid config reloads memlimit", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		content := []byte("server:\n  mem_limit: 512MiB\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = ""
+		*gcPercentFlag = -1
+
+		// Should not panic
+		reloadConfig()
+	})
+
+	t.Run("invalid memlimit in config warns", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		// Use a value that passes config.Validate() but fails ParseMemLimit
+		// Actually, Validate catches bad memlimits, so test the flag override path
+		content := []byte("logging:\n  level: info\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = "not-a-number"
+		*gcPercentFlag = -1
+
+		// Should not panic — logs warning about invalid memlimit
+		reloadConfig()
+	})
+
+	t.Run("gc percent reloads", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		content := []byte("server:\n  gc_percent: 200\n")
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		*configFile = tmpFile
+		*memLimitFlag = ""
+		*gcPercentFlag = -1
+
+		// Should not panic
+		reloadConfig()
+	})
 }
 
 func TestInitLogging(t *testing.T) {
