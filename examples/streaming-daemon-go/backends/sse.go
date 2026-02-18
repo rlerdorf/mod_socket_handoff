@@ -15,13 +15,6 @@ const WriteTimeout = 30 * time.Second
 // Pre-allocated completion marker shared across backends to avoid allocation in hot paths.
 var doneMsg = []byte("data: [DONE]\n\n")
 
-// Package-level byte slices for SSE parsing, shared across backends (used by gifting backend).
-var (
-	eventPrefix     = []byte("event:")
-	dataColonPrefix = []byte("data:")
-	evEnd           = []byte("end")
-)
-
 // sseBufPool reuses buffers for SSE message construction to reduce allocations.
 var sseBufPool = sync.Pool{
 	New: func() any {
