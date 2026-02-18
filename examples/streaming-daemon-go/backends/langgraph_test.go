@@ -136,6 +136,28 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,dGVzdA=="}}`,
 			},
 		},
+		{
+			name: "custom stream_mode single",
+			handoff: HandoffData{
+				Prompt:     "test",
+				StreamMode: []string{"events"},
+			},
+			assistantID: "agent",
+			wantContains: []string{
+				`"stream_mode":["events"]`,
+			},
+		},
+		{
+			name: "custom stream_mode multiple",
+			handoff: HandoffData{
+				Prompt:     "test",
+				StreamMode: []string{"messages", "updates"},
+			},
+			assistantID: "agent",
+			wantContains: []string{
+				`"stream_mode":["messages","updates"]`,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -294,5 +316,92 @@ func TestLangGraphStreamProxy(t *testing.T) {
 	}
 	if received.String() != ssePayload {
 		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), ssePayload)
+	}
+}
+
+func TestLangGraphStreamProxyContextCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("event: metadata\ndata: {}\n\n"))
+	}))
+	defer srv.Close()
+
+	origBase := langgraphAPIBase
+	origClient := langgraphHTTPClient
+	origKey := langgraphAPIKey
+	langgraphAPIBase = srv.URL
+	langgraphHTTPClient = srv.Client()
+	langgraphAPIKey = "test-key"
+	defer func() {
+		langgraphAPIBase = origBase
+		langgraphHTTPClient = origClient
+		langgraphAPIKey = origKey
+	}()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	go func() { io.Copy(io.Discard, clientConn) }()
+
+	// Cancel context before calling Stream
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	lg := &LangGraph{}
+	_, err := lg.Stream(ctx, serverConn, HandoffData{Prompt: "test"})
+	if err == nil {
+		t.Error("Stream() error = nil, want non-nil for canceled context")
+	}
+}
+
+func TestLangGraphStreamProxyMalformedSSE(t *testing.T) {
+	// Malformed data; proxy should relay bytes transparently
+	malformed := "this is not valid SSE\njust some random text\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(malformed))
+	}))
+	defer srv.Close()
+
+	origBase := langgraphAPIBase
+	origClient := langgraphHTTPClient
+	origKey := langgraphAPIKey
+	langgraphAPIBase = srv.URL
+	langgraphHTTPClient = srv.Client()
+	langgraphAPIKey = "test-key"
+	defer func() {
+		langgraphAPIBase = origBase
+		langgraphHTTPClient = origClient
+		langgraphAPIKey = origKey
+	}()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	var received bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&received, clientConn)
+		done <- err
+	}()
+
+	lg := &LangGraph{}
+	n, err := lg.Stream(context.Background(), serverConn, HandoffData{Prompt: "test"})
+	serverConn.Close()
+	<-done
+
+	if err != nil {
+		t.Fatalf("Stream() error = %v, want nil for malformed but proxied SSE", err)
+	}
+	if n != int64(len(malformed)) {
+		t.Errorf("Stream() bytes = %d, want %d", n, len(malformed))
+	}
+	if received.String() != malformed {
+		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), malformed)
 	}
 }

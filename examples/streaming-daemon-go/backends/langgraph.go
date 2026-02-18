@@ -157,9 +157,15 @@ var langgraphBufPool = sync.Pool{
 	},
 }
 
+// threadCreateTimeout bounds how long the thread creation request can take.
+const threadCreateTimeout = 10 * time.Second
+
 // ensureThreadExists creates the thread via POST /threads with if_exists=do_nothing,
 // so the thread exists before we call /threads/{id}/runs/stream. Idempotent; safe to call every time.
 func ensureThreadExists(ctx context.Context, threadID string) error {
+	ctx, cancel := context.WithTimeout(ctx, threadCreateTimeout)
+	defer cancel()
+
 	body := struct {
 		ThreadID string `json:"thread_id"`
 		IfExists string `json:"if_exists"`
@@ -411,7 +417,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 		buf = append(buf, `"]`...)
 	}
 
-	buf = append(buf, `,"on_completion":"delete","on_disconnect":"cancel"}`...)
+	buf = append(buf, `,"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
 	// Return buffer to pool (make a copy since we're returning the content for tests)
 	result := make([]byte, len(buf))
@@ -439,15 +445,13 @@ func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeTy
 	buf = append(buf, `"}`...)
 
 	// Add image part if base64 data is present.
-	// Append parts directly to buf to avoid a large intermediate string allocation.
-	// MIME types and base64 use only JSON-safe characters, but we escape the
-	// assembled data URL via appendJSONEscaped for defense-in-depth.
+	// MIME types and base64 use only JSON-safe characters ([A-Za-z0-9+/=] and [a-z/-]),
+	// so we append directly without JSON escaping.
 	if imageBase64 != "" {
-		buf = append(buf, `,{"type":"image_url","image_url":{"url":"`...)
-		buf = appendJSONEscaped(buf, "data:")
-		buf = appendJSONEscaped(buf, mimeType)
-		buf = appendJSONEscaped(buf, ";base64,")
-		buf = appendJSONEscaped(buf, imageBase64)
+		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
+		buf = append(buf, mimeType...)
+		buf = append(buf, `;base64,`...)
+		buf = append(buf, imageBase64...)
 		buf = append(buf, `"}}`...)
 	}
 
