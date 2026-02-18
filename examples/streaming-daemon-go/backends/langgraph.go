@@ -179,8 +179,8 @@ func ensureThreadExists(ctx context.Context, threadID string) error {
 		return fmt.Errorf("thread create request: %w", err)
 	}
 	defer resp.Body.Close()
-	// 200 = created or returned existing; 409 = conflict (e.g. already exists with if_exists semantics) â€” treat as success
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
+	// 200/201 = created or returned existing; 409 = conflict (e.g. already exists with if_exists semantics) — treat as success
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusConflict {
 		return nil
 	}
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -270,14 +270,23 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 				RecordBackendTTFB("langgraph", time.Since(backendStart).Seconds())
 				ttfbRecorded = true
 			}
-			nw, errw := conn.Write(copyBuf[:nr])
-			totalBytes += int64(nw)
-			if nw > 0 {
-				RecordChunkSent()
+			chunk := copyBuf[:nr]
+			// Count SSE event boundaries (\n\n) for metrics
+			for i := 0; i < len(chunk)-1; i++ {
+				if chunk[i] == '\n' && chunk[i+1] == '\n' {
+					RecordChunkSent()
+				}
 			}
-			if errw != nil {
-				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-				return totalBytes, errw
+			// Write full chunk, handling short writes
+			written := 0
+			for written < len(chunk) {
+				nw, errw := conn.Write(chunk[written:])
+				totalBytes += int64(nw)
+				written += nw
+				if errw != nil {
+					RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
+					return totalBytes, errw
+				}
 			}
 			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
 				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
@@ -391,9 +400,10 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 		}
 		buf = append(buf, `]`...)
 	} else {
-		// Default to "messages" mode
-		slog.Warn("stream_mode not provided in handoff data, using default", "default", "messages")
-		buf = append(buf, `,"stream_mode":["messages"]`...)
+		// Fall back to configured default stream mode
+		buf = append(buf, `,"stream_mode":["`...)
+		buf = appendJSONEscaped(buf, langgraphStreamMode)
+		buf = append(buf, `"]`...)
 	}
 
 	buf = append(buf, `}`...)
@@ -425,10 +435,9 @@ func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeTy
 
 	// Add image part if base64 data is present
 	if imageBase64 != "" {
-		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
-		buf = append(buf, mimeType...)
-		buf = append(buf, `;base64,`...)
-		buf = append(buf, imageBase64...)
+		buf = append(buf, `,{"type":"image_url","image_url":{"url":"`...)
+		dataURL := "data:" + mimeType + ";base64," + imageBase64
+		buf = appendJSONEscaped(buf, dataURL)
 		buf = append(buf, `"}}`...)
 	}
 

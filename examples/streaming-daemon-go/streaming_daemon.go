@@ -841,9 +841,9 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	var handoff backends.HandoffData
 	trimmedData := bytes.Trim(data, "\x00")
 	if len(trimmedData) > 0 {
-		slog.Info("socket handoff received", "data", string(trimmedData))
+		slog.Debug("socket handoff received", "bytes", len(trimmedData))
 		if err := json.Unmarshal(trimmedData, &handoff); err != nil {
-			slog.Error("failed to parse handoff data", "error", err, "raw_data", string(trimmedData))
+			slog.Error("failed to parse handoff data", "error", err, "bytes", len(trimmedData))
 		}
 	} else {
 		slog.Info("socket handoff received with empty data")

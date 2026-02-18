@@ -1,6 +1,12 @@
 package backends
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -193,5 +199,98 @@ func TestAppendJSONValue(t *testing.T) {
 				t.Errorf("appendJSONValue() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureThreadExists(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		wantErr    bool
+	}{
+		{"200 OK", http.StatusOK, false},
+		{"201 Created", http.StatusCreated, false},
+		{"409 Conflict", http.StatusConflict, false},
+		{"500 Internal Server Error", http.StatusInternalServerError, true},
+		{"404 Not Found", http.StatusNotFound, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer srv.Close()
+
+			// Temporarily override the package-level vars
+			origBase := langgraphAPIBase
+			origClient := langgraphHTTPClient
+			langgraphAPIBase = srv.URL
+			langgraphHTTPClient = srv.Client()
+			defer func() {
+				langgraphAPIBase = origBase
+				langgraphHTTPClient = origClient
+			}()
+
+			err := ensureThreadExists(context.Background(), "test-thread-123")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ensureThreadExists() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLangGraphStreamProxy(t *testing.T) {
+	// Simulate a LangGraph SSE upstream that sends known data
+	ssePayload := "event: metadata\ndata: {\"run_id\":\"abc\"}\n\nevent: messages\ndata: [{\"content\":\"Hello\"}]\n\nevent: end\ndata: null\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(ssePayload))
+	}))
+	defer srv.Close()
+
+	// Override package-level vars for the test
+	origBase := langgraphAPIBase
+	origClient := langgraphHTTPClient
+	origKey := langgraphAPIKey
+	langgraphAPIBase = srv.URL
+	langgraphHTTPClient = srv.Client()
+	langgraphAPIKey = "test-key"
+	defer func() {
+		langgraphAPIBase = origBase
+		langgraphHTTPClient = origClient
+		langgraphAPIKey = origKey
+	}()
+
+	// Create a pipe to act as the client connection
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	// Read from the client side in a goroutine
+	var received bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&received, clientConn)
+		done <- err
+	}()
+
+	lg := &LangGraph{}
+	handoff := HandoffData{Prompt: "test"}
+	n, err := lg.Stream(context.Background(), serverConn, handoff)
+	serverConn.Close() // signal EOF to reader
+
+	<-done
+
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if n != int64(len(ssePayload)) {
+		t.Errorf("Stream() returned %d bytes, want %d", n, len(ssePayload))
+	}
+	if received.String() != ssePayload {
+		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), ssePayload)
 	}
 }

@@ -182,6 +182,7 @@ LangGraph-specific handoff data fields:
 |-------|-------------|
 | `thread_id` | Thread ID for stateful conversations (uses `/threads/{id}/runs/stream`) |
 | `assistant_id` | Override the default assistant ID |
+| `stream_mode` | Stream modes to use (e.g., `["messages"]`, `["events"]`); defaults to configured `LANGGRAPH_STREAM_MODE` |
 | `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
 | `image_base64` | Base64-encoded image data for multimodal requests (vision models) |
 | `image_mime_type` | MIME type of the image (e.g., `image/jpeg`, `image/png`); defaults to `image/jpeg` if not specified |
