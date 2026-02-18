@@ -32,10 +32,12 @@ type HandoffData struct {
 	// LangGraph-specific fields
 	ThreadID       string         `json:"thread_id,omitempty"`       // For stateful runs (uses /threads/{id}/runs/stream)
 	AssistantID    string         `json:"assistant_id,omitempty"`    // Override default assistant ID
+	StreamMode     []string       `json:"stream_mode,omitempty"`     // Stream modes (e.g., ["messages", "updates", "custom"])
 	LangGraphInput map[string]any `json:"langgraph_input,omitempty"` // Custom input fields (seller_id, shop_id, etc.)
 
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
+	ImageBase64   string `json:"image_base64,omitempty"`    // Base64-encoded image data (passed directly from PHP)
 	ImageMimeType string `json:"image_mime_type,omitempty"` // MIME type of the image (e.g., "image/jpeg")
 }
 

@@ -15,6 +15,13 @@ const WriteTimeout = 30 * time.Second
 // Pre-allocated completion marker shared across backends to avoid allocation in hot paths.
 var doneMsg = []byte("data: [DONE]\n\n")
 
+// Package-level byte slices for SSE parsing, shared across backends.
+var (
+	eventPrefix     = []byte("event:")
+	dataColonPrefix = []byte("data:")
+	evEnd           = []byte("end")
+)
+
 // sseBufPool reuses buffers for SSE message construction to reduce allocations.
 var sseBufPool = sync.Pool{
 	New: func() any {
@@ -22,6 +29,24 @@ var sseBufPool = sync.Pool{
 		buf := make([]byte, 0, 256)
 		return &buf
 	},
+}
+
+// SendSSEError sends an SSE error event to the client.
+// Format: data: {"error":"<message>"}\n\n
+func SendSSEError(conn net.Conn, errMsg string) error {
+	bufPtr := sseBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	
+	buf = append(buf, "data: {\"error\":\""...)
+	buf = appendJSONEscaped(buf, errMsg)
+	buf = append(buf, "\"}\n\n"...)
+	
+	_, err := conn.Write(buf)
+	
+	*bufPtr = buf
+	sseBufPool.Put(bufPtr)
+	
+	return err
 }
 
 // SendSSE sends a single SSE event with the given content.

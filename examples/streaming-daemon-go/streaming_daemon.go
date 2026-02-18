@@ -841,9 +841,12 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	var handoff backends.HandoffData
 	trimmedData := bytes.Trim(data, "\x00")
 	if len(trimmedData) > 0 {
+		slog.Info("socket handoff received", "data", string(trimmedData))
 		if err := json.Unmarshal(trimmedData, &handoff); err != nil {
-			slog.Error("failed to parse handoff data", "error", err)
+			slog.Error("failed to parse handoff data", "error", err, "raw_data", string(trimmedData))
 		}
+	} else {
+		slog.Info("socket handoff received with empty data")
 	}
 
 	// Per-stream context timeout to prevent runaway/hung streams
@@ -876,6 +879,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}
 
 	streamStart := time.Now()
+	slog.Info("stream request", "assistant_id", handoff.AssistantID, "thread_id", handoff.ThreadID)
 	bytesSent, err := streamToClientWithBytes(streamCtx, clientConn, handoff)
 	success := err == nil
 	if err != nil {

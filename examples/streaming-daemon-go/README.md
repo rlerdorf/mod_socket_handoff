@@ -49,6 +49,11 @@ make vet
 # Clean build artifacts
 make clean
 
+# Rebuild from scratch (e.g. after code changes). Restart the service so the new binary is used.
+make clean && make
+# If running as a systemd service:
+#   sudo systemctl restart streaming-daemon
+
 # Remove downloaded Go toolchain
 make clean-go
 
@@ -178,6 +183,8 @@ LangGraph-specific handoff data fields:
 | `thread_id` | Thread ID for stateful conversations (uses `/threads/{id}/runs/stream`) |
 | `assistant_id` | Override the default assistant ID |
 | `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
+| `image_base64` | Base64-encoded image data for multimodal requests (vision models) |
+| `image_mime_type` | MIME type of the image (e.g., `image/jpeg`, `image/png`); defaults to `image/jpeg` if not specified |
 
 ### Typing Backend
 
@@ -400,6 +407,49 @@ header('X-Handoff-Data: ' . $data);
 
 // Exit - mod_socket_handoff takes over
 exit;
+```
+
+### Multimodal Requests (Images)
+
+To include an image with your prompt (for vision models):
+
+```php
+<?php
+// Prepare handoff data with image
+$image_base64 = ImageCompressor::compressAndEncode($input->image);
+$image_mime_type = ImageCompressor::getOutputMimeType($input->image->mimetype);
+
+$data = json_encode([
+    'prompt' => $_POST['prompt'] ?? 'What is in this image?',
+    'user_id' => $_SESSION['user_id'],
+    'image_base64' => $image_base64,
+    'image_mime_type' => $image_mime_type,  // e.g., "image/jpeg", "image/png"
+    'langgraph_input' => [
+        'session_id' => session_id(),
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+The daemon will format this as a multimodal message for the LangGraph API:
+
+```json
+{
+  "assistant_id": "agent",
+  "input": {
+    "messages": [{
+      "type": "human",
+      "content": [
+        {"type": "text", "text": "What is in this image?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+      ]
+    }],
+    "session_id": "..."
+  }
+}
 ```
 
 ## How It Works
