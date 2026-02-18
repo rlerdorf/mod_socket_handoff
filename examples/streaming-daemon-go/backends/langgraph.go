@@ -258,6 +258,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	// Proxy raw SSE stream from LangGraph to client (no parsing; forwards heartbeats, all events, etc.)
 	copyBuf := make([]byte, 32*1024)
 	var nr int
+	var prevByte byte // track last byte for cross-chunk \n\n detection
 	for {
 		select {
 		case <-ctx.Done():
@@ -271,12 +272,16 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 				ttfbRecorded = true
 			}
 			chunk := copyBuf[:nr]
-			// Count SSE event boundaries (\n\n) for metrics
+			// Count SSE event boundaries (\n\n) for metrics, tracking across chunk boundaries
+			if len(chunk) > 0 && prevByte == '\n' && chunk[0] == '\n' {
+				RecordChunkSent()
+			}
 			for i := 0; i < len(chunk)-1; i++ {
 				if chunk[i] == '\n' && chunk[i+1] == '\n' {
 					RecordChunkSent()
 				}
 			}
+			prevByte = chunk[len(chunk)-1]
 			// Write full chunk, handling short writes
 			written := 0
 			for written < len(chunk) {
@@ -406,7 +411,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 		buf = append(buf, `"]`...)
 	}
 
-	buf = append(buf, `}`...)
+	buf = append(buf, `,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
 	// Return buffer to pool (make a copy since we're returning the content for tests)
 	result := make([]byte, len(buf))
@@ -433,11 +438,16 @@ func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeTy
 	buf = appendJSONEscaped(buf, text)
 	buf = append(buf, `"}`...)
 
-	// Add image part if base64 data is present
+	// Add image part if base64 data is present.
+	// Append parts directly to buf to avoid a large intermediate string allocation.
+	// MIME types and base64 use only JSON-safe characters, but we escape the
+	// assembled data URL via appendJSONEscaped for defense-in-depth.
 	if imageBase64 != "" {
 		buf = append(buf, `,{"type":"image_url","image_url":{"url":"`...)
-		dataURL := "data:" + mimeType + ";base64," + imageBase64
-		buf = appendJSONEscaped(buf, dataURL)
+		buf = appendJSONEscaped(buf, "data:")
+		buf = appendJSONEscaped(buf, mimeType)
+		buf = appendJSONEscaped(buf, ";base64,")
+		buf = appendJSONEscaped(buf, imageBase64)
 		buf = append(buf, `"}}`...)
 	}
 

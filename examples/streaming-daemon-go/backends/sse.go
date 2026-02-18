@@ -15,7 +15,7 @@ const WriteTimeout = 30 * time.Second
 // Pre-allocated completion marker shared across backends to avoid allocation in hot paths.
 var doneMsg = []byte("data: [DONE]\n\n")
 
-// Package-level byte slices for SSE parsing, shared across backends.
+// Package-level byte slices for SSE parsing, shared across backends (used by gifting backend).
 var (
 	eventPrefix     = []byte("event:")
 	dataColonPrefix = []byte("data:")
@@ -33,20 +33,29 @@ var sseBufPool = sync.Pool{
 
 // SendSSEError sends an SSE error event to the client.
 // Format: data: {"error":"<message>"}\n\n
+// Sets a write deadline internally using WriteTimeout.
 func SendSSEError(conn net.Conn, errMsg string) error {
 	bufPtr := sseBufPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
-	
+
+	defer func() {
+		*bufPtr = buf
+		sseBufPool.Put(bufPtr)
+	}()
+
 	buf = append(buf, "data: {\"error\":\""...)
 	buf = appendJSONEscaped(buf, errMsg)
 	buf = append(buf, "\"}\n\n"...)
-	
-	_, err := conn.Write(buf)
-	
-	*bufPtr = buf
-	sseBufPool.Put(bufPtr)
-	
-	return err
+
+	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+
+	if _, err := conn.Write(buf); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
+
+	return nil
 }
 
 // SendSSE sends a single SSE event with the given content.

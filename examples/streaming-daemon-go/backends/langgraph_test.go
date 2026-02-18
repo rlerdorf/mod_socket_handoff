@@ -29,6 +29,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				`"type":"human"`,
 				`"content":"Hello, how are you?"`,
 				`"stream_mode":[`,
+				`"on_completion":"delete"`,
+				`"on_disconnect":"cancel"`,
 			},
 		},
 		{
