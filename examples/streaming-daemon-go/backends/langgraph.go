@@ -1,7 +1,6 @@
 package backends
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -41,31 +40,6 @@ var (
 	langgraphStreamMode   string
 	langgraphInsecure     bool
 	langgraphHTTPClient   *http.Client
-)
-
-// lgEventType represents a LangGraph SSE event type as an integer
-// to avoid string allocation in the hot loop.
-type lgEventType int
-
-const (
-	lgEventUnknown  lgEventType = iota
-	lgEventMessages
-	lgEventEnd
-	lgEventMetadata
-	lgEventValues
-	lgEventUpdates
-)
-
-// Package-level byte slices to avoid allocation in hot paths
-var (
-	eventPrefix     = []byte("event:")
-	dataColonPrefix = []byte("data:")
-	evMessages      = []byte("messages")
-	evEnd           = []byte("end")
-	evMetadata      = []byte("metadata")
-	evValues        = []byte("values")
-	evUpdates       = []byte("updates")
-	elemSepPattern  = []byte("},{")
 )
 
 // LangGraph is a backend that streams responses from the LangGraph Platform API.
@@ -183,6 +157,50 @@ var langgraphBufPool = sync.Pool{
 	},
 }
 
+// copyBufPool reuses 32KB read buffers for the raw proxy loop to reduce allocations under load.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
+// threadCreateTimeout bounds how long the thread creation request can take.
+const threadCreateTimeout = 10 * time.Second
+
+// ensureThreadExists creates the thread via POST /threads with if_exists=do_nothing,
+// so the thread exists before we call /threads/{id}/runs/stream. Idempotent; safe to call every time.
+func ensureThreadExists(ctx context.Context, threadID string) error {
+	ctx, cancel := context.WithTimeout(ctx, threadCreateTimeout)
+	defer cancel()
+
+	body := struct {
+		ThreadID string `json:"thread_id"`
+		IfExists string `json:"if_exists"`
+	}{ThreadID: threadID, IfExists: "do_nothing"}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal thread create: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", langgraphAPIBase+"/threads", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create thread request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", langgraphAPIKey)
+	resp, err := langgraphHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("thread create request: %w", err)
+	}
+	defer resp.Body.Close()
+	// 200/201 = created or returned existing; 409 = conflict (e.g. already exists with if_exists semantics) — treat as success
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("thread create %d: %s", resp.StatusCode, string(bodyBytes))
+}
+
 // Stream sends a request to the LangGraph API and streams the response to the client.
 func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
 	var totalBytes int64
@@ -193,6 +211,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	assistantID := langgraphAssistantID
 	if handoff.AssistantID != "" {
 		assistantID = handoff.AssistantID
+	}
+
+	// For stateful runs, ensure the thread exists before streaming (same as PHP: create then stream).
+	if handoff.ThreadID != "" {
+		if err := ensureThreadExists(ctx, handoff.ThreadID); err != nil {
+			return 0, fmt.Errorf("ensure thread: %w", err)
+		}
 	}
 
 	// Build request body (shared with tests via buildLangGraphRequestBody)
@@ -239,206 +264,75 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Set write deadline once for entire stream
+	// Set write deadline for first chunk
 	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
 		return 0, fmt.Errorf("set write deadline: %w", err)
 	}
 
-	// Parse LangGraph SSE stream and forward to client
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, scannerInitialBufferSize), scannerMaxBufferSize)
-
-	writeCount := 0
+	// Proxy raw SSE stream from LangGraph to client (no parsing; forwards heartbeats, all events, etc.)
+	copyBufPtr := copyBufPool.Get().(*[]byte)
+	copyBuf := *copyBufPtr
+	defer func() {
+		*copyBufPtr = copyBuf
+		copyBufPool.Put(copyBufPtr)
+	}()
+	var nr int
+	var prevByte byte // track last byte for cross-chunk \n\n detection
 	for {
-		etype, data, err := parseLangGraphEvent(scanner)
+		select {
+		case <-ctx.Done():
+			return totalBytes, ctx.Err()
+		default:
+		}
+		nr, err = resp.Body.Read(copyBuf)
+		if nr > 0 {
+			if !ttfbRecorded {
+				RecordBackendTTFB("langgraph", time.Since(backendStart).Seconds())
+				ttfbRecorded = true
+			}
+			chunk := copyBuf[:nr]
+			// Count SSE event boundaries (\n\n) for metrics, tracking across chunk boundaries
+			if len(chunk) > 0 && prevByte == '\n' && chunk[0] == '\n' {
+				RecordChunkSent()
+			}
+			for i := 0; i < len(chunk)-1; i++ {
+				if chunk[i] == '\n' && chunk[i+1] == '\n' {
+					RecordChunkSent()
+				}
+			}
+			prevByte = chunk[len(chunk)-1]
+			// Write full chunk, handling short writes
+			written := 0
+			for written < len(chunk) {
+				nw, errw := conn.Write(chunk[written:])
+				totalBytes += int64(nw)
+				written += nw
+				if errw != nil {
+					RecordBackendError("langgraph")
+					RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
+					return totalBytes, errw
+				}
+			}
+			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				RecordBackendError("langgraph")
+				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
+				return totalBytes, fmt.Errorf("set write deadline: %w", err)
+			}
+		}
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return totalBytes, fmt.Errorf("parse event: %w", err)
+			RecordBackendError("langgraph")
+			RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
+			return totalBytes, err
 		}
-
-		// Handle different event types
-		switch etype {
-		case lgEventEnd:
-			// Stream complete
-			goto done
-		case lgEventMessages:
-			// Extract content from messages-tuple format.
-			// data is a slice of scanner's buffer — valid until next parseLangGraphEvent call.
-			content := extractContentFromMessages(data)
-			if content != "" {
-				// Record TTFB on first chunk
-				if !ttfbRecorded {
-					RecordBackendTTFB("langgraph", time.Since(backendStart).Seconds())
-					ttfbRecorded = true
-				}
-
-				n, err := SendSSE(conn, content)
-				totalBytes += int64(n)
-				RecordChunkSent()
-				if err != nil {
-					return totalBytes, err
-				}
-
-				// Refresh write deadline every 10 writes
-				writeCount++
-				if writeCount%10 == 0 {
-					if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-						return totalBytes, fmt.Errorf("set write deadline: %w", err)
-					}
-				}
-			}
-		case lgEventMetadata, lgEventValues, lgEventUpdates:
-			// These event types don't contain streamable content
-			continue
-		case lgEventUnknown:
-			// Already logged with event name inside parseLangGraphEvent
-			continue
-		}
-	}
-
-done:
-	// Send completion marker
-	n, err := conn.Write(doneMsg)
-	totalBytes += int64(n)
-	if err != nil {
-		return totalBytes, fmt.Errorf("write done: %w", err)
 	}
 
 	// Record backend duration
 	RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
 
 	return totalBytes, nil
-}
-
-// parseLangGraphEvent parses a single LangGraph SSE event.
-// LangGraph format: "event: type\ndata: json\n\n"
-// Returns event type as lgEventType, data payload, and any error.
-// Returns io.EOF when stream ends.
-//
-// The returned data slice is only valid until the next call to this function,
-// as it points into the scanner's internal buffer.
-func parseLangGraphEvent(scanner *bufio.Scanner) (etype lgEventType, data []byte, err error) {
-	// Read event line
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return lgEventUnknown, nil, err
-		}
-		return lgEventUnknown, nil, io.EOF
-	}
-	line := scanner.Bytes()
-
-	// Skip empty lines
-	for len(line) == 0 {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return lgEventUnknown, nil, err
-			}
-			return lgEventUnknown, nil, io.EOF
-		}
-		line = scanner.Bytes()
-	}
-
-	// Parse event type from "event: type" line.
-	// Compare as bytes before the next Scan() invalidates the buffer.
-	if !bytes.HasPrefix(line, eventPrefix) {
-		// Fail fast on protocol violations to catch integration issues early
-		return lgEventUnknown, nil, fmt.Errorf("unexpected event line format: %q", string(line))
-	}
-	eventBytes := bytes.TrimSpace(line[len(eventPrefix):])
-	switch {
-	case bytes.Equal(eventBytes, evMessages):
-		etype = lgEventMessages
-	case bytes.Equal(eventBytes, evEnd):
-		etype = lgEventEnd
-	case bytes.Equal(eventBytes, evMetadata):
-		etype = lgEventMetadata
-	case bytes.Equal(eventBytes, evValues):
-		etype = lgEventValues
-	case bytes.Equal(eventBytes, evUpdates):
-		etype = lgEventUpdates
-	default:
-		etype = lgEventUnknown
-		slog.Warn("LangGraph: unknown event type", "event_type", string(eventBytes))
-	}
-
-	// Read data line (may overwrite the event line in scanner's buffer)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return etype, nil, err
-		}
-		return etype, nil, nil
-	}
-	line = scanner.Bytes()
-
-	// Parse data from "data: json" line.
-	// Return a slice of the scanner's buffer directly — caller must
-	// consume it before the next call to parseLangGraphEvent.
-	if bytes.HasPrefix(line, dataColonPrefix) {
-		data = bytes.TrimSpace(line[len(dataColonPrefix):])
-	}
-
-	return etype, data, nil
-}
-
-// extractContentFromMessages extracts content from LangGraph messages-tuple format.
-// Format: [{"content": "...", "type": "AIMessageChunk", ...}, {"run_id": "..."}]
-// Returns the content string or empty if not found.
-func extractContentFromMessages(data []byte) string {
-	// Fast path: look for "content":" pattern
-	idx := bytes.Index(data, contentFieldPattern)
-	if idx < 0 {
-		return ""
-	}
-
-	// Ensure the match is in the first array element of the messages-tuple.
-	// Format: [{"content":"...", ...}, {"run_id":"..."}]
-	// If "content" appears after a "},{" element separator, it's in a
-	// later element (e.g., metadata) and should be ignored.
-	if sep := bytes.Index(data, elemSepPattern); sep >= 0 && idx > sep {
-		return ""
-	}
-
-	// Find the start of the content value
-	start := idx + len(contentFieldPattern)
-	if start >= len(data) {
-		return ""
-	}
-
-	// Find the end of the string (unescaped quote)
-	end := start
-	for end < len(data) {
-		if data[end] == '\\' {
-			if end+1 >= len(data) {
-				break
-			}
-			next := data[end+1]
-			if next == '"' || next == '\\' || next == '/' ||
-				next == 'b' || next == 'f' || next == 'n' ||
-				next == 'r' || next == 't' || next == 'u' {
-				end += 2
-				continue
-			}
-			end++
-			continue
-		}
-		if data[end] == '"' {
-			break
-		}
-		end++
-	}
-
-	if end <= start {
-		return ""
-	}
-
-	// Unescape the content if it contains escapes
-	content := data[start:end]
-	if bytes.IndexByte(content, '\\') >= 0 {
-		return unescapeJSON(content)
-	}
-	return string(content)
 }
 
 // buildLangGraphRequestBody builds the JSON request body for a LangGraph API call.
@@ -451,6 +345,9 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	buf = appendJSONEscaped(buf, assistantID)
 	buf = append(buf, `","input":{"messages":[`...)
 
+	// Determine if we have an image to attach
+	hasImage := handoff.ImageBase64 != ""
+
 	// Use messages array if provided, otherwise fall back to single prompt
 	if len(handoff.Messages) > 0 {
 		for i, msg := range handoff.Messages {
@@ -459,18 +356,34 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 			}
 			buf = append(buf, `{"type":"`...)
 			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
-			buf = append(buf, `","content":"`...)
-			buf = appendJSONEscaped(buf, msg.Content)
-			buf = append(buf, `"}`...)
+			buf = append(buf, `","content":`...)
+
+			// Attach image to the last message if present
+			isLastMessage := i == len(handoff.Messages)-1
+			if hasImage && isLastMessage {
+				buf = appendMultimodalContent(buf, msg.Content, handoff.ImageBase64, handoff.ImageMimeType)
+			} else {
+				// Simple text content
+				buf = append(buf, '"')
+				buf = appendJSONEscaped(buf, msg.Content)
+				buf = append(buf, '"')
+			}
+			buf = append(buf, `}`...)
 		}
 	} else {
 		prompt := handoff.Prompt
 		if prompt == "" {
 			prompt = "Hello"
 		}
-		buf = append(buf, `{"type":"human","content":"`...)
-		buf = appendJSONEscaped(buf, prompt)
-		buf = append(buf, `"}`...)
+		buf = append(buf, `{"type":"human","content":`...)
+		if hasImage {
+			buf = appendMultimodalContent(buf, prompt, handoff.ImageBase64, handoff.ImageMimeType)
+		} else {
+			buf = append(buf, '"')
+			buf = appendJSONEscaped(buf, prompt)
+			buf = append(buf, '"')
+		}
+		buf = append(buf, `}`...)
 	}
 
 	buf = append(buf, `]`...)
@@ -498,9 +411,29 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 		}
 	}
 
-	buf = append(buf, `},"stream_mode":["`...)
-	buf = appendJSONEscaped(buf, langgraphStreamMode)
-	buf = append(buf, `"],"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
+	// Close input object
+	buf = append(buf, `}`...)
+
+	// Add stream_mode: use handoff value if provided, otherwise default to ["messages"]
+	if len(handoff.StreamMode) > 0 {
+		buf = append(buf, `,"stream_mode":[`...)
+		for i, mode := range handoff.StreamMode {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, '"')
+			buf = appendJSONEscaped(buf, mode)
+			buf = append(buf, '"')
+		}
+		buf = append(buf, `]`...)
+	} else {
+		// Fall back to configured default stream mode
+		buf = append(buf, `,"stream_mode":["`...)
+		buf = appendJSONEscaped(buf, langgraphStreamMode)
+		buf = append(buf, `"]`...)
+	}
+
+	buf = append(buf, `,"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
 	// Return buffer to pool (make a copy since we're returning the content for tests)
 	result := make([]byte, len(buf))
@@ -509,6 +442,39 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	langgraphBufPool.Put(bufPtr)
 
 	return result
+}
+
+// appendMultimodalContent appends a multimodal content array with text and image parts.
+// Format: [{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:..."}}]
+func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeType string) []byte {
+	// Default MIME type if not specified
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+
+	// Start content array
+	buf = append(buf, '[')
+
+	// Add text part
+	buf = append(buf, `{"type":"text","text":"`...)
+	buf = appendJSONEscaped(buf, text)
+	buf = append(buf, `"}`...)
+
+	// Add image part if base64 data is present.
+	// Base64 is inherently JSON-safe ([A-Za-z0-9+/=]), but mimeType is user-controlled
+	// so we escape it to prevent JSON injection from malformed values.
+	if imageBase64 != "" {
+		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
+		buf = appendJSONEscaped(buf, mimeType)
+		buf = append(buf, `;base64,`...)
+		buf = append(buf, imageBase64...)
+		buf = append(buf, `"}}`...)
+	}
+
+	// Close content array
+	buf = append(buf, ']')
+
+	return buf
 }
 
 // mapRoleToLangGraph maps OpenAI-style roles to LangGraph message types.
