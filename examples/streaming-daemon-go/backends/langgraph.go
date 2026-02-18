@@ -157,6 +157,14 @@ var langgraphBufPool = sync.Pool{
 	},
 }
 
+// copyBufPool reuses 32KB read buffers for the raw proxy loop to reduce allocations under load.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
 // threadCreateTimeout bounds how long the thread creation request can take.
 const threadCreateTimeout = 10 * time.Second
 
@@ -262,7 +270,12 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	}
 
 	// Proxy raw SSE stream from LangGraph to client (no parsing; forwards heartbeats, all events, etc.)
-	copyBuf := make([]byte, 32*1024)
+	copyBufPtr := copyBufPool.Get().(*[]byte)
+	copyBuf := *copyBufPtr
+	defer func() {
+		*copyBufPtr = copyBuf
+		copyBufPool.Put(copyBufPtr)
+	}()
 	var nr int
 	var prevByte byte // track last byte for cross-chunk \n\n detection
 	for {
@@ -295,11 +308,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 				totalBytes += int64(nw)
 				written += nw
 				if errw != nil {
+					RecordBackendError("langgraph")
 					RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
 					return totalBytes, errw
 				}
 			}
 			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				RecordBackendError("langgraph")
 				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
 				return totalBytes, fmt.Errorf("set write deadline: %w", err)
 			}
@@ -308,6 +323,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 			if err == io.EOF {
 				break
 			}
+			RecordBackendError("langgraph")
 			RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
 			return totalBytes, err
 		}
@@ -445,11 +461,11 @@ func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeTy
 	buf = append(buf, `"}`...)
 
 	// Add image part if base64 data is present.
-	// MIME types and base64 use only JSON-safe characters ([A-Za-z0-9+/=] and [a-z/-]),
-	// so we append directly without JSON escaping.
+	// Base64 is inherently JSON-safe ([A-Za-z0-9+/=]), but mimeType is user-controlled
+	// so we escape it to prevent JSON injection from malformed values.
 	if imageBase64 != "" {
 		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
-		buf = append(buf, mimeType...)
+		buf = appendJSONEscaped(buf, mimeType)
 		buf = append(buf, `;base64,`...)
 		buf = append(buf, imageBase64...)
 		buf = append(buf, `"}}`...)

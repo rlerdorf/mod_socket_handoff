@@ -319,6 +319,69 @@ func TestLangGraphStreamProxy(t *testing.T) {
 	}
 }
 
+func TestLangGraphStreamProxyWithThreadID(t *testing.T) {
+	ssePayload := "event: messages\ndata: [{\"content\":\"Hi\"}]\n\nevent: end\ndata: null\n\n"
+
+	var requestPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPaths = append(requestPaths, r.URL.Path)
+		if r.URL.Path == "/threads" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(ssePayload))
+	}))
+	defer srv.Close()
+
+	origBase := langgraphAPIBase
+	origClient := langgraphHTTPClient
+	origKey := langgraphAPIKey
+	langgraphAPIBase = srv.URL
+	langgraphHTTPClient = srv.Client()
+	langgraphAPIKey = "test-key"
+	defer func() {
+		langgraphAPIBase = origBase
+		langgraphHTTPClient = origClient
+		langgraphAPIKey = origKey
+	}()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	var received bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&received, clientConn)
+		done <- err
+	}()
+
+	lg := &LangGraph{}
+	handoff := HandoffData{Prompt: "test", ThreadID: "thread-abc"}
+	_, err := lg.Stream(context.Background(), serverConn, handoff)
+	serverConn.Close()
+	<-done
+
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	// Verify thread creation was called first, then streaming
+	if len(requestPaths) < 2 {
+		t.Fatalf("expected at least 2 requests, got %d: %v", len(requestPaths), requestPaths)
+	}
+	if requestPaths[0] != "/threads" {
+		t.Errorf("first request path = %q, want /threads", requestPaths[0])
+	}
+	if requestPaths[1] != "/threads/thread-abc/runs/stream" {
+		t.Errorf("second request path = %q, want /threads/thread-abc/runs/stream", requestPaths[1])
+	}
+	if received.String() != ssePayload {
+		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), ssePayload)
+	}
+}
+
 func TestLangGraphStreamProxyContextCanceled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

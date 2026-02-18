@@ -37,7 +37,7 @@ type HandoffData struct {
 
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
-	ImageBase64   string `json:"image_base64,omitempty"`    // Base64-encoded image data (passed directly from PHP)
+	ImageBase64   string `json:"image_base64,omitempty"`    // Base64-encoded image data (max ~48KB to fit within 64KB handoff limit; use ImagePath for larger images)
 	ImageMimeType string `json:"image_mime_type,omitempty"` // MIME type of the image (e.g., "image/jpeg")
 }
 
