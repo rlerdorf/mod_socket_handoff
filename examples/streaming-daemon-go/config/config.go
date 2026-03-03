@@ -61,6 +61,22 @@ type LangGraphConfig struct {
 	StreamMode   string `yaml:"stream_mode"`
 	HTTP2Enabled *bool  `yaml:"http2_enabled"` // Pointer to distinguish unset from false
 	InsecureSSL  bool   `yaml:"insecure_ssl"`
+
+	// Named profiles for routing to different LangGraph deployments.
+	// Each profile inherits unset fields from the top-level LangGraph config.
+	Profiles map[string]LangGraphProfileConfig `yaml:"profiles"`
+}
+
+// LangGraphProfileConfig contains per-profile overrides for LangGraph settings.
+// All fields are optional; unset fields inherit from the top-level LangGraphConfig.
+type LangGraphProfileConfig struct {
+	APIKey       string `yaml:"api_key"`
+	APIBase      string `yaml:"api_base"`
+	APISocket    string `yaml:"api_socket"`
+	AssistantID  string `yaml:"assistant_id"`
+	StreamMode   string `yaml:"stream_mode"`
+	HTTP2Enabled *bool  `yaml:"http2_enabled"`
+	InsecureSSL  *bool  `yaml:"insecure_ssl"` // Pointer to distinguish unset from false
 }
 
 // MockConfig contains mock backend settings.
@@ -126,6 +142,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Backend.LangGraph.APISocket != "" && !filepath.IsAbs(c.Backend.LangGraph.APISocket) {
 		return fmt.Errorf("backend.langgraph.api_socket must be absolute path")
+	}
+	for name, profile := range c.Backend.LangGraph.Profiles {
+		if profile.APISocket != "" && !filepath.IsAbs(profile.APISocket) {
+			return fmt.Errorf("backend.langgraph.profiles.%s.api_socket must be absolute path", name)
+		}
 	}
 
 	// Validate metrics config

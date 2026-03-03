@@ -28,18 +28,26 @@ var (
 	langgraphAssistantFlag = flag.String("langgraph-assistant", "", "LangGraph assistant ID (overrides config file)")
 )
 
+// langgraphProfile holds resolved configuration for a LangGraph backend target.
+// Profiles are built once during Init() and are read-only after that.
+type langgraphProfile struct {
+	apiBase     string
+	apiKey      string
+	assistantID string
+	streamMode  string
+	insecure    bool
+	httpClient  *http.Client
+}
+
 // LangGraph configuration (set during Init).
 //
 // Thread safety: Init() must be called exactly once at process startup,
-// on a single goroutine, before any Stream() calls. These variables are
-// then read-only during normal operation.
+// on a single goroutine, before any Stream() calls. The default profile
+// and profiles map are then read-only during normal operation.
+// Per-request clones are ephemeral and goroutine-local.
 var (
-	langgraphAPIBase      string
-	langgraphAPIKey       string
-	langgraphAssistantID  string
-	langgraphStreamMode   string
-	langgraphInsecure     bool
-	langgraphHTTPClient   *http.Client
+	langgraphDefault  *langgraphProfile
+	langgraphProfiles map[string]*langgraphProfile
 )
 
 // LangGraph is a backend that streams responses from the LangGraph Platform API.
@@ -59,52 +67,57 @@ func (l *LangGraph) Description() string {
 
 // Init sets up the HTTP client for LangGraph API calls.
 // Configuration priority: flag > env var > config file > default
+//
+// Named profiles inherit from the fully-resolved default, then overlay
+// their own fields. Profile map is write-once here, read-only after.
 func (l *LangGraph) Init(cfg *config.BackendConfig) error {
-	// Default values
-	langgraphAPIBase = "https://api.langchain.com/v1"
-	langgraphAssistantID = "agent"
-	langgraphStreamMode = "messages-tuple"
+	// Build the default profile: hardcoded defaults → config → env → flags
+	apiBase := "https://api.langchain.com/v1"
+	var apiKey string
+	assistantID := "agent"
+	streamMode := "messages-tuple"
 	useHTTP2 := true
+	insecure := false
 	var socketPath string
 
 	// Apply config file values
 	if cfg != nil {
 		if cfg.LangGraph.APIBase != "" {
-			langgraphAPIBase = cfg.LangGraph.APIBase
+			apiBase = cfg.LangGraph.APIBase
 		}
 		if cfg.LangGraph.APIKey != "" {
-			langgraphAPIKey = cfg.LangGraph.APIKey
+			apiKey = cfg.LangGraph.APIKey
 		}
 		if cfg.LangGraph.APISocket != "" {
 			socketPath = cfg.LangGraph.APISocket
 		}
 		if cfg.LangGraph.AssistantID != "" {
-			langgraphAssistantID = cfg.LangGraph.AssistantID
+			assistantID = cfg.LangGraph.AssistantID
 		}
 		if cfg.LangGraph.StreamMode != "" {
-			langgraphStreamMode = cfg.LangGraph.StreamMode
+			streamMode = cfg.LangGraph.StreamMode
 		}
 		if cfg.LangGraph.HTTP2Enabled != nil {
 			useHTTP2 = *cfg.LangGraph.HTTP2Enabled
 		}
-		langgraphInsecure = cfg.LangGraph.InsecureSSL
+		insecure = cfg.LangGraph.InsecureSSL
 	}
 
 	// Environment variables override config file
 	if envVal := os.Getenv("LANGGRAPH_API_BASE"); envVal != "" {
-		langgraphAPIBase = envVal
+		apiBase = envVal
 	}
 	if envVal := os.Getenv("LANGGRAPH_API_KEY"); envVal != "" {
-		langgraphAPIKey = envVal
+		apiKey = envVal
 	}
 	if envVal := os.Getenv("LANGGRAPH_API_SOCKET"); envVal != "" {
 		socketPath = envVal
 	}
 	if envVal := os.Getenv("LANGGRAPH_ASSISTANT_ID"); envVal != "" {
-		langgraphAssistantID = envVal
+		assistantID = envVal
 	}
 	if envVal := os.Getenv("LANGGRAPH_STREAM_MODE"); envVal != "" {
-		langgraphStreamMode = envVal
+		streamMode = envVal
 	}
 	if envVal := os.Getenv("LANGGRAPH_HTTP2_ENABLED"); envVal != "" {
 		isFalse := strings.EqualFold(envVal, "false") ||
@@ -114,39 +127,177 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 		useHTTP2 = !isFalse
 	}
 	if envVal := os.Getenv("LANGGRAPH_INSECURE_SSL"); envVal != "" {
-		langgraphInsecure = strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "1")
+		insecure = strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "1")
 	}
 
 	// Flags override everything (only if explicitly set)
 	if *langgraphBaseFlag != "" {
-		langgraphAPIBase = *langgraphBaseFlag
+		apiBase = *langgraphBaseFlag
 	}
 	if *langgraphSocketFlag != "" {
 		socketPath = *langgraphSocketFlag
 	}
 	if *langgraphAssistantFlag != "" {
-		langgraphAssistantID = *langgraphAssistantFlag
+		assistantID = *langgraphAssistantFlag
 	}
 
 	// Validate API key
-	if langgraphAPIKey == "" {
+	if apiKey == "" {
 		slog.Warn("LANGGRAPH_API_KEY not set, API calls will fail")
 	}
 
-	if langgraphInsecure {
+	if insecure {
 		slog.Warn("TLS certificate verification disabled for LangGraph")
 	}
 
-	// Create HTTP client with shared transport builder
-	langgraphHTTPClient = NewHTTPClient(TransportConfig{
-		BaseURL:     langgraphAPIBase,
-		SocketPath:  socketPath,
-		UseHTTP2:    useHTTP2,
-		InsecureSSL: langgraphInsecure,
-		Label:       "LangGraph",
-	})
+	// Build default profile
+	langgraphDefault = &langgraphProfile{
+		apiBase:     apiBase,
+		apiKey:      apiKey,
+		assistantID: assistantID,
+		streamMode:  streamMode,
+		insecure:    insecure,
+		httpClient: NewHTTPClient(TransportConfig{
+			BaseURL:     apiBase,
+			SocketPath:  socketPath,
+			UseHTTP2:    useHTTP2,
+			InsecureSSL: insecure,
+			Label:       "LangGraph",
+		}),
+	}
+
+	// Build named profiles (inherit from resolved default, overlay profile-specific fields)
+	langgraphProfiles = make(map[string]*langgraphProfile)
+	if cfg != nil {
+		for name, pc := range cfg.LangGraph.Profiles {
+			p := &langgraphProfile{
+				apiBase:     langgraphDefault.apiBase,
+				apiKey:      langgraphDefault.apiKey,
+				assistantID: langgraphDefault.assistantID,
+				streamMode:  langgraphDefault.streamMode,
+				insecure:    langgraphDefault.insecure,
+			}
+			if pc.APIBase != "" {
+				p.apiBase = pc.APIBase
+			}
+			if pc.APIKey != "" {
+				p.apiKey = pc.APIKey
+			}
+			if pc.AssistantID != "" {
+				p.assistantID = pc.AssistantID
+			}
+			if pc.StreamMode != "" {
+				p.streamMode = pc.StreamMode
+			}
+			if pc.InsecureSSL != nil {
+				p.insecure = *pc.InsecureSSL
+			}
+
+			// Build HTTP client: use profile's own socket/http2 if set, else inherit defaults
+			profUseHTTP2 := useHTTP2
+			if pc.HTTP2Enabled != nil {
+				profUseHTTP2 = *pc.HTTP2Enabled
+			}
+			profSocket := socketPath
+			if pc.APISocket != "" {
+				profSocket = pc.APISocket
+			}
+
+			p.httpClient = NewHTTPClient(TransportConfig{
+				BaseURL:     p.apiBase,
+				SocketPath:  profSocket,
+				UseHTTP2:    profUseHTTP2,
+				InsecureSSL: p.insecure,
+				Label:       "LangGraph/" + name,
+			})
+
+			langgraphProfiles[name] = p
+			slog.Info("LangGraph profile configured", "name", name, "api_base", p.apiBase, "assistant_id", p.assistantID)
+		}
+	}
 
 	return nil
+}
+
+// resolveLangGraphProfile returns the effective profile for a request.
+// Resolution order (highest wins): per-request overrides → named profile → default.
+//
+// The compact "lg" field (pipe-delimited "profile|url|key") is parsed first as
+// defaults, then the verbose fields (Profile, LangGraphURL, LangGraphKey) override
+// if set. This lets callers use either syntax or mix them.
+//
+// Returns a pointer to either a pre-built profile (zero alloc) or a cloned profile
+// with overrides applied (one alloc per overridden request).
+func resolveLangGraphProfile(handoff HandoffData) (*langgraphProfile, error) {
+	// Parse compact "lg" field as baseline overrides
+	var lgProfile, lgURL, lgKey string
+	if handoff.LG != "" {
+		lgProfile, lgURL, lgKey = parseLG(handoff.LG)
+	}
+
+	// Verbose fields override compact syntax
+	profile := lgProfile
+	if handoff.Profile != "" {
+		profile = handoff.Profile
+	}
+	overrideURL := lgURL
+	if handoff.LangGraphURL != "" {
+		overrideURL = handoff.LangGraphURL
+	}
+	overrideKey := lgKey
+	if handoff.LangGraphKey != "" {
+		overrideKey = handoff.LangGraphKey
+	}
+
+	p := langgraphDefault
+
+	// If a named profile is requested, start from that
+	if profile != "" {
+		named, ok := langgraphProfiles[profile]
+		if !ok {
+			return nil, fmt.Errorf("unknown LangGraph profile: %q", profile)
+		}
+		p = named
+	}
+
+	// Apply per-request overrides (clone to avoid mutating the shared profile)
+	if overrideURL != "" || overrideKey != "" {
+		clone := *p // shallow copy
+		if overrideURL != "" {
+			clone.apiBase = overrideURL
+			// Reuse the resolved profile's HTTP client for TCP connections.
+			// The client works fine for different base URLs over TCP since it
+			// dials based on the request URL. Socket-based transports are
+			// profile-specific and require named profiles.
+		}
+		if overrideKey != "" {
+			clone.apiKey = overrideKey
+		}
+		p = &clone
+	}
+
+	return p, nil
+}
+
+// parseLG splits a compact "profile|url|key" string into its components.
+// Empty segments are returned as empty strings. Missing segments are fine:
+//
+//	"sales"                          → ("sales", "", "")
+//	"sales|https://api.example.com"  → ("sales", "https://api.example.com", "")
+//	"sales||lgk_key"                 → ("sales", "", "lgk_key")
+//	"|https://api.example.com|lgk_key" → ("", "https://api.example.com", "lgk_key")
+func parseLG(lg string) (profile, url, key string) {
+	first := strings.IndexByte(lg, '|')
+	if first < 0 {
+		return lg, "", ""
+	}
+	profile = lg[:first]
+	rest := lg[first+1:]
+	second := strings.IndexByte(rest, '|')
+	if second < 0 {
+		return profile, rest, ""
+	}
+	return profile, rest[:second], rest[second+1:]
 }
 
 // langgraphBufPool reuses buffers for building HTTP request bodies.
@@ -170,7 +321,7 @@ const threadCreateTimeout = 10 * time.Second
 
 // ensureThreadExists creates the thread via POST /threads with if_exists=do_nothing,
 // so the thread exists before we call /threads/{id}/runs/stream. Idempotent; safe to call every time.
-func ensureThreadExists(ctx context.Context, threadID string) error {
+func ensureThreadExists(ctx context.Context, p *langgraphProfile, threadID string) error {
 	ctx, cancel := context.WithTimeout(ctx, threadCreateTimeout)
 	defer cancel()
 
@@ -182,13 +333,13 @@ func ensureThreadExists(ctx context.Context, threadID string) error {
 	if err != nil {
 		return fmt.Errorf("marshal thread create: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", langgraphAPIBase+"/threads", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", p.apiBase+"/threads", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create thread request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", langgraphAPIKey)
-	resp, err := langgraphHTTPClient.Do(req)
+	req.Header.Set("X-Api-Key", p.apiKey)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("thread create request: %w", err)
 	}
@@ -207,29 +358,35 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	backendStart := time.Now()
 	var ttfbRecorded bool
 
-	// Determine assistant ID (handoff override > config)
-	assistantID := langgraphAssistantID
+	// Resolve the effective profile for this request
+	p, err := resolveLangGraphProfile(handoff)
+	if err != nil {
+		return 0, err
+	}
+
+	// Determine assistant ID (handoff override > profile)
+	assistantID := p.assistantID
 	if handoff.AssistantID != "" {
 		assistantID = handoff.AssistantID
 	}
 
 	// For stateful runs, ensure the thread exists before streaming (same as PHP: create then stream).
 	if handoff.ThreadID != "" {
-		if err := ensureThreadExists(ctx, handoff.ThreadID); err != nil {
+		if err := ensureThreadExists(ctx, p, handoff.ThreadID); err != nil {
 			return 0, fmt.Errorf("ensure thread: %w", err)
 		}
 	}
 
 	// Build request body (shared with tests via buildLangGraphRequestBody)
-	buf := buildLangGraphRequestBody(handoff, assistantID)
+	buf := buildLangGraphRequestBody(handoff, assistantID, p.streamMode)
 
 	// Determine endpoint: stateful (with thread_id) or stateless
 	var reqURL string
 	if handoff.ThreadID != "" {
 		// URL-escape ThreadID to prevent path traversal attacks
-		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", langgraphAPIBase, url.PathEscape(handoff.ThreadID))
+		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", p.apiBase, url.PathEscape(handoff.ThreadID))
 	} else {
-		reqURL = langgraphAPIBase + "/runs/stream"
+		reqURL = p.apiBase + "/runs/stream"
 	}
 
 	// Create HTTP request
@@ -238,7 +395,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", langgraphAPIKey)
+	req.Header.Set("X-Api-Key", p.apiKey)
 
 	// Add test pattern header if present (for validation testing)
 	if handoff.TestPattern != "" {
@@ -249,7 +406,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	RecordBackendRequest("langgraph")
 
 	// Make request
-	resp, err := langgraphHTTPClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 
 	if err != nil {
 		RecordBackendError("langgraph")
@@ -336,8 +493,9 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 }
 
 // buildLangGraphRequestBody builds the JSON request body for a LangGraph API call.
-// Used by both Stream() and tests.
-func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
+// Used by both Stream() and tests. The defaultStreamMode parameter specifies the
+// fallback stream mode when handoff.StreamMode is empty.
+func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultStreamMode string) []byte {
 	bufPtr := langgraphBufPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
 
@@ -414,7 +572,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	// Close input object
 	buf = append(buf, `}`...)
 
-	// Add stream_mode: use handoff value if provided, otherwise default to ["messages"]
+	// Add stream_mode: use handoff value if provided, otherwise use the profile's default
 	if len(handoff.StreamMode) > 0 {
 		buf = append(buf, `,"stream_mode":[`...)
 		for i, mode := range handoff.StreamMode {
@@ -429,7 +587,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string) []byte {
 	} else {
 		// Fall back to configured default stream mode
 		buf = append(buf, `,"stream_mode":["`...)
-		buf = appendJSONEscaped(buf, langgraphStreamMode)
+		buf = appendJSONEscaped(buf, defaultStreamMode)
 		buf = append(buf, `"]`...)
 	}
 
