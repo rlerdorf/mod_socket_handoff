@@ -572,7 +572,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 	// Close input object
 	buf = append(buf, `}`...)
 
-	// Add stream_mode: use handoff value if provided, otherwise default to ["messages"]
+	// Add stream_mode: use handoff value if provided, otherwise use the profile's default
 	if len(handoff.StreamMode) > 0 {
 		buf = append(buf, `,"stream_mode":[`...)
 		for i, mode := range handoff.StreamMode {

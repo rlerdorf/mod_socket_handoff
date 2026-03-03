@@ -519,7 +519,7 @@ func TestParseLG(t *testing.T) {
 	}
 }
 
-func TestResolveLangGraphProfileCompact(t *testing.T) {
+func TestResolveLangGraphProfile(t *testing.T) {
 	// Set up default and a named profile
 	origDefault := langgraphDefault
 	origProfiles := langgraphProfiles
