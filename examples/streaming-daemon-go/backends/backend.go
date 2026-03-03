@@ -37,7 +37,7 @@ type HandoffData struct {
 	Profile        string         `json:"profile,omitempty"`          // Named LangGraph profile from config
 	LangGraphURL   string         `json:"langgraph_url,omitempty"`    // Per-request API base URL override
 	LangGraphKey   string         `json:"langgraph_api_key,omitempty"` // Per-request API key override
-	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segments skipped)
+	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segment = no override for that position)
 
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)

@@ -551,6 +551,44 @@ func TestResolveLangGraphProfileCompact(t *testing.T) {
 		wantKey     string
 		wantErr     bool
 	}{
+		// Default fallback (no routing fields)
+		{
+			name:     "default profile when no routing fields set",
+			handoff:  HandoffData{},
+			wantBase: "https://default.example.com",
+			wantKey:  "default-key",
+		},
+		// Verbose-only paths
+		{
+			name:     "verbose profile only",
+			handoff:  HandoffData{Profile: "sales"},
+			wantBase: "https://sales.example.com",
+			wantKey:  "sales-key",
+		},
+		{
+			name:     "verbose url + key override (no profile)",
+			handoff:  HandoffData{LangGraphURL: "https://override.example.com", LangGraphKey: "override-key"},
+			wantBase: "https://override.example.com",
+			wantKey:  "override-key",
+		},
+		{
+			name:     "verbose url override only",
+			handoff:  HandoffData{LangGraphURL: "https://override.example.com"},
+			wantBase: "https://override.example.com",
+			wantKey:  "default-key",
+		},
+		{
+			name:     "verbose key override only",
+			handoff:  HandoffData{LangGraphKey: "override-key"},
+			wantBase: "https://default.example.com",
+			wantKey:  "override-key",
+		},
+		{
+			name:    "verbose unknown profile errors",
+			handoff: HandoffData{Profile: "nonexistent"},
+			wantErr: true,
+		},
+		// Compact syntax paths
 		{
 			name:     "compact profile only",
 			handoff:  HandoffData{LG: "sales"},
@@ -576,7 +614,7 @@ func TestResolveLangGraphProfileCompact(t *testing.T) {
 			wantKey:  "sales-key",
 		},
 		{
-			name:    "unknown profile errors",
+			name:    "compact unknown profile errors",
 			handoff: HandoffData{LG: "nonexistent"},
 			wantErr: true,
 		},
