@@ -13,17 +13,19 @@ import (
 
 func TestBuildLangGraphRequestBody(t *testing.T) {
 	tests := []struct {
-		name        string
-		handoff     HandoffData
-		assistantID string
-		wantContains []string
+		name             string
+		handoff          HandoffData
+		assistantID      string
+		defaultStreamMode string
+		wantContains     []string
 	}{
 		{
 			name: "single prompt",
 			handoff: HandoffData{
 				Prompt: "Hello, how are you?",
 			},
-			assistantID: "test-agent",
+			assistantID:      "test-agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"test-agent"`,
 				`"type":"human"`,
@@ -42,7 +44,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Role: "user", Content: "And 3+3?"},
 				},
 			},
-			assistantID: "math-agent",
+			assistantID:      "math-agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"math-agent"`,
 				`"type":"human","content":"What is 2+2?"`,
@@ -59,16 +62,18 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					"shop_id":   int64(456),
 				},
 			},
-			assistantID: "shop-agent",
+			assistantID:      "shop-agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"seller_id":"seller123"`,
 				`"shop_id":456`,
 			},
 		},
 		{
-			name: "empty prompt uses default",
-			handoff: HandoffData{},
-			assistantID: "agent",
+			name:             "empty prompt uses default",
+			handoff:          HandoffData{},
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":"Hello"`,
 			},
@@ -81,7 +86,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Role: "user", Content: "Hi"},
 				},
 			},
-			assistantID: "agent",
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"type":"system","content":"You are helpful."`,
 				`"type":"human","content":"Hi"`,
@@ -94,7 +100,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				ImageBase64:   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
 				ImageMimeType: "image/png",
 			},
-			assistantID: "vision-agent",
+			assistantID:      "vision-agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"vision-agent"`,
 				`"type":"human"`,
@@ -114,7 +121,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				ImageBase64:   "SGVsbG8gV29ybGQ=",
 				ImageMimeType: "image/jpeg",
 			},
-			assistantID: "agent",
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"type":"human","content":"Hello"`,
 				`"type":"ai","content":"Hi there!"`,
@@ -129,7 +137,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				Prompt:      "Analyze",
 				ImageBase64: "dGVzdA==",
 			},
-			assistantID: "agent",
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":[`,
 				`{"type":"text","text":"Analyze"}`,
@@ -142,7 +151,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				Prompt:     "test",
 				StreamMode: []string{"events"},
 			},
-			assistantID: "agent",
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"stream_mode":["events"]`,
 			},
@@ -153,7 +163,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				Prompt:     "test",
 				StreamMode: []string{"messages", "updates"},
 			},
-			assistantID: "agent",
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"stream_mode":["messages","updates"]`,
 			},
@@ -162,7 +173,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildLangGraphRequestBody(tt.handoff, tt.assistantID)
+			got := buildLangGraphRequestBody(tt.handoff, tt.assistantID, tt.defaultStreamMode)
 			gotStr := string(got)
 
 			for _, want := range tt.wantContains {
@@ -246,17 +257,13 @@ func TestEnsureThreadExists(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			// Temporarily override the package-level vars
-			origBase := langgraphAPIBase
-			origClient := langgraphHTTPClient
-			langgraphAPIBase = srv.URL
-			langgraphHTTPClient = srv.Client()
-			defer func() {
-				langgraphAPIBase = origBase
-				langgraphHTTPClient = origClient
-			}()
+			p := &langgraphProfile{
+				apiBase:    srv.URL,
+				apiKey:     "test-key",
+				httpClient: srv.Client(),
+			}
 
-			err := ensureThreadExists(context.Background(), "test-thread-123")
+			err := ensureThreadExists(context.Background(), p, "test-thread-123")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ensureThreadExists() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -275,17 +282,20 @@ func TestLangGraphStreamProxy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Override package-level vars for the test
-	origBase := langgraphAPIBase
-	origClient := langgraphHTTPClient
-	origKey := langgraphAPIKey
-	langgraphAPIBase = srv.URL
-	langgraphHTTPClient = srv.Client()
-	langgraphAPIKey = "test-key"
+	// Override the default profile for the test
+	origDefault := langgraphDefault
+	origProfiles := langgraphProfiles
+	langgraphDefault = &langgraphProfile{
+		apiBase:     srv.URL,
+		apiKey:      "test-key",
+		assistantID: "agent",
+		streamMode:  "messages-tuple",
+		httpClient:  srv.Client(),
+	}
+	langgraphProfiles = make(map[string]*langgraphProfile)
 	defer func() {
-		langgraphAPIBase = origBase
-		langgraphHTTPClient = origClient
-		langgraphAPIKey = origKey
+		langgraphDefault = origDefault
+		langgraphProfiles = origProfiles
 	}()
 
 	// Create a pipe to act as the client connection
@@ -335,16 +345,19 @@ func TestLangGraphStreamProxyWithThreadID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origBase := langgraphAPIBase
-	origClient := langgraphHTTPClient
-	origKey := langgraphAPIKey
-	langgraphAPIBase = srv.URL
-	langgraphHTTPClient = srv.Client()
-	langgraphAPIKey = "test-key"
+	origDefault := langgraphDefault
+	origProfiles := langgraphProfiles
+	langgraphDefault = &langgraphProfile{
+		apiBase:     srv.URL,
+		apiKey:      "test-key",
+		assistantID: "agent",
+		streamMode:  "messages-tuple",
+		httpClient:  srv.Client(),
+	}
+	langgraphProfiles = make(map[string]*langgraphProfile)
 	defer func() {
-		langgraphAPIBase = origBase
-		langgraphHTTPClient = origClient
-		langgraphAPIKey = origKey
+		langgraphDefault = origDefault
+		langgraphProfiles = origProfiles
 	}()
 
 	clientConn, serverConn := net.Pipe()
@@ -390,16 +403,19 @@ func TestLangGraphStreamProxyContextCanceled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origBase := langgraphAPIBase
-	origClient := langgraphHTTPClient
-	origKey := langgraphAPIKey
-	langgraphAPIBase = srv.URL
-	langgraphHTTPClient = srv.Client()
-	langgraphAPIKey = "test-key"
+	origDefault := langgraphDefault
+	origProfiles := langgraphProfiles
+	langgraphDefault = &langgraphProfile{
+		apiBase:     srv.URL,
+		apiKey:      "test-key",
+		assistantID: "agent",
+		streamMode:  "messages-tuple",
+		httpClient:  srv.Client(),
+	}
+	langgraphProfiles = make(map[string]*langgraphProfile)
 	defer func() {
-		langgraphAPIBase = origBase
-		langgraphHTTPClient = origClient
-		langgraphAPIKey = origKey
+		langgraphDefault = origDefault
+		langgraphProfiles = origProfiles
 	}()
 
 	clientConn, serverConn := net.Pipe()
@@ -430,16 +446,19 @@ func TestLangGraphStreamProxyMalformedSSE(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origBase := langgraphAPIBase
-	origClient := langgraphHTTPClient
-	origKey := langgraphAPIKey
-	langgraphAPIBase = srv.URL
-	langgraphHTTPClient = srv.Client()
-	langgraphAPIKey = "test-key"
+	origDefault := langgraphDefault
+	origProfiles := langgraphProfiles
+	langgraphDefault = &langgraphProfile{
+		apiBase:     srv.URL,
+		apiKey:      "test-key",
+		assistantID: "agent",
+		streamMode:  "messages-tuple",
+		httpClient:  srv.Client(),
+	}
+	langgraphProfiles = make(map[string]*langgraphProfile)
 	defer func() {
-		langgraphAPIBase = origBase
-		langgraphHTTPClient = origClient
-		langgraphAPIKey = origKey
+		langgraphDefault = origDefault
+		langgraphProfiles = origProfiles
 	}()
 
 	clientConn, serverConn := net.Pipe()
@@ -466,5 +485,121 @@ func TestLangGraphStreamProxyMalformedSSE(t *testing.T) {
 	}
 	if received.String() != malformed {
 		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), malformed)
+	}
+}
+
+func TestParseLG(t *testing.T) {
+	tests := []struct {
+		input               string
+		wantProfile, wantURL, wantKey string
+	}{
+		{"sales", "sales", "", ""},
+		{"sales|https://api.example.com", "sales", "https://api.example.com", ""},
+		{"sales|https://api.example.com|lgk_key", "sales", "https://api.example.com", "lgk_key"},
+		{"sales||lgk_key", "sales", "", "lgk_key"},
+		{"|https://api.example.com|lgk_key", "", "https://api.example.com", "lgk_key"},
+		{"|https://api.example.com", "", "https://api.example.com", ""},
+		{"||lgk_key", "", "", "lgk_key"},
+		{"", "", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			profile, url, key := parseLG(tt.input)
+			if profile != tt.wantProfile {
+				t.Errorf("parseLG(%q) profile = %q, want %q", tt.input, profile, tt.wantProfile)
+			}
+			if url != tt.wantURL {
+				t.Errorf("parseLG(%q) url = %q, want %q", tt.input, url, tt.wantURL)
+			}
+			if key != tt.wantKey {
+				t.Errorf("parseLG(%q) key = %q, want %q", tt.input, key, tt.wantKey)
+			}
+		})
+	}
+}
+
+func TestResolveLangGraphProfileCompact(t *testing.T) {
+	// Set up default and a named profile
+	origDefault := langgraphDefault
+	origProfiles := langgraphProfiles
+	langgraphDefault = &langgraphProfile{
+		apiBase:     "https://default.example.com",
+		apiKey:      "default-key",
+		assistantID: "default-agent",
+		streamMode:  "messages-tuple",
+		httpClient:  http.DefaultClient,
+	}
+	langgraphProfiles = map[string]*langgraphProfile{
+		"sales": {
+			apiBase:     "https://sales.example.com",
+			apiKey:      "sales-key",
+			assistantID: "sales-agent",
+			streamMode:  "messages-tuple",
+			httpClient:  http.DefaultClient,
+		},
+	}
+	defer func() {
+		langgraphDefault = origDefault
+		langgraphProfiles = origProfiles
+	}()
+
+	tests := []struct {
+		name        string
+		handoff     HandoffData
+		wantBase    string
+		wantKey     string
+		wantErr     bool
+	}{
+		{
+			name:     "compact profile only",
+			handoff:  HandoffData{LG: "sales"},
+			wantBase: "https://sales.example.com",
+			wantKey:  "sales-key",
+		},
+		{
+			name:     "compact profile + url override",
+			handoff:  HandoffData{LG: "sales|https://staging.example.com"},
+			wantBase: "https://staging.example.com",
+			wantKey:  "sales-key",
+		},
+		{
+			name:     "compact url + key override (no profile)",
+			handoff:  HandoffData{LG: "|https://custom.example.com|lgk_custom"},
+			wantBase: "https://custom.example.com",
+			wantKey:  "lgk_custom",
+		},
+		{
+			name:     "verbose overrides compact",
+			handoff:  HandoffData{LG: "sales", LangGraphURL: "https://override.example.com"},
+			wantBase: "https://override.example.com",
+			wantKey:  "sales-key",
+		},
+		{
+			name:    "unknown profile errors",
+			handoff: HandoffData{LG: "nonexistent"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := resolveLangGraphProfile(tt.handoff)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p.apiBase != tt.wantBase {
+				t.Errorf("apiBase = %q, want %q", p.apiBase, tt.wantBase)
+			}
+			if p.apiKey != tt.wantKey {
+				t.Errorf("apiKey = %q, want %q", p.apiKey, tt.wantKey)
+			}
+		})
 	}
 }

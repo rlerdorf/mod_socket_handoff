@@ -30,10 +30,14 @@ type HandoffData struct {
 	TestPattern string    `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
 
 	// LangGraph-specific fields
-	ThreadID       string         `json:"thread_id,omitempty"`       // For stateful runs (uses /threads/{id}/runs/stream)
-	AssistantID    string         `json:"assistant_id,omitempty"`    // Override default assistant ID
-	StreamMode     []string       `json:"stream_mode,omitempty"`     // Stream modes (e.g., ["messages", "updates", "custom"])
-	LangGraphInput map[string]any `json:"langgraph_input,omitempty"` // Custom input fields (seller_id, shop_id, etc.)
+	ThreadID       string         `json:"thread_id,omitempty"`        // For stateful runs (uses /threads/{id}/runs/stream)
+	AssistantID    string         `json:"assistant_id,omitempty"`     // Override default assistant ID
+	StreamMode     []string       `json:"stream_mode,omitempty"`      // Stream modes (e.g., ["messages", "updates", "custom"])
+	LangGraphInput map[string]any `json:"langgraph_input,omitempty"`  // Custom input fields (seller_id, shop_id, etc.)
+	Profile        string         `json:"profile,omitempty"`          // Named LangGraph profile from config
+	LangGraphURL   string         `json:"langgraph_url,omitempty"`    // Per-request API base URL override
+	LangGraphKey   string         `json:"langgraph_api_key,omitempty"` // Per-request API key override
+	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segments skipped)
 
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)

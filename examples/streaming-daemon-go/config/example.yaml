@@ -37,6 +37,18 @@ backend:
     http2_enabled: true
     insecure_ssl: false
 
+    # Named profiles for routing to different LangGraph deployments.
+    # Each profile inherits unset fields from the top-level langgraph config.
+    # Select a profile per-request via {"profile": "name"} in X-Handoff-Data.
+    # profiles:
+    #   sales:
+    #     api_key: lgk_sales_key
+    #     api_base: https://sales-api.example.com/v1
+    #     assistant_id: sales-agent
+    #   support:
+    #     api_key: lgk_support_key
+    #     assistant_id: support-agent
+
   # Mock backend configuration
   mock:
     message_delay_ms: 50
