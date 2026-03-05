@@ -1,16 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 510" width="1320" height="510" style="background: #ffffff">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 510" width="1320" height="510">
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto" markerUnits="strokeWidth">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d3d3d3"/>
     </marker>
     <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto" markerUnits="strokeWidth">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#e8590c"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f17634"/>
     </marker>
     <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto" markerUnits="strokeWidth">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#2f9e44"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#39994b"/>
     </marker>
     <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto" markerUnits="strokeWidth">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#6741d9"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#b595ff"/>
     </marker>
     <style>
       text { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
@@ -18,63 +18,61 @@
   </defs>
 
   <!-- Apache httpd container -->
-  <rect x="280" y="55" width="410" height="370" rx="12" ry="12" fill="#e7f5ff" stroke="#1971c2" stroke-width="2"/>
-  <text x="485" y="85" text-anchor="middle" font-size="22" font-weight="600" fill="#1971c2">Apache httpd</text>
+  <rect x="280" y="55" width="410" height="370" rx="12" ry="12" fill="#121e26" stroke="#56a2e8" stroke-width="2"/>
+  <text x="485" y="85" text-anchor="middle" font-size="22" font-weight="600" fill="#56a2e8">Apache httpd</text>
 
   <!-- Client box -->
-  <rect x="40" y="170" width="140" height="90" rx="10" ry="10" fill="#a5d8ff" stroke="#1e1e1e" stroke-width="2"/>
-  <text x="110" y="207" text-anchor="middle" font-size="18" font-weight="600" fill="#1e1e1e">Client</text>
-  <text x="110" y="230" text-anchor="middle" font-size="16" fill="#495057">(Browser)</text>
+  <rect x="40" y="170" width="140" height="90" rx="10" ry="10" fill="#154162" stroke="#d3d3d3" stroke-width="2"/>
+  <text x="110" y="207" text-anchor="middle" font-size="18" font-weight="600" fill="#d3d3d3">Client</text>
+  <text x="110" y="230" text-anchor="middle" font-size="16" fill="#a0a0a0">(Browser)</text>
 
   <!-- PHP box -->
-  <rect x="330" y="120" width="280" height="85" rx="10" ry="10" fill="#d0bfff" stroke="#6741d9" stroke-width="2"/>
-  <text x="470" y="155" text-anchor="middle" font-size="18" font-weight="600" fill="#1e1e1e">PHP</text>
-  <text x="470" y="178" text-anchor="middle" font-size="16" fill="#495057">Auth + Business Logic</text>
+  <rect x="330" y="120" width="280" height="85" rx="10" ry="10" fill="#4a3b72" stroke="#b595ff" stroke-width="2"/>
+  <text x="470" y="155" text-anchor="middle" font-size="18" font-weight="600" fill="#d3d3d3">PHP</text>
+  <text x="470" y="178" text-anchor="middle" font-size="16" fill="#d3d3d3">Auth + Business Logic</text>
 
   <!-- mod_socket_handoff box -->
-  <rect x="320" y="300" width="300" height="60" rx="10" ry="10" fill="#ffec99" stroke="#e8590c" stroke-width="2"/>
-  <text x="470" y="336" text-anchor="middle" font-size="17" font-weight="600" fill="#1e1e1e">mod_socket_handoff</text>
+  <rect x="320" y="300" width="300" height="60" rx="10" ry="10" fill="#362600" stroke="#f17634" stroke-width="2"/>
+  <text x="470" y="336" text-anchor="middle" font-size="17" font-weight="600" fill="#d3d3d3">mod_socket_handoff</text>
 
   <!-- Streaming Daemon box -->
-  <rect x="810" y="145" width="210" height="110" rx="10" ry="10" fill="#b2f2bb" stroke="#2f9e44" stroke-width="2"/>
-  <text x="915" y="193" text-anchor="middle" font-size="18" font-weight="600" fill="#1e1e1e">Streaming</text>
-  <text x="915" y="216" text-anchor="middle" font-size="18" font-weight="600" fill="#1e1e1e">Daemon</text>
+  <rect x="810" y="145" width="210" height="110" rx="10" ry="10" fill="#043b0c" stroke="#39994b" stroke-width="2"/>
+  <text x="915" y="193" text-anchor="middle" font-size="18" font-weight="600" fill="#d3d3d3">Streaming</text>
+  <text x="915" y="216" text-anchor="middle" font-size="18" font-weight="600" fill="#d3d3d3">Daemon</text>
 
   <!-- LLM API box -->
-  <rect x="1130" y="162" width="150" height="80" rx="10" ry="10" fill="#ffc9c9" stroke="#c92a2a" stroke-width="2"/>
-  <text x="1205" y="208" text-anchor="middle" font-size="18" font-weight="600" fill="#1e1e1e">LLM API</text>
+  <rect x="1130" y="162" width="150" height="80" rx="10" ry="10" fill="#5a2c2c" stroke="#ff8f8f" stroke-width="2"/>
+  <text x="1205" y="208" text-anchor="middle" font-size="18" font-weight="600" fill="#d3d3d3">LLM API</text>
 
   <!-- Arrow 1: Client -> PHP (HTTP Request) -->
-  <line x1="180" y1="200" x2="325" y2="155" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="240" y="162" text-anchor="middle" font-size="14" fill="#1e1e1e" font-weight="500">HTTP Request</text>
+  <line x1="180" y1="200" x2="325" y2="155" stroke="#d3d3d3" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="240" y="162" text-anchor="middle" font-size="14" fill="#d3d3d3" font-weight="500">HTTP Request</text>
 
   <!-- Arrow 2: PHP -> mod_socket_handoff (internal) -->
-  <line x1="470" y1="205" x2="470" y2="295" stroke="#6741d9" stroke-width="2" marker-end="url(#arrow-purple)"/>
-  <text x="555" y="248" text-anchor="middle" font-size="13" fill="#6741d9" font-style="italic">X-Socket-Handoff</text>
-  <text x="555" y="265" text-anchor="middle" font-size="13" fill="#6741d9" font-style="italic">header</text>
+  <line x1="470" y1="205" x2="470" y2="295" stroke="#b595ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <text x="555" y="248" text-anchor="middle" font-size="13" fill="#b595ff" font-style="italic">X-Socket-Handoff</text>
+  <text x="555" y="265" text-anchor="middle" font-size="13" fill="#b595ff" font-style="italic">header</text>
 
   <!-- Arrow 3: mod_socket_handoff -> Daemon (SCM_RIGHTS) - the key arrow -->
-  <line x1="620" y1="325" x2="805" y2="220" stroke="#e8590c" stroke-width="3" marker-end="url(#arrow-orange)"/>
-  <rect x="645" y="245" width="130" height="42" rx="6" fill="white" fill-opacity="0.85" stroke="none"/>
-  <text x="710" y="262" text-anchor="middle" font-size="14" font-weight="600" fill="#e8590c">fd + JSON data</text>
-  <text x="710" y="280" text-anchor="middle" font-size="13" fill="#e8590c">(SCM_RIGHTS)</text>
+  <line x1="620" y1="325" x2="805" y2="220" stroke="#f17634" stroke-width="3" marker-end="url(#arrow-orange)"/>
+  <text x="710" y="258" text-anchor="middle" font-size="14" font-weight="600" fill="#f17634">fd + JSON data</text>
+  <text x="710" y="276" text-anchor="middle" font-size="13" fill="#f17634">(SCM_RIGHTS)</text>
 
   <!-- "Unix Socket" subtle label -->
-  <text x="730" y="300" text-anchor="middle" font-size="12" fill="#868e96">Unix Socket</text>
+  <text x="730" y="296" text-anchor="middle" font-size="12" fill="#6e757c">Unix Socket</text>
 
   <!-- Arrow 4: Daemon -> LLM (Prompt) -->
-  <line x1="1020" y1="185" x2="1125" y2="192" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="1073" y="177" text-anchor="middle" font-size="14" fill="#1e1e1e">Prompt</text>
+  <line x1="1020" y1="185" x2="1125" y2="192" stroke="#d3d3d3" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1073" y="177" text-anchor="middle" font-size="14" fill="#d3d3d3">Prompt</text>
 
   <!-- Arrow 5: LLM -> Daemon (Streamed response) -->
-  <line x1="1130" y1="222" x2="1025" y2="222" stroke="#1e1e1e" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
-  <text x="1078" y="244" text-anchor="middle" font-size="13" fill="#495057">Streamed response</text>
+  <line x1="1130" y1="222" x2="1025" y2="222" stroke="#d3d3d3" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+  <text x="1078" y="244" text-anchor="middle" font-size="13" fill="#d3d3d3">Streamed response</text>
 
   <!-- Arrow 6: Daemon -> Client (SSE direct, dashed green) -->
-  <path d="M 915 255 L 915 450 L 110 450 L 110 265" fill="none" stroke="#2f9e44" stroke-width="3" stroke-dasharray="8,5" marker-end="url(#arrow-green)"/>
-  <rect x="380" y="438" width="275" height="24" rx="5" fill="white" fill-opacity="0.85" stroke="none"/>
-  <text x="518" y="456" text-anchor="middle" font-size="15" font-weight="600" fill="#2f9e44">SSE stream (direct connection)</text>
+  <path d="M 915 255 C 915 380, 600 450, 110 450 C 60 450, 60 400, 110 265" fill="none" stroke="#39994b" stroke-width="3" stroke-dasharray="8,5" marker-end="url(#arrow-green)"/>
+  <text x="518" y="456" text-anchor="middle" font-size="15" font-weight="600" fill="#39994b">SSE stream (direct connection)</text>
 
   <!-- "Worker freed!" annotation -->
-  <text x="485" y="405" text-anchor="middle" font-size="17" font-weight="600" fill="#2f9e44">Worker freed!</text>
+  <text x="485" y="405" text-anchor="middle" font-size="17" font-weight="600" fill="#39994b">Worker freed!</text>
 </svg>
