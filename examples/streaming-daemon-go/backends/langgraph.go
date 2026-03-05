@@ -434,7 +434,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		copyBufPool.Put(copyBufPtr)
 	}()
 	var nr int
-	var prevByte byte // track last byte for cross-chunk \n\n detection
+	var newlines int // consecutive \n count (ignoring \r) for SSE boundary detection
 	for {
 		select {
 		case <-ctx.Done():
@@ -448,16 +448,22 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 				ttfbRecorded = true
 			}
 			chunk := copyBuf[:nr]
-			// Count SSE event boundaries (\n\n) for metrics, tracking across chunk boundaries
-			if len(chunk) > 0 && prevByte == '\n' && chunk[0] == '\n' {
-				RecordChunkSent()
-			}
-			for i := 0; i < len(chunk)-1; i++ {
-				if chunk[i] == '\n' && chunk[i+1] == '\n' {
-					RecordChunkSent()
+			// Count SSE event boundaries for metrics.
+			// A blank line (\n\n or \r\n\r\n) separates SSE events.
+			for _, b := range chunk {
+				switch b {
+				case '\n':
+					newlines++
+					if newlines >= 2 {
+						RecordChunkSent()
+						newlines = 0
+					}
+				case '\r':
+					// ignore \r — treat \r\n same as \n
+				default:
+					newlines = 0
 				}
 			}
-			prevByte = chunk[len(chunk)-1]
 			// Write full chunk, handling short writes
 			written := 0
 			for written < len(chunk) {
