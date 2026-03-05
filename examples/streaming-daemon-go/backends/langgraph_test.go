@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestBuildLangGraphRequestBody(t *testing.T) {
@@ -432,6 +434,78 @@ func TestLangGraphStreamProxyContextCanceled(t *testing.T) {
 	_, err := lg.Stream(ctx, serverConn, HandoffData{Prompt: "test"})
 	if err == nil {
 		t.Error("Stream() error = nil, want non-nil for canceled context")
+	}
+}
+
+func TestLangGraphStreamChunkCounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantChunks int
+	}{
+		{
+			name:       "LF line endings",
+			payload:    "event: metadata\ndata: {}\n\nevent: messages\ndata: []\n\nevent: end\ndata: null\n\n",
+			wantChunks: 3,
+		},
+		{
+			name:       "CRLF line endings",
+			payload:    "event: metadata\r\ndata: {}\r\n\r\nevent: messages\r\ndata: []\r\n\r\nevent: end\r\ndata: null\r\n\r\n",
+			wantChunks: 3,
+		},
+		{
+			name:       "single event",
+			payload:    "data: hello\n\n",
+			wantChunks: 1,
+		},
+		{
+			name:       "no blank lines",
+			payload:    "data: hello\n",
+			wantChunks: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(tt.payload))
+			}))
+			defer srv.Close()
+
+			origBase := langgraphAPIBase
+			origClient := langgraphHTTPClient
+			origKey := langgraphAPIKey
+			langgraphAPIBase = srv.URL
+			langgraphHTTPClient = srv.Client()
+			langgraphAPIKey = "test-key"
+			defer func() {
+				langgraphAPIBase = origBase
+				langgraphHTTPClient = origClient
+				langgraphAPIKey = origKey
+			}()
+
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
+
+			go func() { io.Copy(io.Discard, clientConn) }()
+
+			before := testutil.ToFloat64(metricChunksSent)
+
+			lg := &LangGraph{}
+			_, err := lg.Stream(context.Background(), serverConn, HandoffData{Prompt: "test"})
+			if err != nil {
+				t.Fatalf("Stream() error = %v", err)
+			}
+
+			after := testutil.ToFloat64(metricChunksSent)
+			got := int(after - before)
+			if got != tt.wantChunks {
+				t.Errorf("chunks sent = %d, want %d", got, tt.wantChunks)
+			}
+		})
 	}
 }
 

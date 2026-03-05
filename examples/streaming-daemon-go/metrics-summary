@@ -10,7 +10,12 @@ ADDR="127.0.0.1:9090"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -a|--addr) ADDR="$2"; shift 2 ;;
+        -a|--addr)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "Error: --addr requires a HOST:PORT value" >&2
+                exit 1
+            fi
+            ADDR="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: ${0##*/} [-a HOST:PORT]"
             echo "  -a, --addr   Metrics endpoint (default: 127.0.0.1:9090)"
@@ -22,7 +27,7 @@ done
 BASE="http://${ADDR}"
 
 # Check health first
-HEALTH=$(curl -sf "${BASE}/healthz" 2>/dev/null) || {
+HEALTH=$(curl -sf --connect-timeout 5 --max-time 10 "${BASE}/healthz" 2>/dev/null) || {
     echo "Error: daemon not reachable at ${ADDR}" >&2
     exit 1
 }
@@ -30,7 +35,7 @@ HEALTH=$(curl -sf "${BASE}/healthz" 2>/dev/null) || {
 HEALTH_STATUS=$(echo "$HEALTH" | awk -F'"' '/"status"/{print $4}')
 
 # Fetch metrics
-METRICS=$(curl -sf "${BASE}/metrics") || {
+METRICS=$(curl -sf --connect-timeout 5 --max-time 10 "${BASE}/metrics") || {
     echo "Error: could not fetch metrics from ${ADDR}" >&2
     exit 1
 }
