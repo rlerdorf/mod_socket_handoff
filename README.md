@@ -52,6 +52,8 @@ sequenceDiagram
 
 ![Architecture](architecture.svg)
 
+![Architecture](Architecture.svg)
+
 ## Build
 
 ```bash
