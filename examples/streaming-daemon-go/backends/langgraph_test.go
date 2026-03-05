@@ -474,16 +474,19 @@ func TestLangGraphStreamChunkCounting(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			origBase := langgraphAPIBase
-			origClient := langgraphHTTPClient
-			origKey := langgraphAPIKey
-			langgraphAPIBase = srv.URL
-			langgraphHTTPClient = srv.Client()
-			langgraphAPIKey = "test-key"
+			origDefault := langgraphDefault
+			origProfiles := langgraphProfiles
+			langgraphDefault = &langgraphProfile{
+				apiBase:     srv.URL,
+				apiKey:      "test-key",
+				assistantID: "agent",
+				streamMode:  "messages-tuple",
+				httpClient:  srv.Client(),
+			}
+			langgraphProfiles = make(map[string]*langgraphProfile)
 			defer func() {
-				langgraphAPIBase = origBase
-				langgraphHTTPClient = origClient
-				langgraphAPIKey = origKey
+				langgraphDefault = origDefault
+				langgraphProfiles = origProfiles
 			}()
 
 			clientConn, serverConn := net.Pipe()
