@@ -50,8 +50,6 @@ sequenceDiagram
     Daemon-->>Client: SSE response
 ```
 
-![Architecture](architecture.svg)
-
 ![Architecture](Architecture.svg)
 
 ## Build
