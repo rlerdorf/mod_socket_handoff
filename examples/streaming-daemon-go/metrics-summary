@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# metrics-summary — human-readable dashboard for the streaming daemon's Prometheus metrics
+#
+# Usage: ./metrics-summary [-a HOST:PORT]
+#
+set -euo pipefail
+
+ADDR="127.0.0.1:9090"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -a|--addr) ADDR="$2"; shift 2 ;;
+        -h|--help)
+            echo "Usage: ${0##*/} [-a HOST:PORT]"
+            echo "  -a, --addr   Metrics endpoint (default: 127.0.0.1:9090)"
+            exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+BASE="http://${ADDR}"
+
+# Check health first
+HEALTH=$(curl -sf "${BASE}/healthz" 2>/dev/null) || {
+    echo "Error: daemon not reachable at ${ADDR}" >&2
+    exit 1
+}
+
+HEALTH_STATUS=$(echo "$HEALTH" | awk -F'"' '/"status"/{print $4}')
+
+# Fetch metrics
+METRICS=$(curl -sf "${BASE}/metrics") || {
+    echo "Error: could not fetch metrics from ${ADDR}" >&2
+    exit 1
+}
+
+# ── awk does all the parsing and formatting ──────────────────────────────────
+echo "$METRICS" | awk -v addr="$ADDR" -v health="$HEALTH_STATUS" '
+function fmt_int(n,    s, i, len, out) {
+    s = sprintf("%.0f", n)
+    len = length(s)
+    out = ""
+    for (i = 1; i <= len; i++) {
+        if (i > 1 && (len - i) % 3 == 2) out = out ","
+        out = out substr(s, i, 1)
+    }
+    return out
+}
+
+function fmt_bytes(b) {
+    if (b >= 1073741824) return sprintf("%.1f GB", b / 1073741824)
+    if (b >= 1048576)    return sprintf("%.1f MB", b / 1048576)
+    if (b >= 1024)       return sprintf("%.1f KB", b / 1024)
+    return sprintf("%.0f B", b)
+}
+
+function fmt_duration(s) {
+    if (s >= 1)    return sprintf("%.1fs", s)
+    if (s >= 0.001) return sprintf("%.0fms", s * 1000)
+    return sprintf("%.0fµs", s * 1000000)
+}
+
+# Extract a label value from a metric line, e.g. get_label("reason") on
+# daemon_stream_errors_total{reason="timeout"} 3
+function get_label(lbl,    pat, val) {
+    pat = lbl "=\""
+    if (match($0, pat)) {
+        val = substr($0, RSTART + length(pat))
+        sub(/".*/, "", val)
+        return val
+    }
+    return ""
+}
+
+# Parse histogram buckets into arrays for percentile computation.
+# key = metric base name (+ optional backend label)
+# Stores: bucket_bounds[key, i], bucket_counts[key, i], bucket_n[key]
+function parse_bucket(    key, le, count, backend) {
+    # $1 is like daemon_stream_duration_seconds_bucket{le="0.01"} or
+    # daemon_backend_duration_seconds_bucket{backend="openai",le="0.01"}
+    le = get_label("le")
+    count = $2 + 0
+
+    # Determine key: base metric name + backend if present
+    backend = get_label("backend")
+    key = $1
+    sub(/_bucket\{.*/, "", key)
+    if (backend != "") key = key "|" backend
+
+    if (le == "+Inf") {
+        hist_total[key] = count
+    } else {
+        hist_n[key]++
+        hist_bound[key, hist_n[key]] = le + 0
+        hist_count[key, hist_n[key]] = count + 0
+    }
+}
+
+# Compute a percentile from stored histogram data using linear interpolation
+function percentile(key, pct,    target, i, prev_count, prev_bound, frac) {
+    if (!(key in hist_total) || hist_total[key] == 0) return 0
+    target = hist_total[key] * pct
+    prev_count = 0
+    prev_bound = 0
+    for (i = 1; i <= hist_n[key]; i++) {
+        if (hist_count[key, i] >= target) {
+            if (hist_count[key, i] == prev_count) return hist_bound[key, i]
+            frac = (target - prev_count) / (hist_count[key, i] - prev_count)
+            return prev_bound + frac * (hist_bound[key, i] - prev_bound)
+        }
+        prev_count = hist_count[key, i]
+        prev_bound = hist_bound[key, i]
+    }
+    return hist_bound[key, hist_n[key]]
+}
+
+# Skip comments and empty lines
+/^#/ || /^$/ { next }
+
+# Simple gauges and counters
+/^daemon_active_connections /    { active_conn = $2 + 0 }
+/^daemon_connections_total /     { total_conn = $2 + 0 }
+/^daemon_connections_rejected_total / { rejected = $2 + 0 }
+/^daemon_active_streams /       { active_streams = $2 + 0 }
+/^daemon_peak_streams /         { peak_streams = $2 + 0 }
+/^daemon_bytes_sent_total /     { bytes_sent = $2 + 0 }
+/^daemon_chunks_sent_total /    { chunks_sent = $2 + 0 }
+/^daemon_handoffs_total /       { handoffs = $2 + 0 }
+
+# Error counters with reason labels
+/^daemon_stream_errors_total\{/ {
+    reason = get_label("reason")
+    stream_errors[reason] += $2 + 0
+    stream_errors_total += $2 + 0
+}
+
+/^daemon_handoff_errors_total\{/ {
+    reason = get_label("reason")
+    handoff_errors[reason] += $2 + 0
+    handoff_errors_total += $2 + 0
+}
+
+# Backend counters with backend labels
+/^daemon_backend_requests_total\{/ {
+    b = get_label("backend")
+    backend_requests[b] = $2 + 0
+    if (!(b in backends_seen)) { backends[++n_backends] = b; backends_seen[b] = 1 }
+}
+
+/^daemon_backend_errors_total\{/ {
+    b = get_label("backend")
+    backend_errors[b] = $2 + 0
+}
+
+# Histogram buckets
+/_bucket\{/ { parse_bucket() }
+
+END {
+    printf "Streaming Daemon Metrics (%s)  status: %s\n", addr, health
+    printf "──────────────────────────────────────────────────\n"
+
+    printf "\nConnections\n"
+    printf "  Active: %8s    Total: %8s    Rejected: %s\n", \
+        fmt_int(active_conn), fmt_int(total_conn), fmt_int(rejected)
+
+    printf "\nStreams\n"
+    printf "  Active: %8s    Peak: %8s\n", fmt_int(active_streams), fmt_int(peak_streams)
+
+    err_detail = ""
+    for (r in stream_errors) {
+        if (err_detail != "") err_detail = err_detail " "
+        err_detail = err_detail r "=" stream_errors[r]
+    }
+    if (stream_errors_total > 0)
+        printf "  Errors: %5s       (%s)\n", fmt_int(stream_errors_total), err_detail
+    else
+        printf "  Errors: %5s\n", "0"
+
+    printf "\nHandoffs\n"
+    herr_detail = ""
+    for (r in handoff_errors) {
+        if (herr_detail != "") herr_detail = herr_detail " "
+        herr_detail = herr_detail r "=" handoff_errors[r]
+    }
+    if (handoff_errors_total > 0)
+        printf "  Total: %8s    Errors: %s (%s)\n", \
+            fmt_int(handoffs), fmt_int(handoff_errors_total), herr_detail
+    else
+        printf "  Total: %8s    Errors: %s\n", fmt_int(handoffs), "0"
+
+    # Handoff duration
+    hkey = "daemon_handoff_duration_seconds"
+    if ((hkey in hist_total) && hist_total[hkey] > 0) {
+        printf "  Duration p50: %-8s  p99: %s\n", \
+            fmt_duration(percentile(hkey, 0.50)), fmt_duration(percentile(hkey, 0.99))
+    }
+
+    # Per-backend sections
+    for (i = 1; i <= n_backends; i++) {
+        b = backends[i]
+        printf "\nBackend: %s\n", b
+        printf "  Requests: %6s    Errors: %s\n", \
+            fmt_int(backend_requests[b]), fmt_int(backend_errors[b]+0)
+
+        tkey = "daemon_backend_ttfb_seconds|" b
+        if ((tkey in hist_total) && hist_total[tkey] > 0) {
+            printf "  TTFB    p50: %-8s  p99: %s\n", \
+                fmt_duration(percentile(tkey, 0.50)), fmt_duration(percentile(tkey, 0.99))
+        }
+    }
+
+    # Stream metrics
+    skey = "daemon_stream_duration_seconds"
+    if ((skey in hist_total) && hist_total[skey] > 0) {
+        printf "\nStreaming\n"
+        printf "  Duration p50: %-8s  p95: %-8s  p99: %s\n", \
+            fmt_duration(percentile(skey, 0.50)), \
+            fmt_duration(percentile(skey, 0.95)), \
+            fmt_duration(percentile(skey, 0.99))
+        printf "  Bytes sent: %-10s  Chunks: %s\n", fmt_bytes(bytes_sent), fmt_int(chunks_sent)
+    }
+
+    printf "\n"
+}
+'
