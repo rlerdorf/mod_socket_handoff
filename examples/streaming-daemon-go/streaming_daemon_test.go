@@ -800,6 +800,7 @@ func TestPerRequestBackendRouting(t *testing.T) {
 
 	t.Run("valid backend override routes correctly", func(t *testing.T) {
 		server, client := net.Pipe()
+		defer client.Close()
 
 		// Use "typing" backend as the override with its known deterministic
 		// prompt to avoid fortune/fallback. Read just the first SSE data line
@@ -829,8 +830,6 @@ func TestPerRequestBackendRouting(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		cancel()
-		client.Close()
 
 		// Typing backend sends {"char":"x","index":N} — mock backend doesn't
 		if !strings.Contains(firstDataLine, `"char"`) || !strings.Contains(firstDataLine, `"index"`) {
