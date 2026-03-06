@@ -141,9 +141,13 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 		assistantID = *langgraphAssistantFlag
 	}
 
-	// Validate API key
+	// Validate API key — warn if this is the default backend, debug otherwise
 	if apiKey == "" {
-		slog.Warn("LANGGRAPH_API_KEY not set, API calls will fail")
+		if cfg != nil && cfg.Provider == "langgraph" {
+			slog.Warn("LANGGRAPH_API_KEY not set, API calls will fail")
+		} else {
+			slog.Debug("LANGGRAPH_API_KEY not set, API calls will fail")
+		}
 	}
 
 	if insecure {

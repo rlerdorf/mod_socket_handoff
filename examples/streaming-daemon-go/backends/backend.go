@@ -4,6 +4,7 @@ package backends
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"net"
 	"slices"
@@ -39,6 +40,9 @@ type HandoffData struct {
 	LangGraphKey   string         `json:"langgraph_api_key,omitempty"` // Per-request API key override
 	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segment = no override for that position)
 
+	// Per-request backend selection (overrides the daemon's default provider)
+	Backend string `json:"backend,omitempty"`
+
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
 	ImageBase64   string `json:"image_base64,omitempty"`    // Base64-encoded image data (max ~48KB to fit within 64KB handoff limit; use ImagePath for larger images)
@@ -73,9 +77,12 @@ type Backend interface {
 }
 
 // registry holds all registered backends.
+// initialized tracks backends that completed Init() successfully.
 var (
-	registry   = make(map[string]Backend)
-	registryMu sync.RWMutex
+	registry      = make(map[string]Backend)
+	registryMu    sync.RWMutex
+	initialized   map[string]Backend
+	initializedMu sync.RWMutex
 )
 
 // Register adds a backend to the registry.
@@ -116,4 +123,50 @@ func All() map[string]Backend {
 	result := make(map[string]Backend, len(registry))
 	maps.Copy(result, registry)
 	return result
+}
+
+// GetInitialized retrieves an initialized backend by name.
+// Returns nil if the backend was not successfully initialized.
+func GetInitialized(name string) Backend {
+	initializedMu.RLock()
+	defer initializedMu.RUnlock()
+	return initialized[name]
+}
+
+// InitAll initializes all registered backends with the given config.
+// Returns the names of successfully initialized backends.
+// Backends that fail to initialize are logged but not fatal.
+// Successfully initialized backends are available via GetInitialized().
+func InitAll(cfg *config.BackendConfig) []string {
+	// Snapshot the registry under the lock to avoid holding it
+	// across potentially slow Init() calls.
+	registryMu.RLock()
+	snapshot := make(map[string]Backend, len(registry))
+	maps.Copy(snapshot, registry)
+	registryMu.RUnlock()
+
+	// Initialize in sorted order for deterministic startup logs.
+	names := make([]string, 0, len(snapshot))
+	for name := range snapshot {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	result := make(map[string]Backend, len(names))
+	var initNames []string
+	for _, name := range names {
+		b := snapshot[name]
+		if err := b.Init(cfg); err != nil {
+			slog.Warn("backend init failed", "backend", name, "error", err)
+			continue
+		}
+		result[name] = b
+		initNames = append(initNames, name)
+	}
+
+	initializedMu.Lock()
+	initialized = result
+	initializedMu.Unlock()
+
+	return initNames
 }

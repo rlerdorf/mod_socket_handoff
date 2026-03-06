@@ -1,4 +1,4 @@
-// Tests for the streaming daemon's SCM_RIGHTS handling.
+// Tests for the streaming daemon's SCM_RIGHTS handling and per-request routing.
 //
 // These tests verify the core socket handoff mechanism without starting
 // the full daemon. They test:
@@ -6,6 +6,7 @@
 // - Concurrent fd sends
 // - Large data handling
 // - HTTP response format
+// - Per-request backend routing
 
 package main
 
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"examples/backends"
 	"examples/config"
@@ -758,5 +760,124 @@ func TestInitLogging(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPerRequestBackendRouting(t *testing.T) {
+	// Initialize all backends so they're available via GetInitialized.
+	// Save and restore activeBackend since tests mutate it.
+	origActive := activeBackend
+	t.Cleanup(func() { activeBackend = origActive })
+
+	cfg := config.Default()
+	cfg.Backend.Provider = "mock"
+	cfg.Backend.Mock.MessageDelayMs = 1 // must be >0 or Mock.Init uses 50ms default
+	backends.InitAll(&cfg.Backend)
+	activeBackend = backends.GetInitialized("mock")
+	if activeBackend == nil {
+		t.Fatal("mock backend not initialized")
+	}
+
+	t.Run("empty backend field uses default", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{Prompt: "hello"}
+		go func() {
+			defer server.Close()
+			streamToClientWithBytes(context.Background(), server, handoff)
+		}()
+
+		resp, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Mock backend sends SSE data events
+		if !strings.Contains(string(resp), "data:") {
+			t.Errorf("expected SSE data from mock backend, got: %s", resp)
+		}
+	})
+
+	t.Run("valid backend override routes correctly", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		// Use "typing" backend as the override with its known deterministic
+		// prompt to avoid fortune/fallback. Read just the first SSE data line
+		// and assert it contains typing-specific {char,index} JSON format to
+		// confirm routing (mock backend uses a different format).
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		handoff := backends.HandoffData{Prompt: "Tell me about streaming", Backend: "typing"}
+		go func() {
+			defer server.Close()
+			streamToClientWithBytes(ctx, server, handoff)
+		}()
+
+		reader := bufio.NewReader(client)
+		var firstDataLine string
+		for {
+			line, err := reader.ReadString('\n')
+			if strings.HasPrefix(line, "data:") {
+				firstDataLine = line
+				break
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				t.Fatal(err)
+			}
+		}
+
+		// Typing backend sends {"char":"x","index":N} — mock backend doesn't
+		if !strings.Contains(firstDataLine, `"char"`) || !strings.Contains(firstDataLine, `"index"`) {
+			t.Errorf("expected typing backend {char,index} format, got: %s", firstDataLine)
+		}
+	})
+
+	t.Run("unknown backend falls back to default", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{Prompt: "hello", Backend: "nonexistent"}
+		go func() {
+			defer server.Close()
+			streamToClientWithBytes(context.Background(), server, handoff)
+		}()
+
+		resp, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Should fall back to mock (default) and still produce output
+		if !strings.Contains(string(resp), "data:") {
+			t.Errorf("expected SSE data from default backend after fallback, got: %s", resp)
+		}
+	})
+}
+
+func TestGetInitializedVsGet(t *testing.T) {
+	// All backends should be registered
+	if b := backends.Get("mock"); b == nil {
+		t.Fatal("mock should be in registry")
+	}
+
+	// After InitAll, initialized backends should be available
+	cfg := config.Default()
+	cfg.Backend.Provider = "mock"
+	backends.InitAll(&cfg.Backend)
+
+	if b := backends.GetInitialized("mock"); b == nil {
+		t.Error("mock should be initialized")
+	}
+
+	// Nonexistent backend should return nil from both
+	if b := backends.GetInitialized("nonexistent"); b != nil {
+		t.Errorf("expected nil for nonexistent backend from GetInitialized, got %v", b)
+	}
+	if b := backends.Get("nonexistent"); b != nil {
+		t.Errorf("expected nil for nonexistent backend from Get, got %v", b)
 	}
 }

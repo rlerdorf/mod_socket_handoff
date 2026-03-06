@@ -444,18 +444,15 @@ func main() {
 		slog.Info("GC percent set", "value", gcPercent, "previous", old)
 	}
 
-	// Initialize the selected backend
-	activeBackend = backends.Get(cfg.Backend.Provider)
+	// Initialize all backends for per-request routing, then set the default
+	initialized := backends.InitAll(&cfg.Backend)
+	slog.Info("initialized backends", "backends", initialized)
+	activeBackend = backends.GetInitialized(cfg.Backend.Provider)
 	if activeBackend == nil {
-		available := backends.List()
-		slog.Error("unknown backend", "provider", cfg.Backend.Provider, "available", available)
+		slog.Error("default backend not available", "provider", cfg.Backend.Provider, "initialized", initialized)
 		os.Exit(1)
 	}
-	if err := activeBackend.Init(&cfg.Backend); err != nil {
-		slog.Error("failed to initialize backend", "provider", cfg.Backend.Provider, "error", err)
-		os.Exit(1)
-	}
-	slog.Info("using backend", "name", activeBackend.Name(), "description", activeBackend.Description())
+	slog.Info("default backend", "name", activeBackend.Name(), "description", activeBackend.Description())
 
 	// Set benchmark mode for backends package (skips Prometheus updates)
 	if *benchmarkMode {
@@ -1047,8 +1044,22 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	default:
 	}
 
-	// Stream the response using the active backend
-	bodyBytes, err := activeBackend.Stream(ctx, conn, handoff)
+	// Resolve backend: per-request override or default.
+	// Uses GetInitialized (not Get) so only successfully initialized backends
+	// can be routed to. Log at Debug to prevent client-triggered log amplification.
+	b := activeBackend
+	if handoff.Backend != "" {
+		if override := backends.GetInitialized(handoff.Backend); override != nil {
+			b = override
+		} else if backends.Get(handoff.Backend) != nil {
+			slog.Debug("backend not initialized, using default", "requested", handoff.Backend, "default", activeBackend.Name())
+		} else {
+			slog.Debug("unknown backend in handoff, using default", "requested", handoff.Backend, "default", activeBackend.Name())
+		}
+	}
+
+	// Stream the response using the resolved backend
+	bodyBytes, err := b.Stream(ctx, conn, handoff)
 	totalBytes += bodyBytes
 	if !*benchmarkMode && bodyBytes > 0 {
 		metricBytesSent.Add(float64(bodyBytes))
