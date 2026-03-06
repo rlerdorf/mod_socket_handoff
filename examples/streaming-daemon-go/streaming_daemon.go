@@ -449,8 +449,7 @@ func main() {
 	slog.Info("initialized backends", "backends", initialized)
 	activeBackend = backends.GetInitialized(cfg.Backend.Provider)
 	if activeBackend == nil {
-		available := backends.List()
-		slog.Error("default backend not available", "provider", cfg.Backend.Provider, "available", available)
+		slog.Error("default backend not available", "provider", cfg.Backend.Provider, "initialized", initialized)
 		os.Exit(1)
 	}
 	slog.Info("default backend", "name", activeBackend.Name(), "description", activeBackend.Description())
@@ -1052,6 +1051,8 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	if handoff.Backend != "" {
 		if override := backends.GetInitialized(handoff.Backend); override != nil {
 			b = override
+		} else if backends.Get(handoff.Backend) != nil {
+			slog.Debug("backend not initialized, using default", "requested", handoff.Backend, "default", activeBackend.Name())
 		} else {
 			slog.Debug("unknown backend in handoff, using default", "requested", handoff.Backend, "default", activeBackend.Name())
 		}

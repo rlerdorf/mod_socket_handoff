@@ -770,7 +770,7 @@ func TestPerRequestBackendRouting(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Backend.Provider = "mock"
-	cfg.Backend.Mock.MessageDelayMs = 0
+	cfg.Backend.Mock.MessageDelayMs = 1 // must be >0 or Mock.Init uses 50ms default
 	backends.InitAll(&cfg.Backend)
 	activeBackend = backends.GetInitialized("mock")
 	if activeBackend == nil {
@@ -801,20 +801,40 @@ func TestPerRequestBackendRouting(t *testing.T) {
 		server, client := net.Pipe()
 		defer client.Close()
 
-		// Use "typing" backend as the override (it's simple and initialized)
+		// Use "typing" backend as the override. Reading the full stream would
+		// be slow (typing sleeps per character), so read just enough to confirm
+		// routing and then cancel.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
 		handoff := backends.HandoffData{Prompt: "hello", Backend: "typing"}
 		go func() {
 			defer server.Close()
-			streamToClientWithBytes(context.Background(), server, handoff)
+			streamToClientWithBytes(ctx, server, handoff)
 		}()
 
-		resp, err := io.ReadAll(client)
-		if err != nil {
-			t.Fatal(err)
+		reader := bufio.NewReader(client)
+		var buf bytes.Buffer
+		for {
+			line, err := reader.ReadString('\n')
+			if len(line) > 0 {
+				buf.WriteString(line)
+				if strings.Contains(line, "data:") {
+					break // confirmed typing backend is sending SSE data
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				t.Fatal(err)
+			}
 		}
-		// Typing backend sends SSE data events too
-		if !strings.Contains(string(resp), "data:") {
-			t.Errorf("expected SSE data from typing backend, got: %s", resp)
+		cancel()
+		client.Close()
+
+		if !strings.Contains(buf.String(), "data:") {
+			t.Errorf("expected SSE data from typing backend, got: %s", buf.String())
 		}
 	})
 
@@ -856,6 +876,9 @@ func TestGetInitializedVsGet(t *testing.T) {
 
 	// Nonexistent backend should return nil from both
 	if b := backends.GetInitialized("nonexistent"); b != nil {
-		t.Errorf("expected nil for nonexistent backend, got %v", b)
+		t.Errorf("expected nil for nonexistent backend from GetInitialized, got %v", b)
+	}
+	if b := backends.Get("nonexistent"); b != nil {
+		t.Errorf("expected nil for nonexistent backend from Get, got %v", b)
 	}
 }
