@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"examples/backends"
 	"examples/config"
@@ -799,29 +800,27 @@ func TestPerRequestBackendRouting(t *testing.T) {
 
 	t.Run("valid backend override routes correctly", func(t *testing.T) {
 		server, client := net.Pipe()
-		defer client.Close()
 
-		// Use "typing" backend as the override. Reading the full stream would
-		// be slow (typing sleeps per character), so read just enough to confirm
-		// routing and then cancel.
-		ctx, cancel := context.WithCancel(context.Background())
+		// Use "typing" backend as the override with its known deterministic
+		// prompt to avoid fortune/fallback. Read just the first SSE data line
+		// and assert it contains typing-specific {char,index} JSON format to
+		// confirm routing (mock backend uses a different format).
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		handoff := backends.HandoffData{Prompt: "hello", Backend: "typing"}
+		handoff := backends.HandoffData{Prompt: "Tell me about streaming", Backend: "typing"}
 		go func() {
 			defer server.Close()
 			streamToClientWithBytes(ctx, server, handoff)
 		}()
 
 		reader := bufio.NewReader(client)
-		var buf bytes.Buffer
+		var firstDataLine string
 		for {
 			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
-				buf.WriteString(line)
-				if strings.Contains(line, "data:") {
-					break // confirmed typing backend is sending SSE data
-				}
+			if strings.HasPrefix(line, "data:") {
+				firstDataLine = line
+				break
 			}
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -833,8 +832,9 @@ func TestPerRequestBackendRouting(t *testing.T) {
 		cancel()
 		client.Close()
 
-		if !strings.Contains(buf.String(), "data:") {
-			t.Errorf("expected SSE data from typing backend, got: %s", buf.String())
+		// Typing backend sends {"char":"x","index":N} — mock backend doesn't
+		if !strings.Contains(firstDataLine, `"char"`) || !strings.Contains(firstDataLine, `"index"`) {
+			t.Errorf("expected typing backend {char,index} format, got: %s", firstDataLine)
 		}
 	})
 
