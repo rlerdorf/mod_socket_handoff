@@ -32,24 +32,6 @@ Streaming LLM responses:
 
 ## How It Works
 
-```mermaid
----
-config:
-  look: handDrawn
-  mirrorActors: false
-
----
-sequenceDiagram
-    Client->>+Apache: Request
-    Note right of Apache: PHP auth + Business logic<br>X-Socket-Handoff<br>X-Handoff-Data (json)
-    Apache->>Daemon: fd (SCM_RIGHTS) + json data
-    Note right of Apache: Apache worker released
-    deactivate Apache
-    Daemon->>+LLM: Prompt
-    LLM-->>Daemon: streamed response
-    Daemon-->>Client: SSE response
-```
-
 <p align="center">
   <img src="Architecture.svg" alt="Architecture" />
 </p>
