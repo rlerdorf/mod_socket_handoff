@@ -447,10 +447,10 @@ func main() {
 	// Initialize all backends for per-request routing, then set the default
 	initialized := backends.InitAll(&cfg.Backend)
 	slog.Info("initialized backends", "backends", initialized)
-	activeBackend = backends.Get(cfg.Backend.Provider)
+	activeBackend = backends.GetInitialized(cfg.Backend.Provider)
 	if activeBackend == nil {
 		available := backends.List()
-		slog.Error("unknown default backend", "provider", cfg.Backend.Provider, "available", available)
+		slog.Error("default backend not available", "provider", cfg.Backend.Provider, "available", available)
 		os.Exit(1)
 	}
 	slog.Info("default backend", "name", activeBackend.Name(), "description", activeBackend.Description())
@@ -1045,13 +1045,15 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	default:
 	}
 
-	// Resolve backend: per-request override or default
+	// Resolve backend: per-request override or default.
+	// Uses GetInitialized (not Get) so only successfully initialized backends
+	// can be routed to. Log at Debug to prevent client-triggered log amplification.
 	b := activeBackend
 	if handoff.Backend != "" {
-		if override := backends.Get(handoff.Backend); override != nil {
+		if override := backends.GetInitialized(handoff.Backend); override != nil {
 			b = override
 		} else {
-			slog.Warn("unknown backend in handoff, using default", "requested", handoff.Backend, "default", activeBackend.Name())
+			slog.Debug("unknown backend in handoff, using default", "requested", handoff.Backend, "default", activeBackend.Name())
 		}
 	}
 

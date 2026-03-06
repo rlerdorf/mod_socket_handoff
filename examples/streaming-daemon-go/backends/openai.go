@@ -137,9 +137,13 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 		useHTTP2 = false
 	}
 
-	// Validate API key
+	// Validate API key — warn if this is the default backend, debug otherwise
 	if openaiAPIKey == "" {
-		slog.Debug("OPENAI_API_KEY not set, API calls will fail")
+		if cfg != nil && cfg.Provider == "openai" {
+			slog.Warn("OPENAI_API_KEY not set, API calls will fail")
+		} else {
+			slog.Debug("OPENAI_API_KEY not set, API calls will fail")
+		}
 	}
 
 	if openaiInsecure {
