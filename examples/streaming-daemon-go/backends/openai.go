@@ -139,7 +139,7 @@ func (o *OpenAI) Init(cfg *config.BackendConfig) error {
 
 	// Validate API key
 	if openaiAPIKey == "" {
-		slog.Warn("OPENAI_API_KEY not set, API calls will fail")
+		slog.Debug("OPENAI_API_KEY not set, API calls will fail")
 	}
 
 	if openaiInsecure {

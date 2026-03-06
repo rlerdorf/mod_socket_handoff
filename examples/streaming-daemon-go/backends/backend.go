@@ -4,6 +4,7 @@ package backends
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"net"
 	"slices"
@@ -38,6 +39,9 @@ type HandoffData struct {
 	LangGraphURL   string         `json:"langgraph_url,omitempty"`    // Per-request API base URL override
 	LangGraphKey   string         `json:"langgraph_api_key,omitempty"` // Per-request API key override
 	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segment = no override for that position)
+
+	// Per-request backend selection (overrides the daemon's default provider)
+	Backend string `json:"backend,omitempty"`
 
 	// Image handoff fields (for multimodal requests)
 	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
@@ -116,4 +120,22 @@ func All() map[string]Backend {
 	result := make(map[string]Backend, len(registry))
 	maps.Copy(result, registry)
 	return result
+}
+
+// InitAll initializes all registered backends with the given config.
+// Returns the names of successfully initialized backends.
+// Backends that fail to initialize are logged but not fatal.
+func InitAll(cfg *config.BackendConfig) []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	var initialized []string
+	for name, b := range registry {
+		if err := b.Init(cfg); err != nil {
+			slog.Warn("backend init failed", "backend", name, "error", err)
+			continue
+		}
+		initialized = append(initialized, name)
+	}
+	slices.Sort(initialized)
+	return initialized
 }

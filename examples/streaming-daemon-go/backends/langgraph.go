@@ -143,7 +143,7 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 
 	// Validate API key
 	if apiKey == "" {
-		slog.Warn("LANGGRAPH_API_KEY not set, API calls will fail")
+		slog.Debug("LANGGRAPH_API_KEY not set, API calls will fail")
 	}
 
 	if insecure {

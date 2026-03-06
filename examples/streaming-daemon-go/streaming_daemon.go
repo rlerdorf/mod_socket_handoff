@@ -444,18 +444,16 @@ func main() {
 		slog.Info("GC percent set", "value", gcPercent, "previous", old)
 	}
 
-	// Initialize the selected backend
+	// Initialize all backends for per-request routing, then set the default
+	initialized := backends.InitAll(&cfg.Backend)
+	slog.Info("initialized backends", "backends", initialized)
 	activeBackend = backends.Get(cfg.Backend.Provider)
 	if activeBackend == nil {
 		available := backends.List()
-		slog.Error("unknown backend", "provider", cfg.Backend.Provider, "available", available)
+		slog.Error("unknown default backend", "provider", cfg.Backend.Provider, "available", available)
 		os.Exit(1)
 	}
-	if err := activeBackend.Init(&cfg.Backend); err != nil {
-		slog.Error("failed to initialize backend", "provider", cfg.Backend.Provider, "error", err)
-		os.Exit(1)
-	}
-	slog.Info("using backend", "name", activeBackend.Name(), "description", activeBackend.Description())
+	slog.Info("default backend", "name", activeBackend.Name(), "description", activeBackend.Description())
 
 	// Set benchmark mode for backends package (skips Prometheus updates)
 	if *benchmarkMode {
@@ -1047,8 +1045,18 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	default:
 	}
 
-	// Stream the response using the active backend
-	bodyBytes, err := activeBackend.Stream(ctx, conn, handoff)
+	// Resolve backend: per-request override or default
+	b := activeBackend
+	if handoff.Backend != "" {
+		if override := backends.Get(handoff.Backend); override != nil {
+			b = override
+		} else {
+			slog.Warn("unknown backend in handoff, using default", "requested", handoff.Backend, "default", activeBackend.Name())
+		}
+	}
+
+	// Stream the response using the resolved backend
+	bodyBytes, err := b.Stream(ctx, conn, handoff)
 	totalBytes += bodyBytes
 	if !*benchmarkMode && bodyBytes > 0 {
 		metricBytesSent.Add(float64(bodyBytes))
