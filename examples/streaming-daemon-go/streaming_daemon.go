@@ -57,9 +57,10 @@ const (
 	DefaultMaxConnections = 50000
 
 	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
-	// via the Unix socket. The data originates from the X-Handoff-Data HTTP header.
-	// This should be large enough to hold LLM prompts. Increase if needed.
-	// Note: Apache's LimitRequestFieldSize (default 8190) limits individual header size.
+	// via the Unix socket. The data originates from the X-Handoff-Data response
+	// header set by PHP. Apache has no size limit on response headers, so the
+	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
+	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
 	MaxHandoffDataSize = 65536 // 64KB
 
 	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
