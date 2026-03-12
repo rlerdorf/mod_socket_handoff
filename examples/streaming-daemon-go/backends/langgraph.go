@@ -513,9 +513,6 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 	buf = appendJSONEscaped(buf, assistantID)
 	buf = append(buf, `","input":{"messages":[`...)
 
-	// Determine if we have an image to attach
-	hasImage := handoff.ImageBase64 != ""
-
 	// Use messages array if provided, otherwise fall back to single prompt
 	if len(handoff.Messages) > 0 {
 		for i, msg := range handoff.Messages {
@@ -526,15 +523,12 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
 			buf = append(buf, `","content":`...)
 
-			// Attach image to the last message if present
+			// Attach images to the last message if present
 			isLastMessage := i == len(handoff.Messages)-1
-			if hasImage && isLastMessage {
-				buf = appendMultimodalContent(buf, msg.Content, handoff.ImageBase64, handoff.ImageMimeType)
+			if isLastMessage && len(handoff.ResolvedImages) > 0 {
+				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages)
 			} else {
-				// Simple text content
-				buf = append(buf, '"')
-				buf = appendJSONEscaped(buf, msg.Content)
-				buf = append(buf, '"')
+				buf = appendMultimodalContent(buf, msg.Content, nil)
 			}
 			buf = append(buf, `}`...)
 		}
@@ -544,13 +538,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			prompt = "Hello"
 		}
 		buf = append(buf, `{"type":"human","content":`...)
-		if hasImage {
-			buf = appendMultimodalContent(buf, prompt, handoff.ImageBase64, handoff.ImageMimeType)
-		} else {
-			buf = append(buf, '"')
-			buf = appendJSONEscaped(buf, prompt)
-			buf = append(buf, '"')
-		}
+		buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages)
 		buf = append(buf, `}`...)
 	}
 
@@ -614,10 +602,13 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 
 // appendMultimodalContent appends a multimodal content array with text and image parts.
 // Format: [{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:..."}}]
-func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeType string) []byte {
-	// Default MIME type if not specified
-	if mimeType == "" {
-		mimeType = "image/jpeg"
+// If images is empty, appends the text as a simple JSON string (no array wrapper).
+func appendMultimodalContent(buf []byte, text string, images []ImageData) []byte {
+	if len(images) == 0 {
+		buf = append(buf, '"')
+		buf = appendJSONEscaped(buf, text)
+		buf = append(buf, '"')
+		return buf
 	}
 
 	// Start content array
@@ -628,14 +619,17 @@ func appendMultimodalContent(buf []byte, text string, imageBase64 string, mimeTy
 	buf = appendJSONEscaped(buf, text)
 	buf = append(buf, `"}`...)
 
-	// Add image part if base64 data is present.
-	// Base64 is inherently JSON-safe ([A-Za-z0-9+/=]), but mimeType is user-controlled
-	// so we escape it to prevent JSON injection from malformed values.
-	if imageBase64 != "" {
+	// Add image parts. Base64 is inherently JSON-safe ([A-Za-z0-9+/=]),
+	// but mimeType is user-controlled so we escape it to prevent JSON injection.
+	for _, img := range images {
+		mimeType := img.MimeType
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
 		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
 		buf = appendJSONEscaped(buf, mimeType)
 		buf = append(buf, `;base64,`...)
-		buf = append(buf, imageBase64...)
+		buf = append(buf, img.Base64...)
 		buf = append(buf, `"}}`...)
 	}
 

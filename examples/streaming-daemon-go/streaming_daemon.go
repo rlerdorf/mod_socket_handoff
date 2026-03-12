@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,6 +30,7 @@ import (
 	_ "net/http/pprof" // Register pprof handlers for profiling
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -61,7 +63,7 @@ const (
 	// header set by PHP. Apache has no size limit on response headers, so the
 	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
 	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
-	MaxHandoffDataSize = 65536 // 64KB
+	MaxHandoffDataSize = 131072 // 128KB
 
 	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
 	DefaultMetricsAddr = "127.0.0.1:9090"
@@ -105,6 +107,10 @@ var activeBackend backends.Backend
 // maxStreamDuration is the maximum duration for a single stream.
 // Set once in main(), read-only after. Zero means no timeout.
 var maxStreamDuration time.Duration
+
+// imageDir is the allowed directory for image file reads.
+// Set once in main(), read-only after.
+var imageDir string
 
 // currentLogging tracks the last applied logging config so partial
 // config reloads can preserve unspecified fields. Protected by
@@ -413,6 +419,18 @@ func main() {
 	}
 	if maxStreamDuration > 0 {
 		slog.Info("max stream duration configured", "duration", maxStreamDuration)
+	}
+
+	// Set image directory (default from config, which defaults to /run/handoff-images).
+	// Uses /run/ instead of /tmp to avoid systemd PrivateTmp namespace issues
+	// where Apache and the daemon see different /tmp directories.
+	imageDir = cfg.Server.ImageDir
+	if imageDir != "" {
+		if err := os.MkdirAll(imageDir, 0750); err != nil {
+			slog.Warn("could not create image directory", "path", imageDir, "error", err)
+		} else {
+			slog.Info("image directory ready", "path", imageDir)
+		}
 	}
 
 	// Configure memory limit (flag > config)
@@ -847,6 +865,20 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		slog.Info("socket handoff received with empty data")
 	}
 
+	// Resolve image paths to inline base64 data
+	if err := resolveImages(&handoff, imageDir); err != nil {
+		slog.Error("image resolution failed", "error", err)
+		errorResponse := "HTTP/1.1 400 Bad Request\r\n" +
+			"Content-Type: text/plain\r\n" +
+			"Connection: close\r\n" +
+			"\r\n" +
+			"Image path not allowed\n"
+		if _, writeErr := clientConn.Write([]byte(errorResponse)); writeErr != nil {
+			slog.Error("failed to write 400 response", "error", writeErr)
+		}
+		return
+	}
+
 	// Per-stream context timeout to prevent runaway/hung streams
 	var streamCtx context.Context
 	var streamCancel context.CancelFunc
@@ -1074,6 +1106,89 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	conns := atomic.LoadInt64(&activeConns)
 	streams := atomic.LoadInt64(&activeStreams)
 	fmt.Fprintf(w, `{"status":"ok","active_streams":%d,"active_connections":%d}`, streams, conns)
+}
+
+// resolveImages populates handoff.ResolvedImages from inline images and file paths.
+// Legacy single-image fields are migrated to the plural fields for backward compatibility.
+// Files are read, base64-encoded, and deleted (best-effort). Returns error only for
+// path traversal violations; file read errors are logged and skipped.
+func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
+	// Migrate legacy single-image fields
+	if handoff.ImageBase64 != "" {
+		mime := handoff.ImageMimeType
+		if mime == "" {
+			mime = "image/jpeg"
+		}
+		handoff.Images = append(handoff.Images, backends.ImageData{
+			Base64:   handoff.ImageBase64,
+			MimeType: mime,
+		})
+		handoff.ImageBase64 = ""
+		handoff.ImageMimeType = ""
+	}
+	if handoff.ImagePath != "" {
+		handoff.ImagePaths = append(handoff.ImagePaths, handoff.ImagePath)
+		handoff.ImagePath = ""
+	}
+
+	// Reset ResolvedImages to prevent duplication if called more than once
+	handoff.ResolvedImages = handoff.ResolvedImages[:0]
+
+	// Copy inline images to ResolvedImages
+	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
+
+	// Load file images
+	for _, path := range handoff.ImagePaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			slog.Warn("image path abs failed", "path", path, "error", err)
+			continue
+		}
+		cleaned := filepath.Clean(absPath)
+		// Ensure the cleaned path is under the allowed directory using
+		// filepath.Rel for robust containment checking.
+		rel, relErr := filepath.Rel(allowedDir, cleaned)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
+		}
+
+		data, err := os.ReadFile(cleaned)
+		if err != nil {
+			slog.Warn("image file read failed", "path", cleaned, "error", err)
+			continue
+		}
+
+		encoded := base64.StdEncoding.EncodeToString(data)
+		mime := mimeTypeFromExt(filepath.Ext(cleaned))
+
+		// Best-effort delete
+		if err := os.Remove(cleaned); err != nil {
+			slog.Warn("image file delete failed", "path", cleaned, "error", err)
+		}
+
+		handoff.ResolvedImages = append(handoff.ResolvedImages, backends.ImageData{
+			Base64:   encoded,
+			MimeType: mime,
+		})
+	}
+
+	return nil
+}
+
+// mimeTypeFromExt returns the MIME type for a file extension.
+func mimeTypeFromExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return "image/jpeg"
+	}
 }
 
 // classifyError returns a short label for the error type for metrics.

@@ -881,3 +881,197 @@ func TestGetInitializedVsGet(t *testing.T) {
 		t.Errorf("expected nil for nonexistent backend from Get, got %v", b)
 	}
 }
+
+func TestResolveImages(t *testing.T) {
+	t.Run("legacy single image fields migrated", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			ImageBase64:   "dGVzdA==",
+			ImageMimeType: "image/png",
+		}
+		if err := resolveImages(&handoff, "/tmp"); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 1 {
+			t.Fatalf("expected 1 resolved image, got %d", len(handoff.ResolvedImages))
+		}
+		if handoff.ResolvedImages[0].Base64 != "dGVzdA==" {
+			t.Errorf("base64 = %q, want %q", handoff.ResolvedImages[0].Base64, "dGVzdA==")
+		}
+		if handoff.ResolvedImages[0].MimeType != "image/png" {
+			t.Errorf("mime = %q, want %q", handoff.ResolvedImages[0].MimeType, "image/png")
+		}
+		// Legacy fields should be cleared
+		if handoff.ImageBase64 != "" {
+			t.Error("ImageBase64 should be cleared after migration")
+		}
+		if handoff.ImageMimeType != "" {
+			t.Error("ImageMimeType should be cleared after migration")
+		}
+	})
+
+	t.Run("legacy single image defaults to jpeg", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			ImageBase64: "dGVzdA==",
+		}
+		if err := resolveImages(&handoff, "/tmp"); err != nil {
+			t.Fatal(err)
+		}
+		if handoff.ResolvedImages[0].MimeType != "image/jpeg" {
+			t.Errorf("mime = %q, want %q", handoff.ResolvedImages[0].MimeType, "image/jpeg")
+		}
+	})
+
+	t.Run("inline images copied to resolved", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			Images: []backends.ImageData{
+				{Base64: "aW1n", MimeType: "image/png"},
+				{Base64: "aW1nMg==", MimeType: "image/gif"},
+			},
+		}
+		if err := resolveImages(&handoff, "/tmp"); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 2 {
+			t.Fatalf("expected 2 resolved images, got %d", len(handoff.ResolvedImages))
+		}
+	})
+
+	t.Run("image file read and deleted", func(t *testing.T) {
+		dir := t.TempDir()
+		imgPath := filepath.Join(dir, "test.png")
+		if err := os.WriteFile(imgPath, []byte("fake png data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			ImagePaths: []string{imgPath},
+		}
+		if err := resolveImages(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 1 {
+			t.Fatalf("expected 1 resolved image, got %d", len(handoff.ResolvedImages))
+		}
+		if handoff.ResolvedImages[0].MimeType != "image/png" {
+			t.Errorf("mime = %q, want image/png", handoff.ResolvedImages[0].MimeType)
+		}
+		// File should be deleted
+		if _, err := os.Stat(imgPath); !os.IsNotExist(err) {
+			t.Error("image file should have been deleted")
+		}
+	})
+
+	t.Run("legacy image_path migrated and read", func(t *testing.T) {
+		dir := t.TempDir()
+		imgPath := filepath.Join(dir, "legacy.jpg")
+		if err := os.WriteFile(imgPath, []byte("jpeg data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			ImagePath: imgPath,
+		}
+		if err := resolveImages(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 1 {
+			t.Fatalf("expected 1 resolved image, got %d", len(handoff.ResolvedImages))
+		}
+		if handoff.ImagePath != "" {
+			t.Error("ImagePath should be cleared after migration")
+		}
+	})
+
+	t.Run("path traversal blocked", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			ImagePaths: []string{"/etc/passwd"},
+		}
+		err := resolveImages(&handoff, "/tmp")
+		if err == nil {
+			t.Fatal("expected error for path traversal")
+		}
+		if !strings.Contains(err.Error(), "outside allowed directory") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("missing file skipped with warning", func(t *testing.T) {
+		dir := t.TempDir()
+		handoff := backends.HandoffData{
+			ImagePaths: []string{filepath.Join(dir, "nonexistent.png")},
+		}
+		if err := resolveImages(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 0 {
+			t.Errorf("expected 0 resolved images for missing file, got %d", len(handoff.ResolvedImages))
+		}
+	})
+
+	t.Run("mixed inline and file images", func(t *testing.T) {
+		dir := t.TempDir()
+		imgPath := filepath.Join(dir, "photo.webp")
+		if err := os.WriteFile(imgPath, []byte("webp data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			Images:     []backends.ImageData{{Base64: "aW5saW5l", MimeType: "image/png"}},
+			ImagePaths: []string{imgPath},
+		}
+		if err := resolveImages(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 2 {
+			t.Fatalf("expected 2 resolved images, got %d", len(handoff.ResolvedImages))
+		}
+		// First should be the inline one
+		if handoff.ResolvedImages[0].MimeType != "image/png" {
+			t.Errorf("first image mime = %q, want image/png", handoff.ResolvedImages[0].MimeType)
+		}
+		// Second should be the file one
+		if handoff.ResolvedImages[1].MimeType != "image/webp" {
+			t.Errorf("second image mime = %q, want image/webp", handoff.ResolvedImages[1].MimeType)
+		}
+	})
+
+	t.Run("no images is a no-op", func(t *testing.T) {
+		handoff := backends.HandoffData{Prompt: "hello"}
+		if err := resolveImages(&handoff, "/tmp"); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedImages) != 0 {
+			t.Errorf("expected 0 resolved images, got %d", len(handoff.ResolvedImages))
+		}
+	})
+
+	t.Run("mime type from various extensions", func(t *testing.T) {
+		dir := t.TempDir()
+		exts := map[string]string{
+			"test.jpg":  "image/jpeg",
+			"test.jpeg": "image/jpeg",
+			"test.png":  "image/png",
+			"test.gif":  "image/gif",
+			"test.webp": "image/webp",
+			"test.bmp":  "image/jpeg", // unknown defaults to jpeg
+		}
+		for filename, wantMime := range exts {
+			path := filepath.Join(dir, filename)
+			if err := os.WriteFile(path, []byte("data"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			handoff := backends.HandoffData{
+				ImagePaths: []string{path},
+			}
+			if err := resolveImages(&handoff, dir); err != nil {
+				t.Fatalf("ext %s: %v", filename, err)
+			}
+			if len(handoff.ResolvedImages) != 1 {
+				t.Fatalf("ext %s: expected 1 image, got %d", filename, len(handoff.ResolvedImages))
+			}
+			if handoff.ResolvedImages[0].MimeType != wantMime {
+				t.Errorf("ext %s: mime = %q, want %q", filename, handoff.ResolvedImages[0].MimeType, wantMime)
+			}
+		}
+	})
+}
