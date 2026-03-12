@@ -98,9 +98,10 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 		{
 			name: "multimodal content with image (single prompt)",
 			handoff: HandoffData{
-				Prompt:        "What's in this image?",
-				ImageBase64:   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-				ImageMimeType: "image/png",
+				Prompt: "What's in this image?",
+				ResolvedImages: []ImageData{
+					{Base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", MimeType: "image/png"},
+				},
 			},
 			assistantID:      "vision-agent",
 			defaultStreamMode: "messages-tuple",
@@ -120,8 +121,9 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Role: "assistant", Content: "Hi there!"},
 					{Role: "user", Content: "Describe this image"},
 				},
-				ImageBase64:   "SGVsbG8gV29ybGQ=",
-				ImageMimeType: "image/jpeg",
+				ResolvedImages: []ImageData{
+					{Base64: "SGVsbG8gV29ybGQ=", MimeType: "image/jpeg"},
+				},
 			},
 			assistantID:      "agent",
 			defaultStreamMode: "messages-tuple",
@@ -136,8 +138,10 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 		{
 			name: "multimodal content defaults to jpeg mime type",
 			handoff: HandoffData{
-				Prompt:      "Analyze",
-				ImageBase64: "dGVzdA==",
+				Prompt: "Analyze",
+				ResolvedImages: []ImageData{
+					{Base64: "dGVzdA=="},
+				},
 			},
 			assistantID:      "agent",
 			defaultStreamMode: "messages-tuple",
@@ -145,6 +149,24 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				`"content":[`,
 				`{"type":"text","text":"Analyze"}`,
 				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,dGVzdA=="}}`,
+			},
+		},
+		{
+			name: "multiple images attached to last message",
+			handoff: HandoffData{
+				Prompt: "Compare these images",
+				ResolvedImages: []ImageData{
+					{Base64: "aW1hZ2Ux", MimeType: "image/png"},
+					{Base64: "aW1hZ2Uy", MimeType: "image/jpeg"},
+				},
+			},
+			assistantID:      "agent",
+			defaultStreamMode: "messages-tuple",
+			wantContains: []string{
+				`"content":[`,
+				`{"type":"text","text":"Compare these images"}`,
+				`{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2Ux"}}`,
+				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,aW1hZ2Uy"}}`,
 			},
 		},
 		{

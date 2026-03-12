@@ -44,9 +44,23 @@ type HandoffData struct {
 	Backend string `json:"backend,omitempty"`
 
 	// Image handoff fields (for multimodal requests)
-	ImagePath     string `json:"image_path,omitempty"`      // Path to image file on disk (daemon reads and deletes)
-	ImageBase64   string `json:"image_base64,omitempty"`    // Base64-encoded image data (max ~48KB to fit within 64KB handoff limit; use ImagePath for larger images)
-	ImageMimeType string `json:"image_mime_type,omitempty"` // MIME type of the image (e.g., "image/jpeg")
+	// Legacy single-image fields (deprecated, use Images/ImagePaths instead)
+	ImagePath     string `json:"image_path,omitempty"`      // Deprecated: use ImagePaths
+	ImageBase64   string `json:"image_base64,omitempty"`    // Deprecated: use Images
+	ImageMimeType string `json:"image_mime_type,omitempty"` // Deprecated: use Images with MimeType
+
+	// Multi-image support
+	Images     []ImageData `json:"images,omitempty"`      // Inline base64 images (small images only)
+	ImagePaths []string    `json:"image_paths,omitempty"` // Paths to image files on disk (daemon reads, encodes, deletes)
+
+	// Computed field populated by resolveImages() before Stream()
+	ResolvedImages []ImageData `json:"-"`
+}
+
+// ImageData represents a single image for multimodal requests.
+type ImageData struct {
+	Base64   string `json:"base64"`
+	MimeType string `json:"mime_type,omitempty"` // defaults to "image/jpeg"
 }
 
 // Backend defines the interface for streaming backends.
