@@ -873,7 +873,9 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 			"Connection: close\r\n" +
 			"\r\n" +
 			"Image path not allowed\n"
-		clientConn.Write([]byte(errorResponse))
+		if _, writeErr := clientConn.Write([]byte(errorResponse)); writeErr != nil {
+			slog.Error("failed to write 400 response", "error", writeErr)
+		}
 		return
 	}
 
@@ -1129,6 +1131,9 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 		handoff.ImagePath = ""
 	}
 
+	// Reset ResolvedImages to prevent duplication if called more than once
+	handoff.ResolvedImages = handoff.ResolvedImages[:0]
+
 	// Copy inline images to ResolvedImages
 	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
 
@@ -1140,10 +1145,10 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 			continue
 		}
 		cleaned := filepath.Clean(absPath)
-		// Ensure the cleaned path is under the allowed directory.
-		// Add trailing separator to prevent prefix attacks (e.g. /tmp2 matching /tmp).
-		allowedPrefix := filepath.Clean(allowedDir) + string(filepath.Separator)
-		if !strings.HasPrefix(cleaned, allowedPrefix) {
+		// Ensure the cleaned path is under the allowed directory using
+		// filepath.Rel for robust containment checking.
+		rel, relErr := filepath.Rel(allowedDir, cleaned)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
 		}
 
