@@ -241,9 +241,6 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
     struct cmsghdr *cmsg;
     char dummy = '\0';
     ssize_t sent;
-    size_t remaining;
-    const char *p;
-    ssize_t n;
 
     *fd_was_sent = 0;
 
@@ -284,6 +281,12 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         }
     }
 
+    /*
+     * With SOCK_SEQPACKET, sendmsg() is atomic: the entire message
+     * (data + SCM_RIGHTS fd) is delivered as one unit, or not at all.
+     * There are no partial writes, so fd_was_sent and data delivery
+     * are always consistent.
+     */
     sent = sendmsg(unix_sock, &msg, 0);
     if (sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -293,48 +296,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         return -1;
     }
 
-    /*
-     * The fd has been duplicated to the receiving process via SCM_RIGHTS.
-     * From this point on, the caller MUST commit to the handoff (swap in
-     * dummy socket) even if the remaining data sends fail, because the
-     * daemon now holds a live duplicate of the client fd.
-     */
-    *fd_was_sent = 1;
-
     if (data && data_len > 0 && (size_t)sent < data_len) {
-        remaining = data_len - (size_t)sent;
-        p = data + sent;
-        while (remaining > 0) {
-            /* Wait for socket to be ready before each send */
-            int remaining_ms = remaining_timeout_ms(deadline);
-            if (remaining_ms <= 0) {
-                errno = ETIMEDOUT;
-                return -1;
-            }
-            if (wait_for_write(unix_sock,
-                               remaining_ms < timeout_ms ? remaining_ms : timeout_ms) <= 0) {
-                return -1;
-            }
-
-            n = send(unix_sock, p, remaining, 0);
-            if (n < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    errno = ETIMEDOUT;
-                }
-                return -1;
-            }
-            if (n == 0) {
-                /* No progress possible: treat as error to avoid infinite loop */
-                errno = EPIPE;
-                return -1;
-            }
-            remaining -= (size_t)n;
-            p += n;
-        }
+        /* Should not happen with SOCK_SEQPACKET (atomic delivery) */
+        errno = EMSGSIZE;
+        return -1;
     }
+
+    *fd_was_sent = 1;
 
     return 0;
 }
@@ -362,20 +330,25 @@ static int connect_to_socket(const char *socket_path,
     *returned_errno = 0;
 
     /*
+     * Use SOCK_SEQPACKET for atomic message delivery. Unlike SOCK_STREAM,
+     * SEQPACKET preserves message boundaries: a single sendmsg() is
+     * delivered as a single recvmsg() on the daemon side. This prevents
+     * the fd from arriving without its accompanying JSON data.
+     *
      * Use SOCK_NONBLOCK and SOCK_CLOEXEC if available (Linux 2.6.27+).
      * SOCK_NONBLOCK eliminates one fcntl() call per connection.
      * SOCK_CLOEXEC prevents fd leaks to child processes (CGI, piped logs).
      */
 #ifdef SOCK_NONBLOCK
-    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (sock >= 0) {
         sock_nonblock = 1;
     } else if (errno == EINVAL) {
         /* SOCK_NONBLOCK/SOCK_CLOEXEC not supported, fall back */
-        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     }
 #else
-    sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
 #endif
 
     if (sock < 0) {

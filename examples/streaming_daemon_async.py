@@ -922,7 +922,7 @@ async def main_async(args: argparse.Namespace) -> None:
         pass  # Socket doesn't exist yet, nothing to remove
 
     # Create Unix socket
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(socket_path)
     server.listen(args.backlog)

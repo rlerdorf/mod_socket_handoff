@@ -117,7 +117,7 @@ def main():
         pass
 
     # Create Unix socket
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     server.bind(SOCKET_PATH)
     server.listen(5)
 

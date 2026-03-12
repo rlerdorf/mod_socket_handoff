@@ -57,9 +57,10 @@ const (
 	DefaultMaxConnections = 50000
 
 	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
-	// via the Unix socket. The data originates from the X-Handoff-Data HTTP header.
-	// This should be large enough to hold LLM prompts. Increase if needed.
-	// Note: Apache's LimitRequestFieldSize (default 8190) limits individual header size.
+	// via the Unix socket. The data originates from the X-Handoff-Data response
+	// header set by PHP. Apache has no size limit on response headers, so the
+	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
+	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
 	MaxHandoffDataSize = 65536 // 64KB
 
 	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
@@ -514,7 +515,7 @@ func main() {
 		}
 
 		// Probe to see if another daemon is listening
-		probeConn, probeErr := net.DialTimeout("unix", cfg.Server.SocketPath, time.Second)
+		probeConn, probeErr := net.DialTimeout("unixpacket", cfg.Server.SocketPath, time.Second)
 		if probeErr == nil {
 			// Connection succeeded - another daemon is running
 			probeConn.Close()
@@ -543,8 +544,8 @@ func main() {
 		}
 	}
 
-	// Create Unix socket listener
-	listener, err := net.Listen("unix", cfg.Server.SocketPath)
+	// Create Unix socket listener (SOCK_SEQPACKET for atomic message delivery)
+	listener, err := net.Listen("unixpacket", cfg.Server.SocketPath)
 	if err != nil {
 		slog.Error("failed to listen", "path", cfg.Server.SocketPath, "error", err)
 		os.Exit(1)

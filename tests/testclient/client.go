@@ -45,7 +45,7 @@ func (c *Client) Handoff(handoffData []byte) (*HandoffResult, error) {
 	}
 
 	// Connect to daemon Unix socket
-	daemonConn, err := net.DialTimeout("unix", c.daemonSocket, c.timeout)
+	daemonConn, err := net.DialTimeout("unixpacket", c.daemonSocket, c.timeout)
 	if err != nil {
 		clientConn.Close()
 		responseConn.Close()

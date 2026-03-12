@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
     unlink(socket_path);
 
     /* Create Unix socket */
-    int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    int server = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (server < 0) {
         perror("socket");
         return 1;

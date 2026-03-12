@@ -171,7 +171,7 @@ func doConnection(cfg *Config, stats *Stats, connID int, readerPool *sync.Pool) 
 	defer responseConn.Close()
 
 	// Connect to daemon Unix socket
-	daemonConn, err := net.Dial("unix", cfg.SocketPath)
+	daemonConn, err := net.Dial("unixpacket", cfg.SocketPath)
 	if err != nil {
 		clientConn.Close()
 		atomic.AddInt64(&stats.ConnectionsFailed, 1)

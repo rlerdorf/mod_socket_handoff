@@ -27,7 +27,7 @@ int server_check_stale_socket(const char *path) {
     }
 
     /* Try to connect - if it succeeds, another daemon is running */
-    int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+    int probe = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (probe < 0) {
         return -1;
     }
@@ -63,9 +63,16 @@ int server_check_stale_socket(const char *path) {
         return -1;
     }
 
-    /* Other error - try to remove anyway */
-    unlink(path);
-    return 0;
+    if (errno == EPROTOTYPE) {
+        /* Socket type mismatch (e.g., old SOCK_STREAM daemon still running).
+         * Treat as in-use to avoid unlinking a live daemon's socket. */
+        fprintf(stderr, "Socket %s is a different type (possible version mismatch)\n", path);
+        return -1;
+    }
+
+    /* Other error (EACCES, etc.) - can't determine if socket is in use */
+    fprintf(stderr, "Cannot determine if socket %s is in use: %s\n", path, strerror(errno));
+    return -1;
 }
 
 int server_create_listener(daemon_ctx_t *ctx) {
@@ -75,7 +82,7 @@ int server_create_listener(daemon_ctx_t *ctx) {
     }
 
     /* Create socket */
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         perror("socket");
         return -1;
