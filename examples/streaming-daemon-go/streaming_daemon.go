@@ -514,7 +514,7 @@ func main() {
 		}
 
 		// Probe to see if another daemon is listening
-		probeConn, probeErr := net.DialTimeout("unix", cfg.Server.SocketPath, time.Second)
+		probeConn, probeErr := net.DialTimeout("unixpacket", cfg.Server.SocketPath, time.Second)
 		if probeErr == nil {
 			// Connection succeeded - another daemon is running
 			probeConn.Close()
@@ -543,8 +543,8 @@ func main() {
 		}
 	}
 
-	// Create Unix socket listener
-	listener, err := net.Listen("unix", cfg.Server.SocketPath)
+	// Create Unix socket listener (SOCK_SEQPACKET for atomic message delivery)
+	listener, err := net.Listen("unixpacket", cfg.Server.SocketPath)
 	if err != nil {
 		slog.Error("failed to listen", "path", cfg.Server.SocketPath, "error", err)
 		os.Exit(1)

@@ -85,7 +85,7 @@ func recvFd(conn *net.UnixConn) (int, []byte, error) {
 
 // createSocketPair creates a connected pair of Unix sockets.
 func createSocketPair() (*net.UnixConn, *net.UnixConn, error) {
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
 	if err != nil {
 		return nil, nil, err
 	}

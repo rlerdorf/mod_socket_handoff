@@ -212,7 +212,7 @@ function main(): void
     }
 
     // Create Unix socket
-    $server = socket_create(AF_UNIX, SOCK_STREAM, 0);
+    $server = socket_create(AF_UNIX, SOCK_SEQPACKET, 0);
     if ($server === false) {
         die("socket_create failed: " . socket_strerror(socket_last_error()) . "\n");
     }

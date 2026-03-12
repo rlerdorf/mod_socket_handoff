@@ -27,7 +27,7 @@ int server_check_stale_socket(const char *path) {
     }
 
     /* Try to connect - if it succeeds, another daemon is running */
-    int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+    int probe = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (probe < 0) {
         return -1;
     }
@@ -75,7 +75,7 @@ int server_create_listener(daemon_ctx_t *ctx) {
     }
 
     /* Create socket */
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         perror("socket");
         return -1;

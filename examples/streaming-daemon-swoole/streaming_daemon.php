@@ -1071,7 +1071,7 @@ if (file_exists($socketPath)) {
 
 // Create Unix socket BEFORE enabling Swoole hooks
 // This ensures socket_recvmsg() works correctly for SCM_RIGHTS
-$server = socket_create(AF_UNIX, SOCK_STREAM, 0);
+$server = socket_create(AF_UNIX, SOCK_SEQPACKET, 0);
 if ($server === false) {
     fwrite(STDERR, "socket_create failed: " . socket_strerror(socket_last_error()) . "\n");
     exit(1);
