@@ -296,13 +296,13 @@ static int send_fd_with_data(int unix_sock, int fd_to_send,
         return -1;
     }
 
-    *fd_was_sent = 1;
-
     if (data && data_len > 0 && (size_t)sent < data_len) {
         /* Should not happen with SOCK_SEQPACKET (atomic delivery) */
         errno = EMSGSIZE;
         return -1;
     }
+
+    *fd_was_sent = 1;
 
     return 0;
 }

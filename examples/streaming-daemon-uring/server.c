@@ -63,9 +63,16 @@ int server_check_stale_socket(const char *path) {
         return -1;
     }
 
-    /* Other error - try to remove anyway */
-    unlink(path);
-    return 0;
+    if (errno == EPROTOTYPE) {
+        /* Socket type mismatch (e.g., old SOCK_STREAM daemon still running).
+         * Treat as in-use to avoid unlinking a live daemon's socket. */
+        fprintf(stderr, "Socket %s is a different type (possible version mismatch)\n", path);
+        return -1;
+    }
+
+    /* Other error (EACCES, etc.) - can't determine if socket is in use */
+    fprintf(stderr, "Cannot determine if socket %s is in use: %s\n", path, strerror(errno));
+    return -1;
 }
 
 int server_create_listener(daemon_ctx_t *ctx) {
