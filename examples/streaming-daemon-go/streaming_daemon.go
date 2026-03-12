@@ -63,7 +63,7 @@ const (
 	// header set by PHP. Apache has no size limit on response headers, so the
 	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
 	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
-	MaxHandoffDataSize = 65536 // 64KB
+	MaxHandoffDataSize = 131072 // 128KB
 
 	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
 	DefaultMetricsAddr = "127.0.0.1:9090"
