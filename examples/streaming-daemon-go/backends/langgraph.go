@@ -679,8 +679,9 @@ func parsePlaceholders(text string, attachments map[string]ResolvedAttachment) [
 // attachment placeholders. If no attachments or images are present, emits a simple
 // JSON string. If only text attachments are present, inlines them into the text.
 // If any image attachment or legacy image is present, builds a content array.
-// Attachments not referenced by any placeholder are appended at the end
-// (unreferenced images first, then legacy images), so images work without
+// Attachments not referenced by any placeholder are appended at the end:
+// unreferenced text is concatenated to any trailing text part, then
+// unreferenced images, then legacy images. This lets images work without
 // requiring a placeholder in the prompt.
 func appendContentWithAttachments(buf []byte, text string, attachments map[string]ResolvedAttachment, legacyImages []ImageData) []byte {
 	parts := parsePlaceholders(text, attachments)

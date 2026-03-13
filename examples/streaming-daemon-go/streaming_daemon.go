@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -1252,10 +1254,11 @@ func fileTypeFromExt(ext string) (mimeType string, isText bool, err error) {
 // inlined rather than base64-encoded. Used when the MIME type is provided explicitly
 // via attachment_types (bypassing extension-based detection).
 func mimeIsText(mimeType string) bool {
-	if strings.HasPrefix(mimeType, "text/") {
+	lower := strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(lower, "text/") {
 		return true
 	}
-	switch mimeType {
+	switch lower {
 	case "application/json", "application/xml", "application/yaml":
 		return true
 	}
@@ -1280,19 +1283,25 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 
 	for refName, relPath := range handoff.Attachments {
 		absPath := filepath.Join(allowedDir, relPath)
+		cleaned := filepath.Clean(absPath)
 
-		// Resolve symlinks to prevent escape from allowedDir via symlink targets
-		cleaned, err := filepath.EvalSymlinks(absPath)
-		if err != nil {
-			slog.Warn("attachment path resolution failed", "ref", refName, "path", absPath, "error", err)
-			continue
-		}
-
-		// Containment check on the resolved (symlink-free) path
+		// First containment check on the literal path (catches ../ traversal)
 		rel, relErr := filepath.Rel(allowedDir, cleaned)
 		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("attachment path %q (ref %q) is outside allowed directory", cleaned, refName)
 		}
+
+		// Resolve symlinks and re-check containment (catches symlink escape)
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			slog.Warn("attachment file not found", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+		rel, relErr = filepath.Rel(allowedDir, resolved)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("attachment path %q (ref %q) resolves outside allowed directory", resolved, refName)
+		}
+		cleaned = resolved
 
 		// Determine MIME type: explicit override from attachment_types, or detect from extension
 		var mimeType string
@@ -1308,42 +1317,57 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			}
 		}
 
-		// Check file size before reading to avoid OOM from large files under load
-		info, err := os.Stat(cleaned)
+		// Open-fstat-read pattern to avoid TOCTOU race between path check and read.
+		// By opening first, we hold a fd to the actual file — subsequent fstat/read
+		// operate on the opened inode, not the pathname.
+		f, err := os.Open(cleaned)
 		if err != nil {
+			slog.Warn("attachment file open failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
 			slog.Warn("attachment file stat failed", "ref", refName, "path", cleaned, "error", err)
 			continue
 		}
 		size := info.Size()
 		if isText && size > maxTextFileSize {
+			f.Close()
 			return fmt.Errorf("attachment %q: text file exceeds %d byte limit (got %d)", refName, maxTextFileSize, size)
 		}
 		if !isText && size > maxBinaryFileSize {
+			f.Close()
 			return fmt.Errorf("attachment %q: binary file exceeds %d byte limit (got %d)", refName, maxBinaryFileSize, size)
 		}
 
-		data, err := os.ReadFile(cleaned)
+		data, err := io.ReadAll(f)
+		f.Close()
 		if err != nil {
 			slog.Warn("attachment file read failed", "ref", refName, "path", cleaned, "error", err)
 			continue
 		}
 
-		var resolved backends.ResolvedAttachment
-		resolved.MimeType = mimeType
-		resolved.IsText = isText
+		var att backends.ResolvedAttachment
+		att.MimeType = mimeType
+		att.IsText = isText
 
 		if isText {
-			resolved.Text = string(data)
+			if !utf8.Valid(data) {
+				return fmt.Errorf("attachment %q: text file contains invalid UTF-8", refName)
+			}
+			att.Text = string(data)
 		} else {
-			resolved.Base64 = base64.StdEncoding.EncodeToString(data)
+			att.Base64 = base64.StdEncoding.EncodeToString(data)
 		}
 
-		// Best-effort delete
+		// Best-effort delete by pathname (the original staged file)
 		if err := os.Remove(cleaned); err != nil {
 			slog.Warn("attachment file delete failed", "ref", refName, "path", cleaned, "error", err)
 		}
 
-		handoff.ResolvedAttachments[refName] = resolved
+		handoff.ResolvedAttachments[refName] = att
 	}
 
 	return nil

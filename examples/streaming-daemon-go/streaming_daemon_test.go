@@ -1399,12 +1399,12 @@ func TestResolveAttachments(t *testing.T) {
 		}
 		err := resolveAttachments(&handoff, dir)
 		if err == nil {
-			// If the file doesn't exist, it's skipped (not an error).
-			// But if it does exist, it should be blocked.
+			// EvalSymlinks may fail if /etc/passwd doesn't exist (containers).
+			// Either way, the attachment must not be resolved.
 			if _, ok := handoff.ResolvedAttachments["evil"]; ok {
 				t.Error("symlink escape should not resolve successfully")
 			}
-		} else if !strings.Contains(err.Error(), "outside allowed directory") {
+		} else if !strings.Contains(err.Error(), "resolves outside allowed directory") {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
