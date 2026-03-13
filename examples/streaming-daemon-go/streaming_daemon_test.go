@@ -1360,4 +1360,78 @@ func TestResolveAttachments(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("empty allowedDir rejected", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"f": "test.txt"},
+		}
+		err := resolveAttachments(&handoff, "")
+		if err == nil {
+			t.Fatal("expected error for empty allowedDir")
+		}
+		if !strings.Contains(err.Error(), "data_dir is not configured") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("relative allowedDir rejected", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"f": "test.txt"},
+		}
+		err := resolveAttachments(&handoff, "relative/path")
+		if err == nil {
+			t.Fatal("expected error for relative allowedDir")
+		}
+		if !strings.Contains(err.Error(), "data_dir is not configured") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("symlink escape blocked", func(t *testing.T) {
+		dir := t.TempDir()
+		// Create a symlink inside dir that points outside
+		linkPath := filepath.Join(dir, "escape")
+		if err := os.Symlink("/etc", linkPath); err != nil {
+			t.Skip("symlinks not supported")
+		}
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"evil": "escape/passwd"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			// If the file doesn't exist, it's skipped (not an error).
+			// But if it does exist, it should be blocked.
+			if _, ok := handoff.ResolvedAttachments["evil"]; ok {
+				t.Error("symlink escape should not resolve successfully")
+			}
+		} else if !strings.Contains(err.Error(), "outside allowed directory") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("binary file over 20MB limit", func(t *testing.T) {
+		dir := t.TempDir()
+		bigFile := filepath.Join(dir, "big.png")
+		// Create a file just over the limit using sparse file (fast, no actual disk write)
+		f, err := os.Create(bigFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(maxBinaryFileSize + 1); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		f.Close()
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"big": "big.png"},
+		}
+		err = resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for oversized binary file")
+		}
+		if !strings.Contains(err.Error(), "binary file exceeds") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }

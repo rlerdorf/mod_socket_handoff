@@ -185,6 +185,12 @@ LangGraph-specific handoff data fields:
 | `stream_mode` | Stream modes to use (e.g., `["messages"]`, `["events"]`); defaults to configured `LANGGRAPH_STREAM_MODE` |
 | `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
 | `attachments` | Map of ref names to file paths (relative to `data_dir`) for multimodal requests — see [Attachments](#attachments-multimodal-requests) |
+| `attachment_types` | Optional map of ref names to MIME types (overrides extension-based detection) |
+| `images` | Array of `{"base64": "...", "mime_type": "..."}` for inline images already in memory |
+| `image_base64` | *(deprecated)* Single inline base64 image — use `images` array instead |
+| `image_mime_type` | *(deprecated)* MIME type for `image_base64` — defaults to `image/jpeg` |
+| `image_path` | *(deprecated)* Single image file path — use `attachments` instead |
+| `image_paths` | *(deprecated)* Array of image file paths — use `attachments` instead |
 
 ### Typing Backend
 

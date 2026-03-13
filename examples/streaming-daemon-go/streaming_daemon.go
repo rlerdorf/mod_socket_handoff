@@ -886,7 +886,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 			"Content-Type: text/plain\r\n" +
 			"Connection: close\r\n" +
 			"\r\n" +
-			"Attachment error: " + err.Error() + "\n"
+			"Attachment not allowed\n"
 		if _, writeErr := clientConn.Write([]byte(errorResponse)); writeErr != nil {
 			slog.Error("failed to write 400 response", "error", writeErr)
 		}
@@ -1205,8 +1205,13 @@ func mimeTypeFromExt(ext string) string {
 	}
 }
 
-// maxTextFileSize is the maximum size for text file attachments (1MB).
-const maxTextFileSize = 1 << 20
+const (
+	// maxTextFileSize is the maximum size for text file attachments (1MB).
+	maxTextFileSize = 1 << 20
+	// maxBinaryFileSize is the maximum size for binary file attachments (20MB).
+	// Base64 encoding expands data by ~33%, so a 20MB file becomes ~27MB in the request body.
+	maxBinaryFileSize = 20 << 20
+)
 
 // fileTypeFromExt returns the MIME type and whether it's a text type for a file extension.
 // Returns an error for unknown extensions (in the attachments path, unknown types should error).
@@ -1259,23 +1264,34 @@ func mimeIsText(mimeType string) bool {
 
 // resolveAttachments populates handoff.ResolvedAttachments from the Attachments map.
 // Paths are relative to allowedDir. Files are read, typed, and deleted (best-effort).
-// Returns error for path traversal violations or unknown file types.
+// Returns error for path traversal violations, unknown file types, or oversized files.
 // File read errors are logged and skipped (warning, not error).
 func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error {
 	if len(handoff.Attachments) == 0 {
 		return nil
 	}
 
+	// Fail fast if data_dir is not configured
+	if !filepath.IsAbs(allowedDir) {
+		return fmt.Errorf("data_dir is not configured (required for attachments)")
+	}
+
 	handoff.ResolvedAttachments = make(map[string]backends.ResolvedAttachment, len(handoff.Attachments))
 
 	for refName, relPath := range handoff.Attachments {
 		absPath := filepath.Join(allowedDir, relPath)
-		cleaned := filepath.Clean(absPath)
 
-		// Containment check: ensure the path is under the allowed directory
+		// Resolve symlinks to prevent escape from allowedDir via symlink targets
+		cleaned, err := filepath.EvalSymlinks(absPath)
+		if err != nil {
+			slog.Warn("attachment path resolution failed", "ref", refName, "path", absPath, "error", err)
+			continue
+		}
+
+		// Containment check on the resolved (symlink-free) path
 		rel, relErr := filepath.Rel(allowedDir, cleaned)
 		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("attachment path %q (ref %q) is outside allowed directory %q", cleaned, refName, allowedDir)
+			return fmt.Errorf("attachment path %q (ref %q) is outside allowed directory", cleaned, refName)
 		}
 
 		// Determine MIME type: explicit override from attachment_types, or detect from extension
@@ -1292,6 +1308,20 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			}
 		}
 
+		// Check file size before reading to avoid OOM from large files under load
+		info, err := os.Stat(cleaned)
+		if err != nil {
+			slog.Warn("attachment file stat failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+		size := info.Size()
+		if isText && size > maxTextFileSize {
+			return fmt.Errorf("attachment %q: text file exceeds %d byte limit (got %d)", refName, maxTextFileSize, size)
+		}
+		if !isText && size > maxBinaryFileSize {
+			return fmt.Errorf("attachment %q: binary file exceeds %d byte limit (got %d)", refName, maxBinaryFileSize, size)
+		}
+
 		data, err := os.ReadFile(cleaned)
 		if err != nil {
 			slog.Warn("attachment file read failed", "ref", refName, "path", cleaned, "error", err)
@@ -1303,9 +1333,6 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		resolved.IsText = isText
 
 		if isText {
-			if len(data) > maxTextFileSize {
-				return fmt.Errorf("attachment %q: text file exceeds %d byte limit (got %d)", refName, maxTextFileSize, len(data))
-			}
 			resolved.Text = string(data)
 		} else {
 			resolved.Base64 = base64.StdEncoding.EncodeToString(data)
