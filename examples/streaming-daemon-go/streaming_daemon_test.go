@@ -1075,3 +1075,449 @@ func TestResolveImages(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveImagesSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	// Create a symlink inside dir that points outside
+	linkPath := filepath.Join(dir, "escape")
+	if err := os.Symlink("/etc", linkPath); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	handoff := backends.HandoffData{
+		ImagePaths: []string{filepath.Join(dir, "escape", "passwd")},
+	}
+	err := resolveImages(&handoff, dir)
+	if err == nil {
+		// EvalSymlinks may fail if /etc/passwd doesn't exist (containers).
+		// Either way, the image must not be resolved.
+		if len(handoff.ResolvedImages) > 0 {
+			t.Error("symlink escape should not resolve successfully")
+		}
+	} else if !strings.Contains(err.Error(), "resolves outside allowed directory") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestMimeIsText(t *testing.T) {
+	tests := []struct {
+		mime string
+		want bool
+	}{
+		{"text/plain", true},
+		{"Text/Plain", true},
+		{"text/html; charset=utf-8", true},
+		{"application/json", true},
+		{"APPLICATION/JSON", true},
+		{"application/json; charset=utf-8", true},
+		{"application/xml", true},
+		{"application/yaml", true},
+		{"image/png", false},
+		{"application/octet-stream", false},
+		{"  text/plain  ", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		got := mimeIsText(tt.mime)
+		if got != tt.want {
+			t.Errorf("mimeIsText(%q) = %v, want %v", tt.mime, got, tt.want)
+		}
+	}
+}
+
+func TestFileTypeFromExt(t *testing.T) {
+	tests := []struct {
+		ext      string
+		wantMime string
+		wantText bool
+		wantErr  bool
+	}{
+		{".png", "image/png", false, false},
+		{".jpg", "image/jpeg", false, false},
+		{".jpeg", "image/jpeg", false, false},
+		{".gif", "image/gif", false, false},
+		{".webp", "image/webp", false, false},
+		{".pdf", "application/pdf", false, false},
+		{".txt", "text/plain", true, false},
+		{".md", "text/markdown", true, false},
+		{".csv", "text/csv", true, false},
+		{".json", "application/json", true, false},
+		{".xml", "text/xml", true, false},
+		{".html", "text/html", true, false},
+		{".yaml", "text/yaml", true, false},
+		{".yml", "text/yaml", true, false},
+		{".log", "text/plain", true, false},
+		{".bmp", "", false, true},
+		{".exe", "", false, true},
+		{"", "", false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ext, func(t *testing.T) {
+			mime, isText, err := fileTypeFromExt(tt.ext)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if mime != tt.wantMime {
+				t.Errorf("mime = %q, want %q", mime, tt.wantMime)
+			}
+			if isText != tt.wantText {
+				t.Errorf("isText = %v, want %v", isText, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestResolveAttachments(t *testing.T) {
+	t.Run("text file read and deleted", func(t *testing.T) {
+		dir := t.TempDir()
+		txtPath := filepath.Join(dir, "notes.txt")
+		if err := os.WriteFile(txtPath, []byte("hello world"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"notes": "notes.txt"},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		att, ok := handoff.ResolvedAttachments["notes"]
+		if !ok {
+			t.Fatal("expected 'notes' in resolved attachments")
+		}
+		if !att.IsText {
+			t.Error("expected IsText=true")
+		}
+		if att.Text != "hello world" {
+			t.Errorf("text = %q, want %q", att.Text, "hello world")
+		}
+		if att.MimeType != "text/plain" {
+			t.Errorf("mime = %q, want text/plain", att.MimeType)
+		}
+		// File should be deleted
+		if _, err := os.Stat(txtPath); !os.IsNotExist(err) {
+			t.Error("text file should have been deleted")
+		}
+	})
+
+	t.Run("image file read and base64 encoded", func(t *testing.T) {
+		dir := t.TempDir()
+		imgPath := filepath.Join(dir, "photo.png")
+		if err := os.WriteFile(imgPath, []byte("fake png"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"photo": "photo.png"},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		att, ok := handoff.ResolvedAttachments["photo"]
+		if !ok {
+			t.Fatal("expected 'photo' in resolved attachments")
+		}
+		if att.IsText {
+			t.Error("expected IsText=false for image")
+		}
+		if att.Base64 == "" {
+			t.Error("expected base64 to be populated")
+		}
+		if att.MimeType != "image/png" {
+			t.Errorf("mime = %q, want image/png", att.MimeType)
+		}
+		// File should be deleted
+		if _, err := os.Stat(imgPath); !os.IsNotExist(err) {
+			t.Error("image file should have been deleted")
+		}
+	})
+
+	t.Run("path traversal blocked", func(t *testing.T) {
+		dir := t.TempDir()
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"evil": "../../../etc/passwd"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for path traversal")
+		}
+		if !strings.Contains(err.Error(), "outside allowed directory") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("missing file skipped with warning", func(t *testing.T) {
+		dir := t.TempDir()
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"missing": "nonexistent.txt"},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := handoff.ResolvedAttachments["missing"]; ok {
+			t.Error("expected missing file to be skipped")
+		}
+	})
+
+	t.Run("mixed text and image attachments", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("# Title"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pic.jpg"), []byte("jpeg data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{
+				"doc": "doc.md",
+				"pic": "pic.jpg",
+			},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		if len(handoff.ResolvedAttachments) != 2 {
+			t.Fatalf("expected 2 resolved attachments, got %d", len(handoff.ResolvedAttachments))
+		}
+		if !handoff.ResolvedAttachments["doc"].IsText {
+			t.Error("doc should be text")
+		}
+		if handoff.ResolvedAttachments["pic"].IsText {
+			t.Error("pic should not be text")
+		}
+	})
+
+	t.Run("empty map is no-op", func(t *testing.T) {
+		handoff := backends.HandoffData{Prompt: "hello"}
+		if err := resolveAttachments(&handoff, "/tmp"); err != nil {
+			t.Fatal(err)
+		}
+		if handoff.ResolvedAttachments != nil {
+			t.Error("expected nil ResolvedAttachments for empty map")
+		}
+	})
+
+	t.Run("text file over 1MB limit", func(t *testing.T) {
+		dir := t.TempDir()
+		bigFile := filepath.Join(dir, "big.txt")
+		data := make([]byte, maxTextFileSize+1)
+		for i := range data {
+			data[i] = 'x'
+		}
+		if err := os.WriteFile(bigFile, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"big": "big.txt"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for oversized text file")
+		}
+		if !strings.Contains(err.Error(), "limit") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("attachment_types overrides extension detection", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "photo.dat"), []byte("jpeg data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments:     map[string]string{"photo": "photo.dat"},
+			AttachmentTypes: map[string]string{"photo": "image/jpeg"},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		att, ok := handoff.ResolvedAttachments["photo"]
+		if !ok {
+			t.Fatal("expected 'photo' in resolved attachments")
+		}
+		if att.MimeType != "image/jpeg" {
+			t.Errorf("mime = %q, want image/jpeg", att.MimeType)
+		}
+		if att.IsText {
+			t.Error("image/jpeg should not be text")
+		}
+		if att.Base64 == "" {
+			t.Error("expected base64 to be populated")
+		}
+	})
+
+	t.Run("attachment_types text override inlines content", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("plain text"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments:     map[string]string{"doc": "data.bin"},
+			AttachmentTypes: map[string]string{"doc": "text/plain"},
+		}
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatal(err)
+		}
+		att := handoff.ResolvedAttachments["doc"]
+		if !att.IsText {
+			t.Error("text/plain should be text")
+		}
+		if att.Text != "plain text" {
+			t.Errorf("text = %q, want %q", att.Text, "plain text")
+		}
+	})
+
+	t.Run("unknown extension allowed when attachment_types provided", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "file.xyz"), []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments:     map[string]string{"f": "file.xyz"},
+			AttachmentTypes: map[string]string{"f": "application/octet-stream"},
+		}
+		// Should succeed because attachment_types bypasses extension detection
+		if err := resolveAttachments(&handoff, dir); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := handoff.ResolvedAttachments["f"]; !ok {
+			t.Error("expected 'f' in resolved attachments")
+		}
+	})
+
+	t.Run("empty attachment_types override rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "file.dat"), []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments:     map[string]string{"f": "file.dat"},
+			AttachmentTypes: map[string]string{"f": "  "},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for empty attachment_types override")
+		}
+		if !strings.Contains(err.Error(), "empty or whitespace-only") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("unknown extension errors", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "file.xyz"), []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"f": "file.xyz"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for unknown extension")
+		}
+		if !strings.Contains(err.Error(), "unknown file extension") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty allowedDir rejected", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"f": "test.txt"},
+		}
+		err := resolveAttachments(&handoff, "")
+		if err == nil {
+			t.Fatal("expected error for empty allowedDir")
+		}
+		if !strings.Contains(err.Error(), "data_dir is not configured") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("relative allowedDir rejected", func(t *testing.T) {
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"f": "test.txt"},
+		}
+		err := resolveAttachments(&handoff, "relative/path")
+		if err == nil {
+			t.Fatal("expected error for relative allowedDir")
+		}
+		if !strings.Contains(err.Error(), "data_dir is not configured") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("symlink escape blocked", func(t *testing.T) {
+		dir := t.TempDir()
+		// Create a symlink inside dir that points outside
+		linkPath := filepath.Join(dir, "escape")
+		if err := os.Symlink("/etc", linkPath); err != nil {
+			t.Skip("symlinks not supported")
+		}
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"evil": "escape/passwd"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			// EvalSymlinks may fail if /etc/passwd doesn't exist (containers).
+			// Either way, the attachment must not be resolved.
+			if _, ok := handoff.ResolvedAttachments["evil"]; ok {
+				t.Error("symlink escape should not resolve successfully")
+			}
+		} else if !strings.Contains(err.Error(), "resolves outside allowed directory") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("binary file over 20MB limit", func(t *testing.T) {
+		dir := t.TempDir()
+		bigFile := filepath.Join(dir, "big.png")
+		// Create a file just over the limit using sparse file (fast, no actual disk write)
+		f, err := os.Create(bigFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(maxBinaryFileSize + 1); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		f.Close()
+
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"big": "big.png"},
+		}
+		err = resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for oversized binary file")
+		}
+		if !strings.Contains(err.Error(), "binary file exceeds") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("FIFO skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		fifoPath := filepath.Join(dir, "pipe.txt")
+		if err := syscall.Mkfifo(fifoPath, 0600); err != nil {
+			t.Skip("cannot create FIFO:", err)
+		}
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"p": "pipe.txt"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// FIFO should be skipped (not a regular file), not resolved
+		if _, ok := handoff.ResolvedAttachments["p"]; ok {
+			t.Error("FIFO should not be resolved as attachment")
+		}
+	})
+}

@@ -29,7 +29,7 @@ type ServerConfig struct {
 	PprofAddr           string `yaml:"pprof_addr"`
 	MemLimit            string `yaml:"mem_limit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
 	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 = not set (use -gc-percent flag for GOGC=0)
-	ImageDir            string `yaml:"image_dir"`  // Allowed directory for image file reads (default: /run/handoff-images)
+	DataDir             string `yaml:"data_dir"`   // Allowed directory for attachment file reads (default: /run/handoff-data)
 }
 
 // BackendConfig contains backend selection and configuration.
@@ -71,13 +71,14 @@ type LangGraphConfig struct {
 // LangGraphProfileConfig contains per-profile overrides for LangGraph settings.
 // All fields are optional; unset fields inherit from the top-level LangGraphConfig.
 type LangGraphProfileConfig struct {
-	APIKey       string `yaml:"api_key"`
-	APIBase      string `yaml:"api_base"`
-	APISocket    string `yaml:"api_socket"`
-	AssistantID  string `yaml:"assistant_id"`
-	StreamMode   string `yaml:"stream_mode"`
-	HTTP2Enabled *bool  `yaml:"http2_enabled"`
-	InsecureSSL  *bool  `yaml:"insecure_ssl"` // Pointer to distinguish unset from false
+	APIKey        string `yaml:"api_key"`
+	APIBase       string `yaml:"api_base"`
+	APISocket     string `yaml:"api_socket"`
+	AssistantID   string `yaml:"assistant_id"`
+	StreamMode    string `yaml:"stream_mode"`
+	ContentFormat string `yaml:"content_format"` // "openai" (default) or "anthropic"
+	HTTP2Enabled  *bool  `yaml:"http2_enabled"`
+	InsecureSSL   *bool  `yaml:"insecure_ssl"` // Pointer to distinguish unset from false
 }
 
 // MockConfig contains mock backend settings.
@@ -103,8 +104,31 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
-// Load reads and parses a YAML config file.
+// Load reads and parses a YAML config file. Omitted fields keep their
+// default values from Default().
 func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
+	}
+
+	cfg := Default()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// LoadRaw reads and parses a YAML config file without applying defaults.
+// Omitted string fields will be empty; note that bool/int zero values are
+// indistinguishable from explicitly set false/0.
+// Used by reloadConfig() to detect which string fields were explicitly set.
+func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
@@ -138,8 +162,8 @@ func (c *Config) Validate() error {
 	if c.Server.SocketPath != "" && !filepath.IsAbs(c.Server.SocketPath) {
 		return fmt.Errorf("server.socket_path must be absolute path")
 	}
-	if c.Server.ImageDir != "" && !filepath.IsAbs(c.Server.ImageDir) {
-		return fmt.Errorf("server.image_dir must be absolute path")
+	if c.Server.DataDir != "" && !filepath.IsAbs(c.Server.DataDir) {
+		return fmt.Errorf("server.data_dir must be absolute path")
 	}
 	if c.Backend.OpenAI.APISocket != "" && !filepath.IsAbs(c.Backend.OpenAI.APISocket) {
 		return fmt.Errorf("backend.openai.api_socket must be absolute path")
@@ -150,6 +174,9 @@ func (c *Config) Validate() error {
 	for name, profile := range c.Backend.LangGraph.Profiles {
 		if profile.APISocket != "" && !filepath.IsAbs(profile.APISocket) {
 			return fmt.Errorf("backend.langgraph.profiles.%s.api_socket must be absolute path", name)
+		}
+		if profile.ContentFormat != "" && profile.ContentFormat != "openai" && profile.ContentFormat != "anthropic" {
+			return fmt.Errorf("backend.langgraph.profiles.%s.content_format must be \"openai\" or \"anthropic\", got %q", name, profile.ContentFormat)
 		}
 	}
 
@@ -252,7 +279,7 @@ func Default() *Config {
 			SocketMode:          0660,
 			MaxConnections:      50000,
 			MaxStreamDurationMs: 300000,
-			ImageDir:            "/run/handoff-images",
+			DataDir:             "/run/handoff-data",
 		},
 		Backend: BackendConfig{
 			Provider:     "mock",

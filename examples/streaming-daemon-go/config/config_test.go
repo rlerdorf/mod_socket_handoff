@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -131,6 +133,61 @@ func TestValidateGCPercent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Default()
 			cfg.Server.GCPercent = tc.gcPercent
+			err := cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadPreservesDefaults(t *testing.T) {
+	// A minimal config file should inherit defaults for omitted fields
+	tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(tmpFile, []byte("backend:\n  provider: openai\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults := Default()
+	if cfg.Server.DataDir != defaults.Server.DataDir {
+		t.Errorf("DataDir = %q, want default %q", cfg.Server.DataDir, defaults.Server.DataDir)
+	}
+	if cfg.Server.SocketPath != defaults.Server.SocketPath {
+		t.Errorf("SocketPath = %q, want default %q", cfg.Server.SocketPath, defaults.Server.SocketPath)
+	}
+	if cfg.Server.MaxConnections != defaults.Server.MaxConnections {
+		t.Errorf("MaxConnections = %d, want default %d", cfg.Server.MaxConnections, defaults.Server.MaxConnections)
+	}
+	if cfg.Logging.Level != defaults.Logging.Level {
+		t.Errorf("Logging.Level = %q, want default %q", cfg.Logging.Level, defaults.Logging.Level)
+	}
+	if cfg.Metrics.ListenAddr != defaults.Metrics.ListenAddr {
+		t.Errorf("Metrics.ListenAddr = %q, want default %q", cfg.Metrics.ListenAddr, defaults.Metrics.ListenAddr)
+	}
+}
+
+func TestValidateContentFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		wantErr bool
+	}{
+		{"empty is valid (defaults to openai)", "", false},
+		{"openai is valid", "openai", false},
+		{"anthropic is valid", "anthropic", false},
+		{"unknown is invalid", "vertex_ai", true},
+		{"typo is invalid", "OpenAI", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Backend.LangGraph.Profiles = map[string]LangGraphProfileConfig{
+				"test": {ContentFormat: tc.format},
+			}
 			err := cfg.Validate()
 			if (err != nil) != tc.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -108,9 +110,9 @@ var activeBackend backends.Backend
 // Set once in main(), read-only after. Zero means no timeout.
 var maxStreamDuration time.Duration
 
-// imageDir is the allowed directory for image file reads.
+// dataDir is the allowed directory for attachment file reads (images, text, etc.).
 // Set once in main(), read-only after.
-var imageDir string
+var dataDir string
 
 // currentLogging tracks the last applied logging config so partial
 // config reloads can preserve unspecified fields. Protected by
@@ -306,7 +308,7 @@ func reloadConfig() {
 
 	slog.Info("reloading configuration", "path", *configFile)
 
-	newCfg, err := config.Load(*configFile)
+	newCfg, err := config.LoadRaw(*configFile)
 	if err != nil {
 		slog.Error("config reload failed, keeping current config", "error", err)
 		return
@@ -421,15 +423,15 @@ func main() {
 		slog.Info("max stream duration configured", "duration", maxStreamDuration)
 	}
 
-	// Set image directory (default from config, which defaults to /run/handoff-images).
+	// Set data directory (default from config, which defaults to /run/handoff-data).
 	// Uses /run/ instead of /tmp to avoid systemd PrivateTmp namespace issues
 	// where Apache and the daemon see different /tmp directories.
-	imageDir = cfg.Server.ImageDir
-	if imageDir != "" {
-		if err := os.MkdirAll(imageDir, 0750); err != nil {
-			slog.Warn("could not create image directory", "path", imageDir, "error", err)
+	dataDir = cfg.Server.DataDir
+	if dataDir != "" {
+		if err := os.MkdirAll(dataDir, 0750); err != nil {
+			slog.Warn("could not create data directory", "path", dataDir, "error", err)
 		} else {
-			slog.Info("image directory ready", "path", imageDir)
+			slog.Info("data directory ready", "path", dataDir)
 		}
 	}
 
@@ -866,13 +868,27 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}
 
 	// Resolve image paths to inline base64 data
-	if err := resolveImages(&handoff, imageDir); err != nil {
+	if err := resolveImages(&handoff, dataDir); err != nil {
 		slog.Error("image resolution failed", "error", err)
 		errorResponse := "HTTP/1.1 400 Bad Request\r\n" +
 			"Content-Type: text/plain\r\n" +
 			"Connection: close\r\n" +
 			"\r\n" +
 			"Image path not allowed\n"
+		if _, writeErr := clientConn.Write([]byte(errorResponse)); writeErr != nil {
+			slog.Error("failed to write 400 response", "error", writeErr)
+		}
+		return
+	}
+
+	// Resolve generalized attachments (text files, images, etc.)
+	if err := resolveAttachments(&handoff, dataDir); err != nil {
+		slog.Error("attachment resolution failed", "error", err)
+		errorResponse := "HTTP/1.1 400 Bad Request\r\n" +
+			"Content-Type: text/plain\r\n" +
+			"Connection: close\r\n" +
+			"\r\n" +
+			"Attachment not allowed\n"
 		if _, writeErr := clientConn.Write([]byte(errorResponse)); writeErr != nil {
 			slog.Error("failed to write 400 response", "error", writeErr)
 		}
@@ -1110,8 +1126,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 // resolveImages populates handoff.ResolvedImages from inline images and file paths.
 // Legacy single-image fields are migrated to the plural fields for backward compatibility.
-// Files are read, base64-encoded, and deleted (best-effort). Returns error only for
-// path traversal violations; file read errors are logged and skipped.
+// Files are read, base64-encoded, and deleted (best-effort). Returns error for path
+// traversal violations and oversized files; other file read errors are logged and skipped.
 func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 	// Migrate legacy single-image fields
 	if handoff.ImageBase64 != "" {
@@ -1137,6 +1153,14 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 	// Copy inline images to ResolvedImages
 	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
 
+	// Canonicalize allowedDir so resolved paths compare correctly even when
+	// allowedDir contains symlinks (e.g. /var/run -> /run).
+	if allowedDir != "" {
+		if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
+			allowedDir = canon
+		}
+	}
+
 	// Load file images
 	for _, path := range handoff.ImagePaths {
 		absPath, err := filepath.Abs(path)
@@ -1145,14 +1169,53 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 			continue
 		}
 		cleaned := filepath.Clean(absPath)
-		// Ensure the cleaned path is under the allowed directory using
-		// filepath.Rel for robust containment checking.
+		// First containment check on the literal path (catches ../ traversal)
 		rel, relErr := filepath.Rel(allowedDir, cleaned)
 		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
 		}
 
-		data, err := os.ReadFile(cleaned)
+		// Resolve symlinks in all path components and re-check containment
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			slog.Warn("image file resolve failed", "path", cleaned, "error", err)
+			continue
+		}
+		rel, relErr = filepath.Rel(allowedDir, resolved)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("image path %q resolves outside allowed directory %q", resolved, allowedDir)
+		}
+		cleaned = resolved
+
+		// Open-fstat-read pattern matching resolveAttachments() security
+		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			slog.Warn("image file open failed", "path", cleaned, "error", err)
+			continue
+		}
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			slog.Warn("image file stat failed", "path", cleaned, "error", err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			f.Close()
+			slog.Warn("image is not a regular file", "path", cleaned, "mode", info.Mode())
+			continue
+		}
+		if info.Size() > maxBinaryFileSize {
+			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
+			return fmt.Errorf("image %q exceeds %d byte limit (got %d)", cleaned, maxBinaryFileSize, info.Size())
+		}
+
+		data, err := io.ReadAll(io.LimitReader(f, maxBinaryFileSize+1))
+		f.Close()
+		if int64(len(data)) > maxBinaryFileSize {
+			os.Remove(cleaned) // best-effort cleanup of staged file
+			return fmt.Errorf("image %q exceeds %d byte limit during read", cleaned, maxBinaryFileSize)
+		}
 		if err != nil {
 			slog.Warn("image file read failed", "path", cleaned, "error", err)
 			continue
@@ -1189,6 +1252,213 @@ func mimeTypeFromExt(ext string) string {
 	default:
 		return "image/jpeg"
 	}
+}
+
+const (
+	// maxTextFileSize is the maximum size for text file attachments (1MB).
+	maxTextFileSize = 1 << 20
+	// maxBinaryFileSize is the maximum size for binary file attachments (20MB).
+	// Base64 encoding expands data by ~33%, so a 20MB file becomes ~27MB in the request body.
+	maxBinaryFileSize = 20 << 20
+)
+
+// fileTypeFromExt returns the MIME type and whether it's a text type for a file extension.
+// Returns an error for unknown extensions (in the attachments path, unknown types should error).
+func fileTypeFromExt(ext string) (mimeType string, isText bool, err error) {
+	switch strings.ToLower(ext) {
+	// Images
+	case ".png":
+		return "image/png", false, nil
+	case ".gif":
+		return "image/gif", false, nil
+	case ".webp":
+		return "image/webp", false, nil
+	case ".jpg", ".jpeg":
+		return "image/jpeg", false, nil
+	// Documents
+	case ".pdf":
+		return "application/pdf", false, nil
+	// Text
+	case ".txt":
+		return "text/plain", true, nil
+	case ".md":
+		return "text/markdown", true, nil
+	case ".csv":
+		return "text/csv", true, nil
+	case ".json":
+		return "application/json", true, nil
+	case ".xml":
+		return "text/xml", true, nil
+	case ".html":
+		return "text/html", true, nil
+	case ".yaml", ".yml":
+		return "text/yaml", true, nil
+	case ".log":
+		return "text/plain", true, nil
+	default:
+		return "", false, fmt.Errorf("unknown file extension %q", ext)
+	}
+}
+
+// mimeIsText returns true if the MIME type represents text content that should be
+// inlined rather than base64-encoded. Used when the MIME type is provided explicitly
+// via attachment_types (bypassing extension-based detection).
+func mimeIsText(mimeType string) bool {
+	// Strip parameters (e.g. "; charset=utf-8") and normalize case
+	mediaType := strings.ToLower(strings.TrimSpace(mimeType))
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:i])
+	}
+	if strings.HasPrefix(mediaType, "text/") {
+		return true
+	}
+	switch mediaType {
+	case "application/json", "application/xml", "application/yaml":
+		return true
+	}
+	return false
+}
+
+// resolveAttachments populates handoff.ResolvedAttachments from the Attachments map.
+// Paths are relative to allowedDir. Files are read, typed, and deleted (best-effort).
+// Returns error for path traversal violations, unknown file types, or oversized files.
+// File read errors are logged and skipped (warning, not error).
+func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error {
+	if len(handoff.Attachments) == 0 {
+		return nil
+	}
+
+	// Fail fast if data_dir is not configured
+	if !filepath.IsAbs(allowedDir) {
+		return fmt.Errorf("data_dir is not configured (required for attachments)")
+	}
+
+	// Canonicalize allowedDir so resolved paths compare correctly even when
+	// allowedDir contains symlinks (e.g. /var/run -> /run).
+	if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
+		allowedDir = canon
+	}
+
+	handoff.ResolvedAttachments = make(map[string]backends.ResolvedAttachment, len(handoff.Attachments))
+
+	for refName, relPath := range handoff.Attachments {
+		absPath := filepath.Join(allowedDir, relPath)
+		cleaned := filepath.Clean(absPath)
+
+		// First containment check on the literal path (catches ../ traversal)
+		rel, relErr := filepath.Rel(allowedDir, cleaned)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("attachment path %q (ref %q) is outside allowed directory", cleaned, refName)
+		}
+
+		// Resolve symlinks and re-check containment (catches symlink escape)
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			slog.Warn("attachment file resolve failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+		rel, relErr = filepath.Rel(allowedDir, resolved)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("attachment path %q (ref %q) resolves outside allowed directory", resolved, refName)
+		}
+		cleaned = resolved
+
+		// Determine MIME type: explicit override from attachment_types, or detect from extension
+		var mimeType string
+		var isText bool
+		if override, ok := handoff.AttachmentTypes[refName]; ok {
+			// Normalize: strip parameters (e.g. "; charset=utf-8") for clean data URLs
+			mimeType = strings.TrimSpace(override)
+			if i := strings.IndexByte(mimeType, ';'); i >= 0 {
+				mimeType = strings.TrimSpace(mimeType[:i])
+			}
+			if mimeType == "" {
+				return fmt.Errorf("attachment_types[%q] is empty or whitespace-only", refName)
+			}
+			isText = mimeIsText(override)
+		} else {
+			var err error
+			mimeType, isText, err = fileTypeFromExt(filepath.Ext(cleaned))
+			if err != nil {
+				os.Remove(cleaned) // best-effort cleanup of staged file
+				return fmt.Errorf("attachment %q: %w", refName, err)
+			}
+		}
+
+		// Best-effort open-fstat-read pattern to reduce the TOCTOU window between
+		// path checks and read. O_NOFOLLOW prevents symlink following on the final
+		// component at open time; parent directory swaps remain a theoretical risk
+		// (mitigable only with openat on a dirfd, not done here). O_NONBLOCK
+		// prevents blocking on FIFOs/devices (rejected by the IsRegular check
+		// below). For regular files, O_NONBLOCK has no effect on Linux.
+		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			slog.Warn("attachment file open failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			slog.Warn("attachment file stat failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			f.Close()
+			slog.Warn("attachment is not a regular file", "ref", refName, "path", cleaned, "mode", info.Mode())
+			continue
+		}
+		size := info.Size()
+		if isText && size > maxTextFileSize {
+			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
+			return fmt.Errorf("attachment %q: text file exceeds %d byte limit (got %d)", refName, maxTextFileSize, size)
+		}
+		if !isText && size > maxBinaryFileSize {
+			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
+			return fmt.Errorf("attachment %q: binary file exceeds %d byte limit (got %d)", refName, maxBinaryFileSize, size)
+		}
+
+		// Use LimitReader to bound memory even if the file grows after stat
+		maxSize := int64(maxBinaryFileSize)
+		if isText {
+			maxSize = int64(maxTextFileSize)
+		}
+		data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+		f.Close()
+		if int64(len(data)) > maxSize {
+			os.Remove(cleaned) // best-effort cleanup of staged file
+			return fmt.Errorf("attachment %q: file exceeds %d byte limit during read", refName, maxSize)
+		}
+		if err != nil {
+			slog.Warn("attachment file read failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+
+		var att backends.ResolvedAttachment
+		att.MimeType = mimeType
+		att.IsText = isText
+
+		if isText {
+			if !utf8.Valid(data) {
+				os.Remove(cleaned) // best-effort cleanup of staged file
+				return fmt.Errorf("attachment %q: text file contains invalid UTF-8", refName)
+			}
+			att.Text = string(data)
+		} else {
+			att.Base64 = base64.StdEncoding.EncodeToString(data)
+		}
+
+		// Best-effort delete by symlink-resolved path
+		if err := os.Remove(cleaned); err != nil {
+			slog.Warn("attachment file delete failed", "ref", refName, "path", cleaned, "error", err)
+		}
+
+		handoff.ResolvedAttachments[refName] = att
+	}
+
+	return nil
 }
 
 // classifyError returns a short label for the error type for metrics.

@@ -184,8 +184,13 @@ LangGraph-specific handoff data fields:
 | `assistant_id` | Override the default assistant ID |
 | `stream_mode` | Stream modes to use (e.g., `["messages"]`, `["events"]`); defaults to configured `LANGGRAPH_STREAM_MODE` |
 | `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
-| `image_base64` | Base64-encoded image data for multimodal requests (vision models) |
-| `image_mime_type` | MIME type of the image (e.g., `image/jpeg`, `image/png`); defaults to `image/jpeg` if not specified |
+| `attachments` | Map of ref names to file paths (relative to `data_dir`) for multimodal requests — see [Attachments](#attachments-multimodal-requests) |
+| `attachment_types` | Optional map of ref names to MIME types (overrides extension-based detection) |
+| `images` | Array of `{"base64": "...", "mime_type": "..."}` for inline images already in memory |
+| `image_base64` | *(deprecated)* Single inline base64 image — use `images` array instead |
+| `image_mime_type` | *(deprecated)* MIME type for `image_base64` — defaults to `image/jpeg` |
+| `image_path` | *(deprecated)* Single image file path — use `attachments` instead |
+| `image_paths` | *(deprecated)* Array of image file paths — use `attachments` instead |
 
 ### Typing Backend
 
@@ -241,6 +246,7 @@ server:
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
   # mem_limit: 768MiB            # Soft memory limit (e.g. 512MiB, 1GiB); empty = no limit
   # gc_percent: 100             # GOGC value; 0 = not set (use -gc-percent=0 flag to disable GC)
+  # data_dir: /run/handoff-data  # Directory for attachment files (images, text, etc.)
 
 backend:
   provider: openai
@@ -410,23 +416,47 @@ header('X-Handoff-Data: ' . $data);
 exit;
 ```
 
-### Multimodal Requests (Images)
+### Attachments (Multimodal Requests)
 
-To include an image with your prompt (for vision models):
+The daemon supports multimodal requests by staging files in the `data_dir` directory
+(default: `/run/handoff-data`). PHP writes files to this directory, then references
+them by name in the handoff JSON. The daemon reads the files, detects their types,
+and deletes them after use.
+
+Attachments use a placeholder syntax: `{ref_name}` in the prompt is replaced with
+the file content at that position. Text files (`.txt`, `.md`, `.csv`, `.json`, `.xml`,
+`.html`, `.yaml`, `.yml`, `.log`) are inlined as text. Image files (`.png`, `.jpg`,
+`.jpeg`, `.gif`, `.webp`) are inserted as `image_url` content parts for vision models.
+PDF files (`.pdf`) are supported when using a provider that accepts them — see
+[PDF Attachments](#pdf-attachments) below.
 
 ```php
 <?php
-// Prepare handoff data with image
-$image_base64 = ImageCompressor::compressAndEncode($input->image);
-$image_mime_type = ImageCompressor::getOutputMimeType($input->image->mimetype);
+// 1. Stage files in the data directory
+//    tempnam() guarantees unique filenames at the filesystem level.
+//    getmypid() prefix is redundant under prefork MPM (one request per process)
+//    but makes collisions impossible even if tempnam() races.
+//    rename() adds the extension the daemon needs for MIME type detection.
+$data_dir = '/run/handoff-data';
+$prefix = getmypid() . '_';
 
+$tmp = tempnam($data_dir, $prefix);
+$photo = "$tmp.jpg";
+rename($tmp, $photo);
+move_uploaded_file($_FILES['photo']['tmp_name'], $photo);
+
+$tmp = tempnam($data_dir, $prefix);
+$notes = "$tmp.txt";
+rename($tmp, $notes);
+file_put_contents($notes, $_POST['notes']);
+
+// 2. Reference files by name in the prompt using {ref_name} placeholders
 $data = json_encode([
-    'prompt' => $_POST['prompt'] ?? 'What is in this image?',
+    'prompt' => 'Describe this photo: {photo}. Here are my notes: {notes}',
     'user_id' => $_SESSION['user_id'],
-    'image_base64' => $image_base64,
-    'image_mime_type' => $image_mime_type,  // e.g., "image/jpeg", "image/png"
-    'langgraph_input' => [
-        'session_id' => session_id(),
+    'attachments' => [
+        'photo' => basename($photo),   // relative to data_dir
+        'notes' => basename($notes),
     ],
 ]);
 
@@ -435,7 +465,9 @@ header('X-Handoff-Data: ' . $data);
 exit;
 ```
 
-The daemon will format this as a multimodal message for the LangGraph API:
+The daemon resolves the placeholders and builds the appropriate content format for
+the LLM API. The text attachment is inlined at its placeholder position, and the
+image becomes an `image_url` content part:
 
 ```json
 {
@@ -444,14 +476,234 @@ The daemon will format this as a multimodal message for the LangGraph API:
     "messages": [{
       "type": "human",
       "content": [
-        {"type": "text", "text": "What is in this image?"},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+        {"type": "text", "text": "Describe this photo: "},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+        {"type": "text", "text": ". Here are my notes: my notes content here"}
       ]
-    }],
-    "session_id": "..."
+    }]
   }
 }
 ```
+
+If all attachments are text (no images), the content stays a simple string — no
+content array is generated. Unresolved `{ref_name}` placeholders (not in the
+attachments map) are left as literal text, preventing prompt injection from
+triggering arbitrary file reads.
+
+#### Image-only example (no placeholder)
+
+Placeholders are optional. If an attachment isn't referenced by `{ref_name}` in the
+prompt, it is emitted before the text — matching the LangChain HumanMessage
+convention where images precede text:
+
+```php
+<?php
+$data_dir = '/run/handoff-data';
+$tmp = tempnam($data_dir, getmypid() . '_');
+$photo = "$tmp.jpg";
+rename($tmp, $photo);
+move_uploaded_file($_FILES['photo']['tmp_name'], $photo);
+
+$data = json_encode([
+    'prompt' => 'What is in this image?',
+    'user_id' => $_SESSION['user_id'],
+    'attachments' => [
+        'photo' => basename($photo),
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+The image is emitted before the text part:
+
+```json
+{
+  "input": {
+    "messages": [{
+      "type": "human",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+        {"type": "text", "text": "What is in this image?"}
+      ]
+    }]
+  }
+}
+```
+
+#### Text-only example
+
+```php
+<?php
+$data_dir = '/run/handoff-data';
+$tmp = tempnam($data_dir, getmypid() . '_');
+$report = "$tmp.csv";
+rename($tmp, $report);
+file_put_contents($report, $csv_data);
+
+$data = json_encode([
+    'prompt' => 'Summarize this sales data: {report}',
+    'user_id' => $_SESSION['user_id'],
+    'attachments' => [
+        'report' => basename($report),
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+This produces a simple string content (no array needed):
+
+```json
+{
+  "input": {
+    "messages": [{
+      "type": "human",
+      "content": "Summarize this sales data: col1,col2\n1,2\n3,4\n..."
+    }]
+  }
+}
+```
+
+#### Explicit MIME types
+
+When PHP already knows the MIME type (e.g., after image compression or format
+conversion), use `attachment_types` to skip extension-based detection. This is
+useful when the file extension doesn't match the content, or when using generic
+extensions like `.dat` or `.bin`:
+
+```php
+<?php
+$data_dir = '/run/handoff-data';
+$tmp = tempnam($data_dir, getmypid() . '_');
+// No rename needed — extension doesn't matter when attachment_types is set
+file_put_contents($tmp, ImageCompressor::compressAndEncode($input->image, raw: true));
+$mime_type = ImageCompressor::getOutputMimeType($input->image->mimetype);
+
+$data = json_encode([
+    'prompt' => 'What is in this image?',
+    'user_id' => $_SESSION['user_id'],
+    'attachments' => [
+        'photo' => basename($tmp),
+    ],
+    'attachment_types' => [
+        'photo' => $mime_type,  // e.g. "image/jpeg" — overrides extension detection
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+`attachment_types` is optional and only needed for entries where the extension is
+missing or wrong. Entries not in `attachment_types` still detect from the extension
+as usual. Any MIME type starting with `text/` (plus `application/json`,
+`application/xml`, `application/yaml`) is treated as text and inlined; everything
+else is base64-encoded as a binary attachment.
+
+#### PDF Attachments
+
+The `content_format` setting on a LangGraph profile controls how non-image
+binary attachments (like PDFs) are serialized in the content array. The default
+format uses OpenAI-compatible `image_url` parts for images, which LangChain
+translates to each provider's native format (Vertex AI, Anthropic, etc.):
+
+| Format | Images | PDFs | Unsupported types |
+|--------|--------|------|-------------------|
+| `openai` (default) | `image_url` | Placeholder preserved as literal `{ref}` | Warning logged |
+| `anthropic` | `image_url` | `document` block with base64 source | Emitted natively |
+
+To enable PDF support with an Anthropic-backed agent, set `content_format` on
+the profile:
+
+```yaml
+backend:
+  langgraph:
+    profiles:
+      claude-agent:
+        content_format: anthropic  # Anthropic document blocks for PDFs
+        assistant_id: claude-agent
+```
+
+PHP example:
+
+```php
+<?php
+$data_dir = '/run/handoff-data';
+$tmp = tempnam($data_dir, getmypid() . '_');
+$report = "$tmp.pdf";
+rename($tmp, $report);
+move_uploaded_file($_FILES['report']['tmp_name'], $report);
+
+$data = json_encode([
+    'prompt' => 'Summarize this document: {report}',
+    'user_id' => $_SESSION['user_id'],
+    'attachments' => [
+        'report' => basename($report),
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+With the default `openai` format, the `{report}` placeholder is preserved as
+literal text (OpenAI does not support PDF content parts) and a warning is
+logged.
+
+With `content_format: anthropic`, the PDF produces a native document block:
+
+```json
+{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0..."}}
+```
+
+Unreferenced images (no `{ref_name}` placeholder in the prompt) are placed
+before the text part, matching the LangChain `HumanMessage` convention.
+
+#### Inline base64 images
+
+If the image is already in memory as base64 (e.g., from `ImageCompressor`), there
+is no need to write it to disk. Use the `images` array to pass it directly through
+the handoff JSON:
+
+```php
+<?php
+$data = json_encode([
+    'prompt' => 'What is in this image?',
+    'user_id' => $_SESSION['user_id'],
+    'images' => [[
+        'base64' => ImageCompressor::compressAndEncode($input->image),
+        'mime_type' => ImageCompressor::getOutputMimeType($input->image->mimetype),
+    ]],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+This avoids the disk round-trip entirely. The image is sent inline in the handoff
+JSON and appended to the last message as an `image_url` content part. The
+`mime_type` field defaults to `image/jpeg` if omitted. Use this path for small to
+medium images; for large files that might exceed the 128 KB handoff buffer, stage
+them on disk via `attachments` instead.
+
+#### Limits and security
+
+- **Path containment** — File paths are relative to `data_dir`. Path traversal
+  (`../`) is blocked; the daemon returns HTTP 400.
+- **Manifest-only resolution** — Only ref names declared in the `attachments` map
+  are resolved. `{anything_else}` in the prompt is treated as literal text.
+- **Text file size limit** — Text attachments are capped at 1 MB per file.
+- **Unknown extensions** — Files with unrecognized extensions are rejected with
+  an error (not silently defaulted).
+- **Cleanup** — The daemon deletes each file after reading it (best-effort).
 
 ## How It Works
 
