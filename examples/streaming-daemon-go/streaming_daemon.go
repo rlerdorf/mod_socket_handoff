@@ -1153,6 +1153,14 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 	// Copy inline images to ResolvedImages
 	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
 
+	// Canonicalize allowedDir so resolved paths compare correctly even when
+	// allowedDir contains symlinks (e.g. /var/run -> /run).
+	if allowedDir != "" {
+		if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
+			allowedDir = canon
+		}
+	}
+
 	// Load file images
 	for _, path := range handoff.ImagePaths {
 		absPath, err := filepath.Abs(path)
@@ -1321,6 +1329,12 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 	// Fail fast if data_dir is not configured
 	if !filepath.IsAbs(allowedDir) {
 		return fmt.Errorf("data_dir is not configured (required for attachments)")
+	}
+
+	// Canonicalize allowedDir so resolved paths compare correctly even when
+	// allowedDir contains symlinks (e.g. /var/run -> /run).
+	if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
+		allowedDir = canon
 	}
 
 	handoff.ResolvedAttachments = make(map[string]backends.ResolvedAttachment, len(handoff.Attachments))
