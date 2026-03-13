@@ -953,6 +953,26 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		}
 	})
 
+	t.Run("unreferenced non-image binary skipped in openai format", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0xLjQ="},
+		}
+		buf := appendContentWithAttachments(nil, "What does this say?", attachments, nil, "openai")
+		got := string(buf)
+		// PDF data should NOT appear
+		if strings.Contains(got, "JVBERi0xLjQ=") {
+			t.Errorf("unreferenced non-image binary should be skipped in openai format, got %s", got)
+		}
+		// Should NOT inject empty braces {} into text
+		if strings.Contains(got, "{}") {
+			t.Errorf("should not inject empty braces into text, got %s", got)
+		}
+		// Text should still be present
+		if !strings.Contains(got, "What does this say?") {
+			t.Errorf("text should be present, got %s", got)
+		}
+	})
+
 	t.Run("pdf unreferenced with anthropic format emits document", func(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0xLjQ="},

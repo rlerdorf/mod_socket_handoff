@@ -1371,6 +1371,24 @@ func TestResolveAttachments(t *testing.T) {
 		}
 	})
 
+	t.Run("empty attachment_types override rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "file.dat"), []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		handoff := backends.HandoffData{
+			Attachments:     map[string]string{"f": "file.dat"},
+			AttachmentTypes: map[string]string{"f": "  "},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err == nil {
+			t.Fatal("expected error for empty attachment_types override")
+		}
+		if !strings.Contains(err.Error(), "empty or whitespace-only") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
 	t.Run("unknown extension errors", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "file.xyz"), []byte("data"), 0644); err != nil {

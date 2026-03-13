@@ -1345,6 +1345,9 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			if i := strings.IndexByte(mimeType, ';'); i >= 0 {
 				mimeType = strings.TrimSpace(mimeType[:i])
 			}
+			if mimeType == "" {
+				return fmt.Errorf("attachment_types[%q] is empty or whitespace-only", refName)
+			}
 			isText = mimeIsText(override)
 		} else {
 			var err error

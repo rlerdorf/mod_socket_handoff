@@ -811,10 +811,13 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		default: // "openai"
 			if isImage {
 				appendImageURL(mimeType, base64Data)
-			} else {
+			} else if refName != "" {
 				slog.Warn("non-image binary attachment not supported by content format",
 					"format", contentFormat, "mime", mimeType, "ref", refName)
 				textAccum.WriteString("{" + refName + "}")
+			} else {
+				slog.Warn("skipping unreferenced non-image binary attachment",
+					"format", contentFormat, "mime", mimeType)
 			}
 		}
 	}

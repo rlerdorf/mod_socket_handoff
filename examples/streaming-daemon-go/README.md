@@ -493,8 +493,8 @@ triggering arbitrary file reads.
 #### Image-only example (no placeholder)
 
 Placeholders are optional. If an attachment isn't referenced by `{ref_name}` in the
-prompt, it is appended to the end of the message — the same way traditional image
-uploads work:
+prompt, it is emitted before the text — matching the LangChain HumanMessage
+convention where images precede text:
 
 ```php
 <?php
@@ -517,7 +517,7 @@ header('X-Handoff-Data: ' . $data);
 exit;
 ```
 
-The image is appended after the text part:
+The image is emitted before the text part:
 
 ```json
 {
@@ -525,8 +525,8 @@ The image is appended after the text part:
     "messages": [{
       "type": "human",
       "content": [
-        {"type": "text", "text": "What is in this image?"},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+        {"type": "text", "text": "What is in this image?"}
       ]
     }]
   }
