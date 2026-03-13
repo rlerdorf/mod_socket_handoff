@@ -882,6 +882,22 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		}
 	})
 
+	t.Run("non-image binary attachment skipped", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"doc": {MimeType: "application/octet-stream", IsText: false, Base64: "AAAA"},
+			"img": {MimeType: "image/png", IsText: false, Base64: "iVBO"},
+		}
+		buf := appendContentWithAttachments(nil, "See {doc} and {img}", attachments, nil)
+		got := string(buf)
+		// The octet-stream attachment should be skipped, only image emitted
+		if strings.Contains(got, "AAAA") {
+			t.Errorf("non-image binary should be skipped, got %s", got)
+		}
+		if !strings.Contains(got, "iVBO") {
+			t.Errorf("image attachment should be present, got %s", got)
+		}
+	})
+
 	t.Run("unresolved placeholder preserved in text", func(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"notes": {MimeType: "text/plain", IsText: true, Text: "content"},

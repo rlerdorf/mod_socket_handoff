@@ -1318,9 +1318,11 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		}
 
 		// Open-fstat-read pattern to avoid TOCTOU race between path check and read.
-		// By opening first, we hold a fd to the actual file — subsequent fstat/read
-		// operate on the opened inode, not the pathname.
-		f, err := os.Open(cleaned)
+		// O_NOFOLLOW prevents symlink following at open time, closing the race
+		// window between EvalSymlinks and open. O_NONBLOCK prevents blocking on
+		// FIFOs/devices (rejected by the IsRegular check below). For regular files,
+		// O_NONBLOCK has no effect on Linux.
+		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			slog.Warn("attachment file open failed", "ref", refName, "path", cleaned, "error", err)
 			continue
@@ -1330,6 +1332,11 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		if err != nil {
 			f.Close()
 			slog.Warn("attachment file stat failed", "ref", refName, "path", cleaned, "error", err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			f.Close()
+			slog.Warn("attachment is not a regular file", "ref", refName, "path", cleaned, "mode", info.Mode())
 			continue
 		}
 		size := info.Size()

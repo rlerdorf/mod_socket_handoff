@@ -1434,4 +1434,23 @@ func TestResolveAttachments(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("FIFO skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		fifoPath := filepath.Join(dir, "pipe.txt")
+		if err := syscall.Mkfifo(fifoPath, 0600); err != nil {
+			t.Skip("cannot create FIFO:", err)
+		}
+		handoff := backends.HandoffData{
+			Attachments: map[string]string{"p": "pipe.txt"},
+		}
+		err := resolveAttachments(&handoff, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// FIFO should be skipped (not a regular file), not resolved
+		if _, ok := handoff.ResolvedAttachments["p"]; ok {
+			t.Error("FIFO should not be resolved as attachment")
+		}
+	})
 }

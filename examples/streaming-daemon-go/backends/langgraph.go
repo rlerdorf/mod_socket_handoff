@@ -775,6 +775,10 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 
 	for _, p := range parts {
 		if p.attachment != nil {
+			if !strings.HasPrefix(strings.ToLower(p.attachment.MimeType), "image/") {
+				slog.Warn("skipping non-image binary attachment in content array", "mime", p.attachment.MimeType, "ref", p.refName)
+				continue
+			}
 			appendImage(p.attachment.MimeType, p.attachment.Base64)
 		} else {
 			textAccum.WriteString(p.text)
@@ -789,8 +793,12 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 	// Flush remaining text
 	flushText()
 
-	// Append unreferenced image attachments
+	// Append unreferenced image attachments (only actual images)
 	for _, att := range unreferencedImages {
+		if !strings.HasPrefix(strings.ToLower(att.MimeType), "image/") {
+			slog.Warn("skipping non-image binary attachment", "mime", att.MimeType)
+			continue
+		}
 		appendImage(att.MimeType, att.Base64)
 	}
 
