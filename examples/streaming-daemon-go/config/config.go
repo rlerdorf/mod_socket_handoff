@@ -104,8 +104,30 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
-// Load reads and parses a YAML config file.
+// Load reads and parses a YAML config file. Omitted fields keep their
+// default values from Default().
 func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
+	}
+
+	cfg := Default()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// LoadRaw reads and parses a YAML config file without applying defaults.
+// Zero-valued fields indicate they were not specified in the file.
+// Used by reloadConfig() to detect which fields were explicitly set.
+func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)

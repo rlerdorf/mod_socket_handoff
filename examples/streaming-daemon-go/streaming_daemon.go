@@ -308,7 +308,7 @@ func reloadConfig() {
 
 	slog.Info("reloading configuration", "path", *configFile)
 
-	newCfg, err := config.Load(*configFile)
+	newCfg, err := config.LoadRaw(*configFile)
 	if err != nil {
 		slog.Error("config reload failed, keeping current config", "error", err)
 		return
@@ -377,22 +377,6 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to load config file: %v\n", err)
 			os.Exit(1)
-		}
-		// Apply defaults for fields not specified in the config file
-		if fileCfg.Server.DataDir == "" {
-			fileCfg.Server.DataDir = cfg.Server.DataDir
-		}
-		if fileCfg.Server.SocketPath == "" {
-			fileCfg.Server.SocketPath = cfg.Server.SocketPath
-		}
-		if fileCfg.Server.SocketMode == 0 {
-			fileCfg.Server.SocketMode = cfg.Server.SocketMode
-		}
-		if fileCfg.Server.MaxConnections == 0 {
-			fileCfg.Server.MaxConnections = cfg.Server.MaxConnections
-		}
-		if fileCfg.Server.MaxStreamDurationMs == 0 {
-			fileCfg.Server.MaxStreamDurationMs = cfg.Server.MaxStreamDurationMs
 		}
 		cfg = fileCfg
 	}
@@ -1384,11 +1368,12 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			}
 		}
 
-		// Open-fstat-read pattern to avoid TOCTOU race between path check and read.
-		// O_NOFOLLOW prevents symlink following at open time, closing the race
-		// window between EvalSymlinks and open. O_NONBLOCK prevents blocking on
-		// FIFOs/devices (rejected by the IsRegular check below). For regular files,
-		// O_NONBLOCK has no effect on Linux.
+		// Best-effort open-fstat-read pattern to reduce the TOCTOU window between
+		// path checks and read. O_NOFOLLOW prevents symlink following on the final
+		// component at open time; parent directory swaps remain a theoretical risk
+		// (mitigable only with openat on a dirfd, not done here). O_NONBLOCK
+		// prevents blocking on FIFOs/devices (rejected by the IsRegular check
+		// below). For regular files, O_NONBLOCK has no effect on Linux.
 		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			slog.Warn("attachment file open failed", "ref", refName, "path", cleaned, "error", err)
