@@ -708,7 +708,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 	}
 
 	// Collect unreferenced attachments (sorted for deterministic output)
-	var unreferencedImages []ResolvedAttachment
+	var unreferencedBinaries []ResolvedAttachment
 	var unreferencedText []ResolvedAttachment
 	if len(referenced) < len(attachments) {
 		// Collect unreferenced attachment names and sort for determinism
@@ -724,16 +724,34 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 			if att.IsText {
 				unreferencedText = append(unreferencedText, att)
 			} else {
-				unreferencedImages = append(unreferencedImages, att)
+				unreferencedBinaries = append(unreferencedBinaries, att)
 			}
 		}
 	}
 
+	// willEmitBinary checks whether a binary attachment will actually produce a
+	// content part for the given content format (e.g., PDFs are skipped in openai).
+	willEmitBinary := func(mimeType string) bool {
+		isImage := strings.HasPrefix(strings.ToLower(mimeType), "image/")
+		if isImage {
+			return true
+		}
+		return contentFormat == "anthropic"
+	}
+
 	// Check if we have any binary parts (images, documents) that require a content array
-	hasBinaryPart := len(legacyImages) > 0 || len(unreferencedImages) > 0
+	hasBinaryPart := len(legacyImages) > 0
+	if !hasBinaryPart {
+		for _, att := range unreferencedBinaries {
+			if willEmitBinary(att.MimeType) {
+				hasBinaryPart = true
+				break
+			}
+		}
+	}
 	if !hasBinaryPart {
 		for _, p := range parts {
-			if p.attachment != nil {
+			if p.attachment != nil && willEmitBinary(p.attachment.MimeType) {
 				hasBinaryPart = true
 				break
 			}
@@ -744,7 +762,12 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		// All parts are text — concatenate and emit as simple JSON string
 		buf = append(buf, '"')
 		for _, p := range parts {
-			buf = appendJSONEscaped(buf, p.text)
+			if p.attachment != nil && !p.attachment.IsText {
+				// Non-emittable binary (e.g., PDF in openai format) — preserve placeholder
+				buf = appendJSONEscaped(buf, "{"+p.refName+"}")
+			} else {
+				buf = appendJSONEscaped(buf, p.text)
+			}
 		}
 		// Append unreferenced text attachments
 		for _, att := range unreferencedText {
@@ -824,7 +847,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 
 	// Emit unreferenced binary attachments and legacy images BEFORE the prompt
 	// text, matching the LangChain HumanMessage convention where images precede text.
-	for _, att := range unreferencedImages {
+	for _, att := range unreferencedBinaries {
 		appendBinary(att.MimeType, att.Base64, "")
 	}
 	for _, img := range legacyImages {

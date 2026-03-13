@@ -947,9 +947,10 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		if strings.Contains(got, "JVBERi0xLjQ=") {
 			t.Errorf("PDF data should not be emitted for openai format, got %s", got)
 		}
-		// Placeholder should be preserved as literal text
-		if !strings.Contains(got, "{report}") {
-			t.Errorf("PDF placeholder should be preserved as literal, got %s", got)
+		// Should be a simple string with placeholder preserved (no array needed)
+		want := `"Summarize {report}"`
+		if got != want {
+			t.Errorf("got %s, want %s", got, want)
 		}
 	})
 
@@ -967,9 +968,10 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		if strings.Contains(got, "{}") {
 			t.Errorf("should not inject empty braces into text, got %s", got)
 		}
-		// Text should still be present
-		if !strings.Contains(got, "What does this say?") {
-			t.Errorf("text should be present, got %s", got)
+		// Should be a simple string, not a content array
+		want := `"What does this say?"`
+		if got != want {
+			t.Errorf("got %s, want %s (simple string, no array)", got, want)
 		}
 	})
 

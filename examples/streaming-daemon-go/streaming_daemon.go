@@ -378,6 +378,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Failed to load config file: %v\n", err)
 			os.Exit(1)
 		}
+		// Apply defaults for fields not specified in the config file
+		if fileCfg.Server.DataDir == "" {
+			fileCfg.Server.DataDir = cfg.Server.DataDir
+		}
+		if fileCfg.Server.SocketPath == "" {
+			fileCfg.Server.SocketPath = cfg.Server.SocketPath
+		}
+		if fileCfg.Server.SocketMode == 0 {
+			fileCfg.Server.SocketMode = cfg.Server.SocketMode
+		}
+		if fileCfg.Server.MaxConnections == 0 {
+			fileCfg.Server.MaxConnections = cfg.Server.MaxConnections
+		}
+		if fileCfg.Server.MaxStreamDurationMs == 0 {
+			fileCfg.Server.MaxStreamDurationMs = cfg.Server.MaxStreamDurationMs
+		}
 		cfg = fileCfg
 	}
 
@@ -1161,12 +1177,23 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 			continue
 		}
 		cleaned := filepath.Clean(absPath)
-		// Ensure the cleaned path is under the allowed directory using
-		// filepath.Rel for robust containment checking.
+		// First containment check on the literal path (catches ../ traversal)
 		rel, relErr := filepath.Rel(allowedDir, cleaned)
 		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
 		}
+
+		// Resolve symlinks in all path components and re-check containment
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			slog.Warn("image file resolve failed", "path", cleaned, "error", err)
+			continue
+		}
+		rel, relErr = filepath.Rel(allowedDir, resolved)
+		if relErr != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("image path %q resolves outside allowed directory %q", resolved, allowedDir)
+		}
+		cleaned = resolved
 
 		// Open-fstat-read pattern matching resolveAttachments() security
 		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -1417,7 +1444,7 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			att.Base64 = base64.StdEncoding.EncodeToString(data)
 		}
 
-		// Best-effort delete by pathname (the original staged file)
+		// Best-effort delete by symlink-resolved path
 		if err := os.Remove(cleaned); err != nil {
 			slog.Warn("attachment file delete failed", "ref", refName, "path", cleaned, "error", err)
 		}

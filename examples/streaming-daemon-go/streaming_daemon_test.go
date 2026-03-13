@@ -1076,6 +1076,28 @@ func TestResolveImages(t *testing.T) {
 	})
 }
 
+func TestResolveImagesSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	// Create a symlink inside dir that points outside
+	linkPath := filepath.Join(dir, "escape")
+	if err := os.Symlink("/etc", linkPath); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	handoff := backends.HandoffData{
+		ImagePaths: []string{filepath.Join(dir, "escape", "passwd")},
+	}
+	err := resolveImages(&handoff, dir)
+	if err == nil {
+		// EvalSymlinks may fail if /etc/passwd doesn't exist (containers).
+		// Either way, the image must not be resolved.
+		if len(handoff.ResolvedImages) > 0 {
+			t.Error("symlink escape should not resolve successfully")
+		}
+	} else if !strings.Contains(err.Error(), "resolves outside allowed directory") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestMimeIsText(t *testing.T) {
 	tests := []struct {
 		mime string
