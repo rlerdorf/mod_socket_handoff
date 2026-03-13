@@ -1076,6 +1076,32 @@ func TestResolveImages(t *testing.T) {
 	})
 }
 
+func TestMimeIsText(t *testing.T) {
+	tests := []struct {
+		mime string
+		want bool
+	}{
+		{"text/plain", true},
+		{"Text/Plain", true},
+		{"text/html; charset=utf-8", true},
+		{"application/json", true},
+		{"APPLICATION/JSON", true},
+		{"application/json; charset=utf-8", true},
+		{"application/xml", true},
+		{"application/yaml", true},
+		{"image/png", false},
+		{"application/octet-stream", false},
+		{"  text/plain  ", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		got := mimeIsText(tt.mime)
+		if got != tt.want {
+			t.Errorf("mimeIsText(%q) = %v, want %v", tt.mime, got, tt.want)
+		}
+	}
+}
+
 func TestFileTypeFromExt(t *testing.T) {
 	tests := []struct {
 		ext      string

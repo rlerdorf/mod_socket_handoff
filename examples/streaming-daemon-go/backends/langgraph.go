@@ -776,7 +776,9 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 	for _, p := range parts {
 		if p.attachment != nil {
 			if !strings.HasPrefix(strings.ToLower(p.attachment.MimeType), "image/") {
-				slog.Warn("skipping non-image binary attachment in content array", "mime", p.attachment.MimeType, "ref", p.refName)
+				// Non-image binary: preserve placeholder as literal text
+				slog.Warn("non-image binary attachment kept as literal placeholder", "mime", p.attachment.MimeType, "ref", p.refName)
+				textAccum.WriteString("{" + p.refName + "}")
 				continue
 			}
 			appendImage(p.attachment.MimeType, p.attachment.Base64)

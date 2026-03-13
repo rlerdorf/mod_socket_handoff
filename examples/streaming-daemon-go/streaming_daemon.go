@@ -1168,6 +1168,15 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
 		}
 
+		info, err := os.Stat(cleaned)
+		if err != nil {
+			slog.Warn("image file stat failed", "path", cleaned, "error", err)
+			continue
+		}
+		if info.Size() > maxBinaryFileSize {
+			return fmt.Errorf("image %q exceeds %d byte limit (got %d)", cleaned, maxBinaryFileSize, info.Size())
+		}
+
 		data, err := os.ReadFile(cleaned)
 		if err != nil {
 			slog.Warn("image file read failed", "path", cleaned, "error", err)
@@ -1254,11 +1263,15 @@ func fileTypeFromExt(ext string) (mimeType string, isText bool, err error) {
 // inlined rather than base64-encoded. Used when the MIME type is provided explicitly
 // via attachment_types (bypassing extension-based detection).
 func mimeIsText(mimeType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(mimeType))
-	if strings.HasPrefix(lower, "text/") {
+	// Strip parameters (e.g. "; charset=utf-8") and normalize case
+	mediaType := strings.ToLower(strings.TrimSpace(mimeType))
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:i])
+	}
+	if strings.HasPrefix(mediaType, "text/") {
 		return true
 	}
-	switch lower {
+	switch mediaType {
 	case "application/json", "application/xml", "application/yaml":
 		return true
 	}
@@ -1349,8 +1362,16 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			return fmt.Errorf("attachment %q: binary file exceeds %d byte limit (got %d)", refName, maxBinaryFileSize, size)
 		}
 
-		data, err := io.ReadAll(f)
+		// Use LimitReader to bound memory even if the file grows after stat
+		maxSize := int64(maxBinaryFileSize)
+		if isText {
+			maxSize = int64(maxTextFileSize)
+		}
+		data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
 		f.Close()
+		if int64(len(data)) > maxSize {
+			return fmt.Errorf("attachment %q: file exceeds %d byte limit during read", refName, maxSize)
+		}
 		if err != nil {
 			slog.Warn("attachment file read failed", "ref", refName, "path", cleaned, "error", err)
 			continue
