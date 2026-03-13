@@ -125,8 +125,9 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadRaw reads and parses a YAML config file without applying defaults.
-// Zero-valued fields indicate they were not specified in the file.
-// Used by reloadConfig() to detect which fields were explicitly set.
+// Omitted string fields will be empty; note that bool/int zero values are
+// indistinguishable from explicitly set false/0.
+// Used by reloadConfig() to detect which string fields were explicitly set.
 func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

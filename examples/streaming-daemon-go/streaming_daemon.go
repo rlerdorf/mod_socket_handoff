@@ -1126,8 +1126,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 // resolveImages populates handoff.ResolvedImages from inline images and file paths.
 // Legacy single-image fields are migrated to the plural fields for backward compatibility.
-// Files are read, base64-encoded, and deleted (best-effort). Returns error only for
-// path traversal violations; file read errors are logged and skipped.
+// Files are read, base64-encoded, and deleted (best-effort). Returns error for path
+// traversal violations and oversized files; other file read errors are logged and skipped.
 func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 	// Migrate legacy single-image fields
 	if handoff.ImageBase64 != "" {
@@ -1206,12 +1206,14 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 		}
 		if info.Size() > maxBinaryFileSize {
 			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
 			return fmt.Errorf("image %q exceeds %d byte limit (got %d)", cleaned, maxBinaryFileSize, info.Size())
 		}
 
 		data, err := io.ReadAll(io.LimitReader(f, maxBinaryFileSize+1))
 		f.Close()
 		if int64(len(data)) > maxBinaryFileSize {
+			os.Remove(cleaned) // best-effort cleanup of staged file
 			return fmt.Errorf("image %q exceeds %d byte limit during read", cleaned, maxBinaryFileSize)
 		}
 		if err != nil {
@@ -1378,6 +1380,7 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 			var err error
 			mimeType, isText, err = fileTypeFromExt(filepath.Ext(cleaned))
 			if err != nil {
+				os.Remove(cleaned) // best-effort cleanup of staged file
 				return fmt.Errorf("attachment %q: %w", refName, err)
 			}
 		}
@@ -1408,10 +1411,12 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		size := info.Size()
 		if isText && size > maxTextFileSize {
 			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
 			return fmt.Errorf("attachment %q: text file exceeds %d byte limit (got %d)", refName, maxTextFileSize, size)
 		}
 		if !isText && size > maxBinaryFileSize {
 			f.Close()
+			os.Remove(cleaned) // best-effort cleanup of staged file
 			return fmt.Errorf("attachment %q: binary file exceeds %d byte limit (got %d)", refName, maxBinaryFileSize, size)
 		}
 
@@ -1423,6 +1428,7 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
 		f.Close()
 		if int64(len(data)) > maxSize {
+			os.Remove(cleaned) // best-effort cleanup of staged file
 			return fmt.Errorf("attachment %q: file exceeds %d byte limit during read", refName, maxSize)
 		}
 		if err != nil {
@@ -1436,6 +1442,7 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 
 		if isText {
 			if !utf8.Valid(data) {
+				os.Remove(cleaned) // best-effort cleanup of staged file
 				return fmt.Errorf("attachment %q: text file contains invalid UTF-8", refName)
 			}
 			att.Text = string(data)
