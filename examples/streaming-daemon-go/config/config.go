@@ -71,13 +71,14 @@ type LangGraphConfig struct {
 // LangGraphProfileConfig contains per-profile overrides for LangGraph settings.
 // All fields are optional; unset fields inherit from the top-level LangGraphConfig.
 type LangGraphProfileConfig struct {
-	APIKey       string `yaml:"api_key"`
-	APIBase      string `yaml:"api_base"`
-	APISocket    string `yaml:"api_socket"`
-	AssistantID  string `yaml:"assistant_id"`
-	StreamMode   string `yaml:"stream_mode"`
-	HTTP2Enabled *bool  `yaml:"http2_enabled"`
-	InsecureSSL  *bool  `yaml:"insecure_ssl"` // Pointer to distinguish unset from false
+	APIKey        string `yaml:"api_key"`
+	APIBase       string `yaml:"api_base"`
+	APISocket     string `yaml:"api_socket"`
+	AssistantID   string `yaml:"assistant_id"`
+	StreamMode    string `yaml:"stream_mode"`
+	ContentFormat string `yaml:"content_format"` // "openai" (default) or "anthropic"
+	HTTP2Enabled  *bool  `yaml:"http2_enabled"`
+	InsecureSSL   *bool  `yaml:"insecure_ssl"` // Pointer to distinguish unset from false
 }
 
 // MockConfig contains mock backend settings.
@@ -150,6 +151,9 @@ func (c *Config) Validate() error {
 	for name, profile := range c.Backend.LangGraph.Profiles {
 		if profile.APISocket != "" && !filepath.IsAbs(profile.APISocket) {
 			return fmt.Errorf("backend.langgraph.profiles.%s.api_socket must be absolute path", name)
+		}
+		if profile.ContentFormat != "" && profile.ContentFormat != "openai" && profile.ContentFormat != "anthropic" {
+			return fmt.Errorf("backend.langgraph.profiles.%s.content_format must be \"openai\" or \"anthropic\", got %q", name, profile.ContentFormat)
 		}
 	}
 

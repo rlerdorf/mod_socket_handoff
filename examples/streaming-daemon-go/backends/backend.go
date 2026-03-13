@@ -62,6 +62,9 @@ type HandoffData struct {
 
 	// Computed field populated by resolveAttachments() before Stream()
 	ResolvedAttachments map[string]ResolvedAttachment `json:"-"`
+
+	// Content format for non-text/non-image attachments (populated from LangGraph profile)
+	ContentFormat string `json:"-"`
 }
 
 // ResolvedAttachment holds a resolved attachment ready for inclusion in LLM requests.

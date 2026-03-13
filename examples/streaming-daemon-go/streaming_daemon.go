@@ -1168,16 +1168,33 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 			return fmt.Errorf("image path %q is outside allowed directory %q", cleaned, allowedDir)
 		}
 
-		info, err := os.Stat(cleaned)
+		// Open-fstat-read pattern matching resolveAttachments() security
+		f, err := os.OpenFile(cleaned, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
+			slog.Warn("image file open failed", "path", cleaned, "error", err)
+			continue
+		}
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
 			slog.Warn("image file stat failed", "path", cleaned, "error", err)
 			continue
 		}
+		if !info.Mode().IsRegular() {
+			f.Close()
+			slog.Warn("image is not a regular file", "path", cleaned, "mode", info.Mode())
+			continue
+		}
 		if info.Size() > maxBinaryFileSize {
+			f.Close()
 			return fmt.Errorf("image %q exceeds %d byte limit (got %d)", cleaned, maxBinaryFileSize, info.Size())
 		}
 
-		data, err := os.ReadFile(cleaned)
+		data, err := io.ReadAll(io.LimitReader(f, maxBinaryFileSize+1))
+		f.Close()
+		if int64(len(data)) > maxBinaryFileSize {
+			return fmt.Errorf("image %q exceeds %d byte limit during read", cleaned, maxBinaryFileSize)
+		}
 		if err != nil {
 			slog.Warn("image file read failed", "path", cleaned, "error", err)
 			continue
@@ -1237,6 +1254,9 @@ func fileTypeFromExt(ext string) (mimeType string, isText bool, err error) {
 		return "image/webp", false, nil
 	case ".jpg", ".jpeg":
 		return "image/jpeg", false, nil
+	// Documents
+	case ".pdf":
+		return "application/pdf", false, nil
 	// Text
 	case ".txt":
 		return "text/plain", true, nil
@@ -1307,7 +1327,7 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		// Resolve symlinks and re-check containment (catches symlink escape)
 		resolved, err := filepath.EvalSymlinks(cleaned)
 		if err != nil {
-			slog.Warn("attachment file not found", "ref", refName, "path", cleaned, "error", err)
+			slog.Warn("attachment file resolve failed", "ref", refName, "path", cleaned, "error", err)
 			continue
 		}
 		rel, relErr = filepath.Rel(allowedDir, resolved)
@@ -1320,7 +1340,11 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 		var mimeType string
 		var isText bool
 		if override, ok := handoff.AttachmentTypes[refName]; ok {
-			mimeType = override
+			// Normalize: strip parameters (e.g. "; charset=utf-8") for clean data URLs
+			mimeType = strings.TrimSpace(override)
+			if i := strings.IndexByte(mimeType, ';'); i >= 0 {
+				mimeType = strings.TrimSpace(mimeType[:i])
+			}
 			isText = mimeIsText(override)
 		} else {
 			var err error

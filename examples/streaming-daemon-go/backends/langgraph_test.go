@@ -109,8 +109,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				`"assistant_id":"vision-agent"`,
 				`"type":"human"`,
 				`"content":[`,
-				`{"type":"text","text":"What's in this image?"}`,
 				`{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}`,
+				`{"type":"text","text":"What's in this image?"}`,
 			},
 		},
 		{
@@ -131,8 +131,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				`"type":"human","content":"Hello"`,
 				`"type":"ai","content":"Hi there!"`,
 				`"type":"human","content":[`,
-				`{"type":"text","text":"Describe this image"}`,
 				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,SGVsbG8gV29ybGQ="}}`,
+				`{"type":"text","text":"Describe this image"}`,
 			},
 		},
 		{
@@ -147,8 +147,8 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":[`,
-				`{"type":"text","text":"Analyze"}`,
 				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,dGVzdA=="}}`,
+				`{"type":"text","text":"Analyze"}`,
 			},
 		},
 		{
@@ -164,9 +164,9 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":[`,
-				`{"type":"text","text":"Compare these images"}`,
 				`{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2Ux"}}`,
 				`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,aW1hZ2Uy"}}`,
+				`{"type":"text","text":"Compare these images"}`,
 			},
 		},
 		{
@@ -764,7 +764,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"notes": {MimeType: "text/plain", IsText: true, Text: "my notes"},
 		}
-		buf := appendContentWithAttachments(nil, "Read {notes} here", attachments, nil)
+		buf := appendContentWithAttachments(nil, "Read {notes} here", attachments, nil, "openai")
 		got := string(buf)
 		want := `"Read my notes here"`
 		if got != want {
@@ -776,7 +776,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"photo": {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
 		}
-		buf := appendContentWithAttachments(nil, "Describe {photo}", attachments, nil)
+		buf := appendContentWithAttachments(nil, "Describe {photo}", attachments, nil, "openai")
 		got := string(buf)
 		if !strings.Contains(got, `[`) {
 			t.Error("expected content array for image attachment")
@@ -794,7 +794,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 			"photo": {MimeType: "image/jpeg", IsText: false, Base64: "abc123"},
 			"notes": {MimeType: "text/plain", IsText: true, Text: "some notes"},
 		}
-		buf := appendContentWithAttachments(nil, "See {photo} with {notes} attached", attachments, nil)
+		buf := appendContentWithAttachments(nil, "See {photo} with {notes} attached", attachments, nil, "openai")
 		got := string(buf)
 		if !strings.Contains(got, `"type":"image_url"`) {
 			t.Errorf("missing image_url in %s", got)
@@ -814,7 +814,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		legacyImages := []ImageData{
 			{Base64: "oldimg", MimeType: "image/jpeg"},
 		}
-		buf := appendContentWithAttachments(nil, "See {photo}", attachments, legacyImages)
+		buf := appendContentWithAttachments(nil, "See {photo}", attachments, legacyImages, "openai")
 		got := string(buf)
 		// Should have both images
 		if !strings.Contains(got, "newimg") {
@@ -826,18 +826,18 @@ func TestAppendContentWithAttachments(t *testing.T) {
 	})
 
 	t.Run("no attachments or images produces simple string", func(t *testing.T) {
-		buf := appendContentWithAttachments(nil, "Hello world", nil, nil)
+		buf := appendContentWithAttachments(nil, "Hello world", nil, nil, "openai")
 		got := string(buf)
 		if got != `"Hello world"` {
 			t.Errorf("got %s, want %q", got, `"Hello world"`)
 		}
 	})
 
-	t.Run("image attachment without placeholder appended at end", func(t *testing.T) {
+	t.Run("unreferenced image precedes text", func(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"photo": {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
 		}
-		buf := appendContentWithAttachments(nil, "What is in this image?", attachments, nil)
+		buf := appendContentWithAttachments(nil, "What is in this image?", attachments, nil, "openai")
 		got := string(buf)
 		if !strings.Contains(got, `[`) {
 			t.Error("expected content array for image attachment")
@@ -848,13 +848,19 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		if !strings.Contains(got, `{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}`) {
 			t.Errorf("missing image part in %s", got)
 		}
+		// Image should come before text (LangChain convention)
+		imgIdx := strings.Index(got, `"type":"image_url"`)
+		txtIdx := strings.Index(got, `"type":"text"`)
+		if imgIdx > txtIdx {
+			t.Errorf("unreferenced image should precede text, got %s", got)
+		}
 	})
 
 	t.Run("text attachment without placeholder appended to text", func(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"notes": {MimeType: "text/plain", IsText: true, Text: " [attached notes]"},
 		}
-		buf := appendContentWithAttachments(nil, "Summarize this", attachments, nil)
+		buf := appendContentWithAttachments(nil, "Summarize this", attachments, nil, "openai")
 		got := string(buf)
 		want := `"Summarize this [attached notes]"`
 		if got != want {
@@ -869,7 +875,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 			"photo2": {MimeType: "image/jpeg", IsText: false, Base64: "img2"},
 		}
 		// Only {notes} is referenced; photo1 and photo2 should be appended
-		buf := appendContentWithAttachments(nil, "Read {notes} carefully", attachments, nil)
+		buf := appendContentWithAttachments(nil, "Read {notes} carefully", attachments, nil, "openai")
 		got := string(buf)
 		if !strings.Contains(got, `"type":"image_url"`) {
 			t.Errorf("unreferenced images should be appended, got %s", got)
@@ -887,7 +893,7 @@ func TestAppendContentWithAttachments(t *testing.T) {
 			"doc": {MimeType: "application/octet-stream", IsText: false, Base64: "AAAA"},
 			"img": {MimeType: "image/png", IsText: false, Base64: "iVBO"},
 		}
-		buf := appendContentWithAttachments(nil, "See {doc} and {img}", attachments, nil)
+		buf := appendContentWithAttachments(nil, "See {doc} and {img}", attachments, nil, "openai")
 		got := string(buf)
 		// The octet-stream attachment should keep its placeholder as literal text
 		if strings.Contains(got, "AAAA") {
@@ -905,12 +911,74 @@ func TestAppendContentWithAttachments(t *testing.T) {
 		attachments := map[string]ResolvedAttachment{
 			"notes": {MimeType: "text/plain", IsText: true, Text: "content"},
 		}
-		buf := appendContentWithAttachments(nil, "{notes} and {unknown}", attachments, nil)
+		buf := appendContentWithAttachments(nil, "{notes} and {unknown}", attachments, nil, "openai")
 		got := string(buf)
 		// No images, so should be simple string
 		want := `"content and {unknown}"`
 		if got != want {
 			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("pdf with anthropic format emits document block", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0xLjQ="},
+		}
+		buf := appendContentWithAttachments(nil, "Summarize {report}", attachments, nil, "anthropic")
+		got := string(buf)
+		if !strings.Contains(got, `[`) {
+			t.Error("expected content array for document attachment")
+		}
+		if !strings.Contains(got, `{"type":"text","text":"Summarize "}`) {
+			t.Errorf("missing text part in %s", got)
+		}
+		if !strings.Contains(got, `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQ="}}`) {
+			t.Errorf("missing document part in %s", got)
+		}
+	})
+
+	t.Run("pdf with openai format preserved as literal placeholder", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0xLjQ="},
+		}
+		buf := appendContentWithAttachments(nil, "Summarize {report}", attachments, nil, "openai")
+		got := string(buf)
+		// PDF data should NOT appear in output
+		if strings.Contains(got, "JVBERi0xLjQ=") {
+			t.Errorf("PDF data should not be emitted for openai format, got %s", got)
+		}
+		// Placeholder should be preserved as literal text
+		if !strings.Contains(got, "{report}") {
+			t.Errorf("PDF placeholder should be preserved as literal, got %s", got)
+		}
+	})
+
+	t.Run("pdf unreferenced with anthropic format emits document", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0xLjQ="},
+		}
+		buf := appendContentWithAttachments(nil, "What does this say?", attachments, nil, "anthropic")
+		got := string(buf)
+		if !strings.Contains(got, `"type":"document"`) {
+			t.Errorf("unreferenced PDF should emit document block for anthropic, got %s", got)
+		}
+		if !strings.Contains(got, "JVBERi0xLjQ=") {
+			t.Errorf("PDF data should be present in document block, got %s", got)
+		}
+	})
+
+	t.Run("mixed image and pdf with anthropic format", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"photo":  {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
+			"report": {MimeType: "application/pdf", IsText: false, Base64: "JVBERi0="},
+		}
+		buf := appendContentWithAttachments(nil, "See {photo} and read {report}", attachments, nil, "anthropic")
+		got := string(buf)
+		if !strings.Contains(got, `"type":"image_url"`) {
+			t.Errorf("image should use image_url format, got %s", got)
+		}
+		if !strings.Contains(got, `"type":"document"`) {
+			t.Errorf("PDF should use document format for anthropic, got %s", got)
 		}
 	})
 }

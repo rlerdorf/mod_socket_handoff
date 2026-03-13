@@ -1114,6 +1114,7 @@ func TestFileTypeFromExt(t *testing.T) {
 		{".jpeg", "image/jpeg", false, false},
 		{".gif", "image/gif", false, false},
 		{".webp", "image/webp", false, false},
+		{".pdf", "application/pdf", false, false},
 		{".txt", "text/plain", true, false},
 		{".md", "text/markdown", true, false},
 		{".csv", "text/csv", true, false},

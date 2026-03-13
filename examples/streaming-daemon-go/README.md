@@ -427,6 +427,8 @@ Attachments use a placeholder syntax: `{ref_name}` in the prompt is replaced wit
 the file content at that position. Text files (`.txt`, `.md`, `.csv`, `.json`, `.xml`,
 `.html`, `.yaml`, `.yml`, `.log`) are inlined as text. Image files (`.png`, `.jpg`,
 `.jpeg`, `.gif`, `.webp`) are inserted as `image_url` content parts for vision models.
+PDF files (`.pdf`) are supported when using a provider that accepts them — see
+[PDF Attachments](#pdf-attachments) below.
 
 ```php
 <?php
@@ -603,6 +605,66 @@ missing or wrong. Entries not in `attachment_types` still detect from the extens
 as usual. Any MIME type starting with `text/` (plus `application/json`,
 `application/xml`, `application/yaml`) is treated as text and inlined; everything
 else is base64-encoded as a binary attachment.
+
+#### PDF Attachments
+
+The `content_format` setting on a LangGraph profile controls how non-image
+binary attachments (like PDFs) are serialized in the content array. The default
+format uses OpenAI-compatible `image_url` parts for images, which LangChain
+translates to each provider's native format (Vertex AI, Anthropic, etc.):
+
+| Format | Images | PDFs | Unsupported types |
+|--------|--------|------|-------------------|
+| `openai` (default) | `image_url` | Placeholder preserved as literal `{ref}` | Warning logged |
+| `anthropic` | `image_url` | `document` block with base64 source | Emitted natively |
+
+To enable PDF support with an Anthropic-backed agent, set `content_format` on
+the profile:
+
+```yaml
+backend:
+  langgraph:
+    profiles:
+      claude-agent:
+        content_format: anthropic  # Anthropic document blocks for PDFs
+        assistant_id: claude-agent
+```
+
+PHP example:
+
+```php
+<?php
+$data_dir = '/run/handoff-data';
+$tmp = tempnam($data_dir, getmypid() . '_');
+$report = "$tmp.pdf";
+rename($tmp, $report);
+move_uploaded_file($_FILES['report']['tmp_name'], $report);
+
+$data = json_encode([
+    'prompt' => 'Summarize this document: {report}',
+    'user_id' => $_SESSION['user_id'],
+    'attachments' => [
+        'report' => basename($report),
+    ],
+]);
+
+header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+exit;
+```
+
+With the default `openai` format, the `{report}` placeholder is preserved as
+literal text (OpenAI does not support PDF content parts) and a warning is
+logged.
+
+With `content_format: anthropic`, the PDF produces a native document block:
+
+```json
+{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0..."}}
+```
+
+Unreferenced images (no `{ref_name}` placeholder in the prompt) are placed
+before the text part, matching the LangChain `HumanMessage` convention.
 
 #### Inline base64 images
 

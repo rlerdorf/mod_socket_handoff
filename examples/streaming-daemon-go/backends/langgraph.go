@@ -31,12 +31,13 @@ var (
 // langgraphProfile holds resolved configuration for a LangGraph backend target.
 // Profiles are built once during Init() and are read-only after that.
 type langgraphProfile struct {
-	apiBase     string
-	apiKey      string
-	assistantID string
-	streamMode  string
-	insecure    bool
-	httpClient  *http.Client
+	apiBase       string
+	apiKey        string
+	assistantID   string
+	streamMode    string
+	contentFormat string // "openai" (default) or "anthropic"
+	insecure      bool
+	httpClient    *http.Client
 }
 
 // LangGraph configuration (set during Init).
@@ -156,11 +157,12 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 
 	// Build default profile
 	langgraphDefault = &langgraphProfile{
-		apiBase:     apiBase,
-		apiKey:      apiKey,
-		assistantID: assistantID,
-		streamMode:  streamMode,
-		insecure:    insecure,
+		apiBase:       apiBase,
+		apiKey:        apiKey,
+		assistantID:   assistantID,
+		streamMode:    streamMode,
+		contentFormat: "openai",
+		insecure:      insecure,
 		httpClient: NewHTTPClient(TransportConfig{
 			BaseURL:     apiBase,
 			SocketPath:  socketPath,
@@ -175,11 +177,12 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 	if cfg != nil {
 		for name, pc := range cfg.LangGraph.Profiles {
 			p := &langgraphProfile{
-				apiBase:     langgraphDefault.apiBase,
-				apiKey:      langgraphDefault.apiKey,
-				assistantID: langgraphDefault.assistantID,
-				streamMode:  langgraphDefault.streamMode,
-				insecure:    langgraphDefault.insecure,
+				apiBase:       langgraphDefault.apiBase,
+				apiKey:        langgraphDefault.apiKey,
+				assistantID:   langgraphDefault.assistantID,
+				streamMode:    langgraphDefault.streamMode,
+				contentFormat: langgraphDefault.contentFormat,
+				insecure:      langgraphDefault.insecure,
 			}
 			if pc.APIBase != "" {
 				p.apiBase = pc.APIBase
@@ -192,6 +195,9 @@ func (l *LangGraph) Init(cfg *config.BackendConfig) error {
 			}
 			if pc.StreamMode != "" {
 				p.streamMode = pc.StreamMode
+			}
+			if pc.ContentFormat != "" {
+				p.contentFormat = pc.ContentFormat
 			}
 			if pc.InsecureSSL != nil {
 				p.insecure = *pc.InsecureSSL
@@ -374,6 +380,9 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		assistantID = handoff.AssistantID
 	}
 
+	// Set content format from profile for attachment serialization
+	handoff.ContentFormat = p.contentFormat
+
 	// For stateful runs, ensure the thread exists before streaming (same as PHP: create then stream).
 	if handoff.ThreadID != "" {
 		if err := ensureThreadExists(ctx, p, handoff.ThreadID); err != nil {
@@ -515,6 +524,10 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 
 	// Use messages array if provided, otherwise fall back to single prompt
 	hasAttachments := len(handoff.ResolvedAttachments) > 0
+	contentFormat := handoff.ContentFormat
+	if contentFormat == "" {
+		contentFormat = "openai"
+	}
 	if len(handoff.Messages) > 0 {
 		for i, msg := range handoff.Messages {
 			if i > 0 {
@@ -527,11 +540,11 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			// Apply attachments and images to the last message only
 			isLastMessage := i == len(handoff.Messages)-1
 			if isLastMessage && hasAttachments {
-				buf = appendContentWithAttachments(buf, msg.Content, handoff.ResolvedAttachments, handoff.ResolvedImages)
+				buf = appendContentWithAttachments(buf, msg.Content, handoff.ResolvedAttachments, handoff.ResolvedImages, contentFormat)
 			} else if isLastMessage && len(handoff.ResolvedImages) > 0 {
-				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages)
+				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages, contentFormat)
 			} else {
-				buf = appendMultimodalContent(buf, msg.Content, nil)
+				buf = appendMultimodalContent(buf, msg.Content, nil, contentFormat)
 			}
 			buf = append(buf, `}`...)
 		}
@@ -542,9 +555,9 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 		}
 		buf = append(buf, `{"type":"human","content":`...)
 		if hasAttachments {
-			buf = appendContentWithAttachments(buf, prompt, handoff.ResolvedAttachments, handoff.ResolvedImages)
+			buf = appendContentWithAttachments(buf, prompt, handoff.ResolvedAttachments, handoff.ResolvedImages, contentFormat)
 		} else {
-			buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages)
+			buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages, contentFormat)
 		}
 		buf = append(buf, `}`...)
 	}
@@ -679,11 +692,11 @@ func parsePlaceholders(text string, attachments map[string]ResolvedAttachment) [
 // attachment placeholders. If no attachments or images are present, emits a simple
 // JSON string. If only text attachments are present, inlines them into the text.
 // If any image attachment or legacy image is present, builds a content array.
-// Attachments not referenced by any placeholder are appended at the end:
-// unreferenced text is concatenated to any trailing text part, then
-// unreferenced images, then legacy images. This lets images work without
-// requiring a placeholder in the prompt.
-func appendContentWithAttachments(buf []byte, text string, attachments map[string]ResolvedAttachment, legacyImages []ImageData) []byte {
+// Unreferenced binary attachments and legacy images are emitted BEFORE the prompt
+// text, matching the LangChain HumanMessage convention. Referenced attachments
+// stay at their placeholder position. Unreferenced text is concatenated to any
+// trailing text part.
+func appendContentWithAttachments(buf []byte, text string, attachments map[string]ResolvedAttachment, legacyImages []ImageData, contentFormat string) []byte {
 	parts := parsePlaceholders(text, attachments)
 
 	// Collect which ref names were used by placeholders
@@ -716,18 +729,18 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		}
 	}
 
-	// Check if we have any image parts (from placeholders, unreferenced, or legacy)
-	hasImagePart := len(legacyImages) > 0 || len(unreferencedImages) > 0
-	if !hasImagePart {
+	// Check if we have any binary parts (images, documents) that require a content array
+	hasBinaryPart := len(legacyImages) > 0 || len(unreferencedImages) > 0
+	if !hasBinaryPart {
 		for _, p := range parts {
 			if p.attachment != nil {
-				hasImagePart = true
+				hasBinaryPart = true
 				break
 			}
 		}
 	}
 
-	if !hasImagePart {
+	if !hasBinaryPart {
 		// All parts are text — concatenate and emit as simple JSON string
 		buf = append(buf, '"')
 		for _, p := range parts {
@@ -760,7 +773,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		}
 	}
 
-	appendImage := func(mimeType, base64Data string) {
+	appendImageURL := func(mimeType, base64Data string) {
 		flushText()
 		if !first {
 			buf = append(buf, ',')
@@ -773,15 +786,56 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		buf = append(buf, `"}}`...)
 	}
 
+	appendDocument := func(mimeType, base64Data string) {
+		flushText()
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, `{"type":"document","source":{"type":"base64","media_type":"`...)
+		buf = appendJSONEscaped(buf, mimeType)
+		buf = append(buf, `","data":"`...)
+		buf = append(buf, base64Data...)
+		buf = append(buf, `"}}`...)
+	}
+
+	appendBinary := func(mimeType, base64Data, refName string) {
+		isImage := strings.HasPrefix(strings.ToLower(mimeType), "image/")
+		switch contentFormat {
+		case "anthropic":
+			if isImage {
+				appendImageURL(mimeType, base64Data)
+			} else {
+				appendDocument(mimeType, base64Data)
+			}
+		default: // "openai"
+			if isImage {
+				appendImageURL(mimeType, base64Data)
+			} else {
+				slog.Warn("non-image binary attachment not supported by content format",
+					"format", contentFormat, "mime", mimeType, "ref", refName)
+				textAccum.WriteString("{" + refName + "}")
+			}
+		}
+	}
+
+	// Emit unreferenced binary attachments and legacy images BEFORE the prompt
+	// text, matching the LangChain HumanMessage convention where images precede text.
+	for _, att := range unreferencedImages {
+		appendBinary(att.MimeType, att.Base64, "")
+	}
+	for _, img := range legacyImages {
+		mimeType := img.MimeType
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		appendBinary(mimeType, img.Base64, "")
+	}
+
+	// Emit placeholder-positioned parts (text and referenced attachments)
 	for _, p := range parts {
 		if p.attachment != nil {
-			if !strings.HasPrefix(strings.ToLower(p.attachment.MimeType), "image/") {
-				// Non-image binary: preserve placeholder as literal text
-				slog.Warn("non-image binary attachment kept as literal placeholder", "mime", p.attachment.MimeType, "ref", p.refName)
-				textAccum.WriteString("{" + p.refName + "}")
-				continue
-			}
-			appendImage(p.attachment.MimeType, p.attachment.Base64)
+			appendBinary(p.attachment.MimeType, p.attachment.Base64, p.refName)
 		} else {
 			textAccum.WriteString(p.text)
 		}
@@ -795,21 +849,31 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 	// Flush remaining text
 	flushText()
 
-	// Append unreferenced image attachments (only actual images)
-	for _, att := range unreferencedImages {
-		if !strings.HasPrefix(strings.ToLower(att.MimeType), "image/") {
-			slog.Warn("skipping non-image binary attachment", "mime", att.MimeType)
-			continue
-		}
-		appendImage(att.MimeType, att.Base64)
+	buf = append(buf, ']')
+	return buf
+}
+
+// appendMultimodalContent appends a multimodal content array with text and image parts.
+// Images are placed before the text part, matching the LangChain HumanMessage convention.
+// If images is empty, appends the text as a simple JSON string (no array wrapper).
+func appendMultimodalContent(buf []byte, text string, images []ImageData, _ string) []byte {
+	if len(images) == 0 {
+		buf = append(buf, '"')
+		buf = appendJSONEscaped(buf, text)
+		buf = append(buf, '"')
+		return buf
 	}
 
-	// Append legacy images at the end
-	for _, img := range legacyImages {
-		if !first {
+	// Start content array
+	buf = append(buf, '[')
+
+	// Add image parts first, matching the LangChain convention where images
+	// precede the text prompt. Base64 is inherently JSON-safe ([A-Za-z0-9+/=]),
+	// but mimeType is user-controlled so we escape it to prevent JSON injection.
+	for i, img := range images {
+		if i > 0 {
 			buf = append(buf, ',')
 		}
-		first = false
 		mimeType := img.MimeType
 		if mimeType == "" {
 			mimeType = "image/jpeg"
@@ -821,42 +885,10 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		buf = append(buf, `"}}`...)
 	}
 
-	buf = append(buf, ']')
-	return buf
-}
-
-// appendMultimodalContent appends a multimodal content array with text and image parts.
-// Format: [{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:..."}}]
-// If images is empty, appends the text as a simple JSON string (no array wrapper).
-func appendMultimodalContent(buf []byte, text string, images []ImageData) []byte {
-	if len(images) == 0 {
-		buf = append(buf, '"')
-		buf = appendJSONEscaped(buf, text)
-		buf = append(buf, '"')
-		return buf
-	}
-
-	// Start content array
-	buf = append(buf, '[')
-
-	// Add text part
-	buf = append(buf, `{"type":"text","text":"`...)
+	// Add text part after images
+	buf = append(buf, `,{"type":"text","text":"`...)
 	buf = appendJSONEscaped(buf, text)
 	buf = append(buf, `"}`...)
-
-	// Add image parts. Base64 is inherently JSON-safe ([A-Za-z0-9+/=]),
-	// but mimeType is user-controlled so we escape it to prevent JSON injection.
-	for _, img := range images {
-		mimeType := img.MimeType
-		if mimeType == "" {
-			mimeType = "image/jpeg"
-		}
-		buf = append(buf, `,{"type":"image_url","image_url":{"url":"data:`...)
-		buf = appendJSONEscaped(buf, mimeType)
-		buf = append(buf, `;base64,`...)
-		buf = append(buf, img.Base64...)
-		buf = append(buf, `"}}`...)
-	}
 
 	// Close content array
 	buf = append(buf, ']')

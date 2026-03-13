@@ -47,6 +47,11 @@ backend:
     #     api_key: lgk_sales_key
     #     api_base: https://sales-api.example.com/v1
     #     assistant_id: sales-agent
+    #   claude-agent:
+    #     # SECURITY: Prefer environment variables or a secrets manager over storing keys here.
+    #     api_key: lgk_claude_key
+    #     assistant_id: claude-agent
+    #     content_format: anthropic  # Anthropic document blocks for PDFs (default: openai)
     #   support:
     #     # SECURITY: Prefer environment variables or a secrets manager over storing keys here.
     #     api_key: lgk_support_key

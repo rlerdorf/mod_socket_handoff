@@ -138,3 +138,30 @@ func TestValidateGCPercent(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateContentFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		wantErr bool
+	}{
+		{"empty is valid (defaults to openai)", "", false},
+		{"openai is valid", "openai", false},
+		{"anthropic is valid", "anthropic", false},
+		{"unknown is invalid", "vertex_ai", true},
+		{"typo is invalid", "OpenAI", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Backend.LangGraph.Profiles = map[string]LangGraphProfileConfig{
+				"test": {ContentFormat: tc.format},
+			}
+			err := cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
