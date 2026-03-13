@@ -53,8 +53,23 @@ type HandoffData struct {
 	Images     []ImageData `json:"images,omitempty"`      // Inline base64 images (small images only)
 	ImagePaths []string    `json:"image_paths,omitempty"` // Paths to image files on disk (daemon reads, encodes, deletes)
 
+	// Generalized attachments: ref_name -> relative file path (under data_dir)
+	Attachments     map[string]string `json:"attachments,omitempty"`
+	AttachmentTypes map[string]string `json:"attachment_types,omitempty"` // ref_name -> MIME type override (skips extension detection)
+
 	// Computed field populated by resolveImages() before Stream()
 	ResolvedImages []ImageData `json:"-"`
+
+	// Computed field populated by resolveAttachments() before Stream()
+	ResolvedAttachments map[string]ResolvedAttachment `json:"-"`
+}
+
+// ResolvedAttachment holds a resolved attachment ready for inclusion in LLM requests.
+type ResolvedAttachment struct {
+	MimeType string // e.g. "image/png", "text/plain"
+	IsText   bool   // true = inline text content, false = base64 binary
+	Base64   string // populated for binary (images)
+	Text     string // populated for text files
 }
 
 // ImageData represents a single image for multimodal requests.

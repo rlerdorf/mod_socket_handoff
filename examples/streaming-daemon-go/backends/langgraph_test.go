@@ -618,6 +618,343 @@ func TestParseLG(t *testing.T) {
 	}
 }
 
+func TestParsePlaceholders(t *testing.T) {
+	textAtt := ResolvedAttachment{MimeType: "text/plain", IsText: true, Text: "file content"}
+	imgAtt := ResolvedAttachment{MimeType: "image/png", IsText: false, Base64: "iVBOR"}
+	attachments := map[string]ResolvedAttachment{
+		"notes": textAtt,
+		"photo": imgAtt,
+	}
+
+	t.Run("single text placeholder resolved", func(t *testing.T) {
+		parts := parsePlaceholders("Read {notes} carefully", attachments)
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "Read " {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "Read ")
+		}
+		if parts[1].text != "file content" {
+			t.Errorf("part[1] = %q, want %q", parts[1].text, "file content")
+		}
+		if parts[2].text != " carefully" {
+			t.Errorf("part[2] = %q, want %q", parts[2].text, " carefully")
+		}
+	})
+
+	t.Run("single image placeholder resolved", func(t *testing.T) {
+		parts := parsePlaceholders("Describe {photo}", attachments)
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "Describe " {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "Describe ")
+		}
+		if parts[1].attachment == nil {
+			t.Fatal("part[1] should be an attachment")
+		}
+		if parts[1].attachment.MimeType != "image/png" {
+			t.Errorf("attachment mime = %q, want image/png", parts[1].attachment.MimeType)
+		}
+	})
+
+	t.Run("multiple placeholders", func(t *testing.T) {
+		parts := parsePlaceholders("See {photo} and read {notes}", attachments)
+		// "See " + {photo} + " and read " + {notes}
+		if len(parts) != 4 {
+			t.Fatalf("expected 4 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[1].attachment == nil {
+			t.Error("part[1] should be image attachment")
+		}
+		if parts[3].text != "file content" {
+			t.Errorf("part[3] = %q, want %q", parts[3].text, "file content")
+		}
+	})
+
+	t.Run("unresolved placeholder left as literal", func(t *testing.T) {
+		parts := parsePlaceholders("Hello {unknown} world", attachments)
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "Hello {unknown}" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "Hello {unknown}")
+		}
+		if parts[1].text != " world" {
+			t.Errorf("part[1] = %q, want %q", parts[1].text, " world")
+		}
+	})
+
+	t.Run("no placeholders returns single text part", func(t *testing.T) {
+		parts := parsePlaceholders("Just plain text", attachments)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d", len(parts))
+		}
+		if parts[0].text != "Just plain text" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "Just plain text")
+		}
+	})
+
+	t.Run("placeholder at start of string", func(t *testing.T) {
+		parts := parsePlaceholders("{notes} at start", attachments)
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "file content" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "file content")
+		}
+	})
+
+	t.Run("placeholder at end of string", func(t *testing.T) {
+		parts := parsePlaceholders("at end {notes}", attachments)
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[1].text != "file content" {
+			t.Errorf("part[1] = %q, want %q", parts[1].text, "file content")
+		}
+	})
+
+	t.Run("adjacent placeholders", func(t *testing.T) {
+		parts := parsePlaceholders("{notes}{photo}", attachments)
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "file content" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "file content")
+		}
+		if parts[1].attachment == nil {
+			t.Error("part[1] should be image attachment")
+		}
+	})
+
+	t.Run("lone open brace treated as literal", func(t *testing.T) {
+		parts := parsePlaceholders("hello { world", attachments)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "hello { world" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "hello { world")
+		}
+	})
+
+	t.Run("lone close brace treated as literal", func(t *testing.T) {
+		parts := parsePlaceholders("hello } world", attachments)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d: %+v", len(parts), parts)
+		}
+		if parts[0].text != "hello } world" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "hello } world")
+		}
+	})
+
+	t.Run("empty attachments map returns single part", func(t *testing.T) {
+		parts := parsePlaceholders("Hello {notes}", nil)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d", len(parts))
+		}
+		if parts[0].text != "Hello {notes}" {
+			t.Errorf("part[0] = %q, want %q", parts[0].text, "Hello {notes}")
+		}
+	})
+}
+
+func TestAppendContentWithAttachments(t *testing.T) {
+	t.Run("text attachment inlined produces simple string", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"notes": {MimeType: "text/plain", IsText: true, Text: "my notes"},
+		}
+		buf := appendContentWithAttachments(nil, "Read {notes} here", attachments, nil)
+		got := string(buf)
+		want := `"Read my notes here"`
+		if got != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("image attachment produces content array", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"photo": {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
+		}
+		buf := appendContentWithAttachments(nil, "Describe {photo}", attachments, nil)
+		got := string(buf)
+		if !strings.Contains(got, `[`) {
+			t.Error("expected content array for image attachment")
+		}
+		if !strings.Contains(got, `{"type":"text","text":"Describe "}`) {
+			t.Errorf("missing text part in %s", got)
+		}
+		if !strings.Contains(got, `{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}`) {
+			t.Errorf("missing image part in %s", got)
+		}
+	})
+
+	t.Run("mixed text before image then text after", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"photo": {MimeType: "image/jpeg", IsText: false, Base64: "abc123"},
+			"notes": {MimeType: "text/plain", IsText: true, Text: "some notes"},
+		}
+		buf := appendContentWithAttachments(nil, "See {photo} with {notes} attached", attachments, nil)
+		got := string(buf)
+		if !strings.Contains(got, `"type":"image_url"`) {
+			t.Errorf("missing image_url in %s", got)
+		}
+		if !strings.Contains(got, `"See "`) {
+			t.Errorf("missing leading text in %s", got)
+		}
+		if !strings.Contains(got, `some notes`) {
+			t.Errorf("missing inlined text attachment in %s", got)
+		}
+	})
+
+	t.Run("legacy images and attachments both present", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"photo": {MimeType: "image/png", IsText: false, Base64: "newimg"},
+		}
+		legacyImages := []ImageData{
+			{Base64: "oldimg", MimeType: "image/jpeg"},
+		}
+		buf := appendContentWithAttachments(nil, "See {photo}", attachments, legacyImages)
+		got := string(buf)
+		// Should have both images
+		if !strings.Contains(got, "newimg") {
+			t.Errorf("missing attachment image in %s", got)
+		}
+		if !strings.Contains(got, "oldimg") {
+			t.Errorf("missing legacy image in %s", got)
+		}
+	})
+
+	t.Run("no attachments or images produces simple string", func(t *testing.T) {
+		buf := appendContentWithAttachments(nil, "Hello world", nil, nil)
+		got := string(buf)
+		if got != `"Hello world"` {
+			t.Errorf("got %s, want %q", got, `"Hello world"`)
+		}
+	})
+
+	t.Run("image attachment without placeholder appended at end", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"photo": {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
+		}
+		buf := appendContentWithAttachments(nil, "What is in this image?", attachments, nil)
+		got := string(buf)
+		if !strings.Contains(got, `[`) {
+			t.Error("expected content array for image attachment")
+		}
+		if !strings.Contains(got, `{"type":"text","text":"What is in this image?"}`) {
+			t.Errorf("missing text part in %s", got)
+		}
+		if !strings.Contains(got, `{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR"}}`) {
+			t.Errorf("missing image part in %s", got)
+		}
+	})
+
+	t.Run("text attachment without placeholder appended to text", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"notes": {MimeType: "text/plain", IsText: true, Text: " [attached notes]"},
+		}
+		buf := appendContentWithAttachments(nil, "Summarize this", attachments, nil)
+		got := string(buf)
+		want := `"Summarize this [attached notes]"`
+		if got != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("mix of referenced and unreferenced attachments", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"notes":  {MimeType: "text/plain", IsText: true, Text: "inline notes"},
+			"photo1": {MimeType: "image/png", IsText: false, Base64: "img1"},
+			"photo2": {MimeType: "image/jpeg", IsText: false, Base64: "img2"},
+		}
+		// Only {notes} is referenced; photo1 and photo2 should be appended
+		buf := appendContentWithAttachments(nil, "Read {notes} carefully", attachments, nil)
+		got := string(buf)
+		if !strings.Contains(got, `"type":"image_url"`) {
+			t.Errorf("unreferenced images should be appended, got %s", got)
+		}
+		if !strings.Contains(got, "img1") || !strings.Contains(got, "img2") {
+			t.Errorf("both unreferenced images should be present in %s", got)
+		}
+		if !strings.Contains(got, "inline notes") {
+			t.Errorf("referenced text should be inlined in %s", got)
+		}
+	})
+
+	t.Run("unresolved placeholder preserved in text", func(t *testing.T) {
+		attachments := map[string]ResolvedAttachment{
+			"notes": {MimeType: "text/plain", IsText: true, Text: "content"},
+		}
+		buf := appendContentWithAttachments(nil, "{notes} and {unknown}", attachments, nil)
+		got := string(buf)
+		// No images, so should be simple string
+		want := `"content and {unknown}"`
+		if got != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+}
+
+func TestBuildLangGraphRequestBodyWithAttachments(t *testing.T) {
+	t.Run("text attachment inlined in single prompt", func(t *testing.T) {
+		handoff := HandoffData{
+			Prompt: "Read {notes} carefully",
+			ResolvedAttachments: map[string]ResolvedAttachment{
+				"notes": {MimeType: "text/plain", IsText: true, Text: "meeting notes"},
+			},
+		}
+		got := string(buildLangGraphRequestBody(handoff, "agent", "messages-tuple"))
+		if !strings.Contains(got, "meeting notes") {
+			t.Errorf("expected inlined text in %s", got)
+		}
+		if strings.Contains(got, "{notes}") {
+			t.Errorf("placeholder should be resolved in %s", got)
+		}
+	})
+
+	t.Run("image attachment in messages array on last message only", func(t *testing.T) {
+		handoff := HandoffData{
+			Messages: []Message{
+				{Role: "user", Content: "First {photo}"},
+				{Role: "assistant", Content: "I see"},
+				{Role: "user", Content: "Now describe {photo}"},
+			},
+			ResolvedAttachments: map[string]ResolvedAttachment{
+				"photo": {MimeType: "image/png", IsText: false, Base64: "iVBOR"},
+			},
+		}
+		got := string(buildLangGraphRequestBody(handoff, "agent", "messages-tuple"))
+		// First message should NOT have resolved placeholder (not last)
+		if !strings.Contains(got, `"content":"First {photo}"`) {
+			t.Errorf("first message placeholder should be literal in %s", got)
+		}
+		// Last message should have image
+		if !strings.Contains(got, `"type":"image_url"`) {
+			t.Errorf("last message should contain image_url in %s", got)
+		}
+	})
+
+	t.Run("attachments with legacy images combined", func(t *testing.T) {
+		handoff := HandoffData{
+			Prompt: "See {photo}",
+			ResolvedAttachments: map[string]ResolvedAttachment{
+				"photo": {MimeType: "image/png", IsText: false, Base64: "new"},
+			},
+			ResolvedImages: []ImageData{
+				{Base64: "legacy", MimeType: "image/jpeg"},
+			},
+		}
+		got := string(buildLangGraphRequestBody(handoff, "agent", "messages-tuple"))
+		if !strings.Contains(got, "new") {
+			t.Errorf("missing attachment image in %s", got)
+		}
+		if !strings.Contains(got, "legacy") {
+			t.Errorf("missing legacy image in %s", got)
+		}
+	})
+}
+
 func TestResolveLangGraphProfile(t *testing.T) {
 	// Set up default and a named profile
 	origDefault := langgraphDefault

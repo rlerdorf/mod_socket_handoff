@@ -29,7 +29,7 @@ type ServerConfig struct {
 	PprofAddr           string `yaml:"pprof_addr"`
 	MemLimit            string `yaml:"mem_limit"`   // Soft memory limit, e.g. "768MiB", "1GiB"
 	GCPercent           int    `yaml:"gc_percent"` // GOGC value; 0 = not set (use -gc-percent flag for GOGC=0)
-	ImageDir            string `yaml:"image_dir"`  // Allowed directory for image file reads (default: /run/handoff-images)
+	DataDir             string `yaml:"data_dir"`   // Allowed directory for attachment file reads (default: /run/handoff-data)
 }
 
 // BackendConfig contains backend selection and configuration.
@@ -138,8 +138,8 @@ func (c *Config) Validate() error {
 	if c.Server.SocketPath != "" && !filepath.IsAbs(c.Server.SocketPath) {
 		return fmt.Errorf("server.socket_path must be absolute path")
 	}
-	if c.Server.ImageDir != "" && !filepath.IsAbs(c.Server.ImageDir) {
-		return fmt.Errorf("server.image_dir must be absolute path")
+	if c.Server.DataDir != "" && !filepath.IsAbs(c.Server.DataDir) {
+		return fmt.Errorf("server.data_dir must be absolute path")
 	}
 	if c.Backend.OpenAI.APISocket != "" && !filepath.IsAbs(c.Backend.OpenAI.APISocket) {
 		return fmt.Errorf("backend.openai.api_socket must be absolute path")
@@ -252,7 +252,7 @@ func Default() *Config {
 			SocketMode:          0660,
 			MaxConnections:      50000,
 			MaxStreamDurationMs: 300000,
-			ImageDir:            "/run/handoff-images",
+			DataDir:             "/run/handoff-data",
 		},
 		Backend: BackendConfig{
 			Provider:     "mock",

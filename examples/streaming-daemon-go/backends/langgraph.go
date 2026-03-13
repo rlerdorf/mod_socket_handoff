@@ -514,6 +514,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 	buf = append(buf, `","input":{"messages":[`...)
 
 	// Use messages array if provided, otherwise fall back to single prompt
+	hasAttachments := len(handoff.ResolvedAttachments) > 0
 	if len(handoff.Messages) > 0 {
 		for i, msg := range handoff.Messages {
 			if i > 0 {
@@ -523,9 +524,11 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			buf = appendJSONEscaped(buf, mapRoleToLangGraph(msg.Role))
 			buf = append(buf, `","content":`...)
 
-			// Attach images to the last message if present
+			// Apply attachments and images to the last message only
 			isLastMessage := i == len(handoff.Messages)-1
-			if isLastMessage && len(handoff.ResolvedImages) > 0 {
+			if isLastMessage && hasAttachments {
+				buf = appendContentWithAttachments(buf, msg.Content, handoff.ResolvedAttachments, handoff.ResolvedImages)
+			} else if isLastMessage && len(handoff.ResolvedImages) > 0 {
 				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages)
 			} else {
 				buf = appendMultimodalContent(buf, msg.Content, nil)
@@ -538,7 +541,11 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			prompt = "Hello"
 		}
 		buf = append(buf, `{"type":"human","content":`...)
-		buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages)
+		if hasAttachments {
+			buf = appendContentWithAttachments(buf, prompt, handoff.ResolvedAttachments, handoff.ResolvedImages)
+		} else {
+			buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages)
+		}
 		buf = append(buf, `}`...)
 	}
 
@@ -598,6 +605,212 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 	langgraphBufPool.Put(bufPtr)
 
 	return result
+}
+
+// contentPart represents a parsed segment of prompt text with placeholder resolution.
+type contentPart struct {
+	text       string              // literal text or inlined text-attachment content
+	attachment *ResolvedAttachment // non-nil for image/binary attachments
+	refName    string              // original ref name (for debugging)
+}
+
+// parsePlaceholders performs a linear scan of text, resolving {ref_name} placeholders
+// against the attachments map. Unresolved placeholders are left as literal text.
+func parsePlaceholders(text string, attachments map[string]ResolvedAttachment) []contentPart {
+	if len(attachments) == 0 {
+		return []contentPart{{text: text}}
+	}
+
+	var parts []contentPart
+	i := 0
+	for i < len(text) {
+		open := strings.IndexByte(text[i:], '{')
+		if open < 0 {
+			// No more braces, append rest as text
+			parts = append(parts, contentPart{text: text[i:]})
+			break
+		}
+		open += i // absolute index
+
+		close := strings.IndexByte(text[open+1:], '}')
+		if close < 0 {
+			// Lone '{' with no matching '}', treat rest as literal
+			parts = append(parts, contentPart{text: text[i:]})
+			break
+		}
+		close += open + 1 // absolute index
+
+		refName := text[open+1 : close]
+		att, found := attachments[refName]
+
+		if !found {
+			// Not a known ref — emit everything up to and including the closing brace as literal text
+			parts = append(parts, contentPart{text: text[i : close+1]})
+			i = close + 1
+			continue
+		}
+
+		// Emit text before the placeholder
+		if open > i {
+			parts = append(parts, contentPart{text: text[i:open]})
+		}
+
+		if att.IsText {
+			// Inline text content at the placeholder position
+			parts = append(parts, contentPart{text: att.Text, refName: refName})
+		} else {
+			// Binary attachment (image) — emit as attachment part
+			attCopy := att
+			parts = append(parts, contentPart{attachment: &attCopy, refName: refName})
+		}
+
+		i = close + 1
+	}
+
+	// Handle empty text
+	if len(parts) == 0 {
+		parts = append(parts, contentPart{text: ""})
+	}
+
+	return parts
+}
+
+// appendContentWithAttachments builds the content field for a message, resolving
+// attachment placeholders. If no attachments or images are present, emits a simple
+// JSON string. If only text attachments are present, inlines them into the text.
+// If any image attachment or legacy image is present, builds a content array.
+// Attachments not referenced by any placeholder are appended at the end (after
+// legacy images), so images work without requiring a placeholder in the prompt.
+func appendContentWithAttachments(buf []byte, text string, attachments map[string]ResolvedAttachment, legacyImages []ImageData) []byte {
+	parts := parsePlaceholders(text, attachments)
+
+	// Collect which ref names were used by placeholders
+	referenced := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		if p.refName != "" {
+			referenced[p.refName] = true
+		}
+	}
+
+	// Collect unreferenced attachments (sorted for deterministic output)
+	var unreferencedImages []ResolvedAttachment
+	var unreferencedText []ResolvedAttachment
+	if len(referenced) < len(attachments) {
+		// Collect unreferenced attachment names and sort for determinism
+		var names []string
+		for name := range attachments {
+			if !referenced[name] {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			att := attachments[name]
+			if att.IsText {
+				unreferencedText = append(unreferencedText, att)
+			} else {
+				unreferencedImages = append(unreferencedImages, att)
+			}
+		}
+	}
+
+	// Check if we have any image parts (from placeholders, unreferenced, or legacy)
+	hasImagePart := len(legacyImages) > 0 || len(unreferencedImages) > 0
+	if !hasImagePart {
+		for _, p := range parts {
+			if p.attachment != nil {
+				hasImagePart = true
+				break
+			}
+		}
+	}
+
+	if !hasImagePart {
+		// All parts are text — concatenate and emit as simple JSON string
+		buf = append(buf, '"')
+		for _, p := range parts {
+			buf = appendJSONEscaped(buf, p.text)
+		}
+		// Append unreferenced text attachments
+		for _, att := range unreferencedText {
+			buf = appendJSONEscaped(buf, att.Text)
+		}
+		buf = append(buf, '"')
+		return buf
+	}
+
+	// Build content array with text and image_url parts
+	buf = append(buf, '[')
+	first := true
+
+	// Merge consecutive text parts into one text element
+	var textAccum strings.Builder
+	flushText := func() {
+		if textAccum.Len() > 0 {
+			if !first {
+				buf = append(buf, ',')
+			}
+			first = false
+			buf = append(buf, `{"type":"text","text":"`...)
+			buf = appendJSONEscaped(buf, textAccum.String())
+			buf = append(buf, `"}`...)
+			textAccum.Reset()
+		}
+	}
+
+	appendImage := func(mimeType, base64Data string) {
+		flushText()
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, `{"type":"image_url","image_url":{"url":"data:`...)
+		buf = appendJSONEscaped(buf, mimeType)
+		buf = append(buf, `;base64,`...)
+		buf = append(buf, base64Data...)
+		buf = append(buf, `"}}`...)
+	}
+
+	for _, p := range parts {
+		if p.attachment != nil {
+			appendImage(p.attachment.MimeType, p.attachment.Base64)
+		} else {
+			textAccum.WriteString(p.text)
+		}
+	}
+
+	// Append unreferenced text attachments to the text accumulator
+	for _, att := range unreferencedText {
+		textAccum.WriteString(att.Text)
+	}
+
+	// Flush remaining text
+	flushText()
+
+	// Append unreferenced image attachments
+	for _, att := range unreferencedImages {
+		appendImage(att.MimeType, att.Base64)
+	}
+
+	// Append legacy images at the end
+	for _, img := range legacyImages {
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		mimeType := img.MimeType
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		buf = append(buf, `{"type":"image_url","image_url":{"url":"data:`...)
+		buf = appendJSONEscaped(buf, mimeType)
+		buf = append(buf, `;base64,`...)
+		buf = append(buf, img.Base64...)
+		buf = append(buf, `"}}`...)
+	}
+
+	buf = append(buf, ']')
+	return buf
 }
 
 // appendMultimodalContent appends a multimodal content array with text and image parts.
