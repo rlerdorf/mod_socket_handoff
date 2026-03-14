@@ -6,12 +6,10 @@ Production-ready Go daemon for receiving Apache socket handoffs and streaming re
 
 This daemon receives client connections from Apache via `mod_socket_handoff` using Unix domain socket fd passing (`SCM_RIGHTS`). Once the connection is handed off, the daemon streams responses from the LLM API directly to the client while the Apache worker is freed immediately.
 
-```
-Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ──HTTP/2──> LLM API
-                  │         (fd pass)           │
-                  │                             │
-            Worker freed              Streams SSE to client
-```
+
+<p align="center">
+  <img src="daemon-architecture.svg" alt="Architecture" />
+</p>
 
 ## Features
 
