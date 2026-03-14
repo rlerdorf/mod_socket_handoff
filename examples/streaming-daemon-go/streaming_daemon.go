@@ -1148,7 +1148,7 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 	}
 
 	// Reset ResolvedImages to prevent duplication if called more than once
-	handoff.ResolvedImages = handoff.ResolvedImages[:0]
+	handoff.ResolvedImages = nil
 
 	// Copy inline images to ResolvedImages
 	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
