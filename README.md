@@ -32,9 +32,11 @@ Streaming LLM responses:
 
 ## How It Works
 
-<p align="center">
-  <img src="Architecture.svg" alt="Architecture" />
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Architecture.svg">
+  <source media="(prefers-color-scheme: light)" srcset="Architecture-light.svg">
+  <img src="Architecture-light.svg" alt="Streaming Daemon Architecture">
+</picture>
 
 ## Build
 
