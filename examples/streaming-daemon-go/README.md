@@ -20,6 +20,8 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ─�
 - **Goroutine-per-connection** - Lightweight concurrency for high throughput
 - **SCM_RIGHTS fd receiving** - Portable buffer sizing with `syscall.CmsgSpace`
 - **Connection limiting** - Configurable max concurrent connections (default: 50,000)
+- **Multimodal attachments** - File-based image/text/PDF attachments with placeholder syntax
+- **Hot-reload** - SIGHUP reloads logging, memory limit, and GC settings without restart
 - **Graceful shutdown** - Drains active connections on SIGTERM/SIGINT
 - **Per-write timeouts** - Prevents hung connections from blocking resources
 - **Prometheus metrics** - Built-in metrics endpoint for monitoring
@@ -27,7 +29,7 @@ Client ──TCP──> Apache ──Unix Socket──> streaming-daemon-go ─�
 
 ## Requirements
 
-- Go 1.25.7+ (automatically downloaded if missing — see below)
+- Go 1.26.0+ (automatically downloaded if missing — see below)
 - Linux (for SCM_RIGHTS support)
 - Apache with `mod_socket_handoff` enabled
 
@@ -64,13 +66,13 @@ make build-pgo
 make profile
 ```
 
-The Makefile uses `ensure-go.sh` to verify that Go >= 1.25.7 is available.
+The Makefile uses `ensure-go.sh` to verify that Go >= 1.26.0 is available.
 If the system Go is missing or too old, the script automatically downloads
 the latest Go from go.dev into a local `.goroot/` directory with SHA256
 verification. Set `MIN_GO_VERSION` to override the minimum:
 
 ```bash
-make MIN_GO_VERSION=1.26.0
+make MIN_GO_VERSION=1.27.0
 ```
 
 ## Quick Start
@@ -175,6 +177,8 @@ Configuration options:
 | - | `LANGGRAPH_STREAM_MODE` | `backend.langgraph.stream_mode` | Stream mode (default: messages-tuple) |
 | - | `LANGGRAPH_HTTP2_ENABLED` | `backend.langgraph.http2_enabled` | Enable HTTP/2 |
 | - | `LANGGRAPH_INSECURE_SSL` | `backend.langgraph.insecure_ssl` | Skip TLS verification |
+| - | - | `backend.langgraph.profiles.<name>.*` | Named profiles (inherit from top-level langgraph config) |
+| - | - | `backend.langgraph.profiles.<name>.content_format` | `openai` (default) or `anthropic` — controls PDF/document serialization |
 
 LangGraph-specific handoff data fields:
 
@@ -183,6 +187,7 @@ LangGraph-specific handoff data fields:
 | `thread_id` | Thread ID for stateful conversations (uses `/threads/{id}/runs/stream`) |
 | `assistant_id` | Override the default assistant ID |
 | `stream_mode` | Stream modes to use (e.g., `["messages"]`, `["events"]`); defaults to configured `LANGGRAPH_STREAM_MODE` |
+| `profile` | Named LangGraph profile from config (selects API base, key, assistant, content format) |
 | `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
 | `attachments` | Map of ref names to file paths (relative to `data_dir`) for multimodal requests — see [Attachments](#attachments-multimodal-requests) |
 | `attachment_types` | Optional map of ref names to MIME types (overrides extension-based detection) |
@@ -352,7 +357,7 @@ Flags override config file values when explicitly set. The "Config Default" colu
 ### Signals
 
 - **SIGTERM/SIGINT** - Graceful shutdown, waits for active streams (up to 2 minutes)
-- **SIGHUP** - Logs current active connection count
+- **SIGHUP** - Hot-reloads config file (logging level/format, memory limit, GC percent). Settings that require a restart (socket path, backend, max connections) are not reloaded. If no `-config` flag was given, logs a warning and does nothing.
 
 ## File Structure
 
@@ -375,6 +380,7 @@ streaming-daemon-go/
 │   └── metrics.go           # Backend metrics helpers
 └── config/
     ├── config.go            # Config structs and loader
+    ├── config_test.go       # Config tests
     └── example.yaml         # Example configuration
 ```
 
@@ -579,19 +585,19 @@ extensions like `.dat` or `.bin`:
 ```php
 <?php
 $data_dir = '/run/handoff-data';
-$tmp = tempnam($data_dir, getmypid() . '_');
-// No rename needed — extension doesn't matter when attachment_types is set
-file_put_contents($tmp, ImageCompressor::compressAndEncode($input->image, raw: true));
-$mime_type = ImageCompressor::getOutputMimeType($input->image->mimetype);
+// ImageCompressor::stageForHandoff() handles compression, temp file creation,
+// and returns the filename + MIME type. It uses attachment_types so the daemon
+// doesn't need to guess from the extension.
+$staged = ImageCompressor::stageForHandoff($input->image, $data_dir);
 
 $data = json_encode([
     'prompt' => 'What is in this image?',
     'user_id' => $_SESSION['user_id'],
     'attachments' => [
-        'photo' => basename($tmp),
+        'photo' => $staged['filename'],
     ],
     'attachment_types' => [
-        'photo' => $mime_type,  // e.g. "image/jpeg" — overrides extension detection
+        'photo' => $staged['mime_type'],  // e.g. "image/jpeg" — overrides extension detection
     ],
 ]);
 
@@ -668,9 +674,8 @@ before the text part, matching the LangChain `HumanMessage` convention.
 
 #### Inline base64 images
 
-If the image is already in memory as base64 (e.g., from `ImageCompressor`), there
-is no need to write it to disk. Use the `images` array to pass it directly through
-the handoff JSON:
+For small images already in PHP memory, the `images` array passes base64 data
+directly through the handoff JSON without writing to disk:
 
 ```php
 <?php
@@ -688,11 +693,20 @@ header('X-Handoff-Data: ' . $data);
 exit;
 ```
 
-This avoids the disk round-trip entirely. The image is sent inline in the handoff
-JSON and appended to the last message as an `image_url` content part. The
-`mime_type` field defaults to `image/jpeg` if omitted. Use this path for small to
-medium images; for large files that might exceed the 128 KB handoff buffer, stage
-them on disk via `attachments` instead.
+The `mime_type` field defaults to `image/jpeg` if omitted. The image is appended
+to the last message as an `image_url` content part (before the text, matching the
+LangChain convention).
+
+**When to use which approach:**
+
+| Approach | Best for | Limit |
+|----------|----------|-------|
+| `attachments` + `stageForHandoff()` | Production image uploads | 20 MB per file |
+| `images` array (inline base64) | Small images already in memory | ~96 KB (128 KB handoff buffer minus JSON overhead) |
+| `image_base64` *(deprecated)* | Legacy single-image code | Same as `images` |
+
+For production use, prefer `attachments` with `ImageCompressor::stageForHandoff()`
+— it avoids the handoff buffer size limit entirely.
 
 #### Limits and security
 
@@ -701,8 +715,11 @@ them on disk via `attachments` instead.
 - **Manifest-only resolution** — Only ref names declared in the `attachments` map
   are resolved. `{anything_else}` in the prompt is treated as literal text.
 - **Text file size limit** — Text attachments are capped at 1 MB per file.
+- **Binary file size limit** — Binary attachments (images, PDFs) are capped at
+  20 MB per file. Base64 encoding expands this by ~33%.
 - **Unknown extensions** — Files with unrecognized extensions are rejected with
-  an error (not silently defaulted).
+  an error (not silently defaulted). Use `attachment_types` to override when the
+  extension is missing or doesn't match the content.
 - **Cleanup** — The daemon deletes each file after reading it (best-effort).
 
 ## How It Works
