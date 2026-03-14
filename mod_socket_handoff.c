@@ -172,7 +172,7 @@ static apr_time_t compute_handoff_deadline(const socket_handoff_config *conf)
             * ((1LL << safe_retries) - 1);
     }
 
-    total_ms = (apr_int64_t)conf->connect_timeout_ms
+    total_ms = (apr_int64_t)(conf->max_retries + 1) * conf->connect_timeout_ms
         + (apr_int64_t)conf->send_timeout_ms
         + backoff_ms;
 

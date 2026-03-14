@@ -542,9 +542,9 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 			if isLastMessage && hasAttachments {
 				buf = appendContentWithAttachments(buf, msg.Content, handoff.ResolvedAttachments, handoff.ResolvedImages, contentFormat)
 			} else if isLastMessage && len(handoff.ResolvedImages) > 0 {
-				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages, contentFormat)
+				buf = appendMultimodalContent(buf, msg.Content, handoff.ResolvedImages)
 			} else {
-				buf = appendMultimodalContent(buf, msg.Content, nil, contentFormat)
+				buf = appendMultimodalContent(buf, msg.Content, nil)
 			}
 			buf = append(buf, `}`...)
 		}
@@ -557,7 +557,7 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 		if hasAttachments {
 			buf = appendContentWithAttachments(buf, prompt, handoff.ResolvedAttachments, handoff.ResolvedImages, contentFormat)
 		} else {
-			buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages, contentFormat)
+			buf = appendMultimodalContent(buf, prompt, handoff.ResolvedImages)
 		}
 		buf = append(buf, `}`...)
 	}
@@ -882,7 +882,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 // appendMultimodalContent appends a multimodal content array with text and image parts.
 // Images are placed before the text part, matching the LangChain HumanMessage convention.
 // If images is empty, appends the text as a simple JSON string (no array wrapper).
-func appendMultimodalContent(buf []byte, text string, images []ImageData, _ string) []byte {
+func appendMultimodalContent(buf []byte, text string, images []ImageData) []byte {
 	if len(images) == 0 {
 		buf = append(buf, '"')
 		buf = appendJSONEscaped(buf, text)
