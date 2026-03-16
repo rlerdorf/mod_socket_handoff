@@ -56,7 +56,7 @@ The release binary will be at `target/release/streaming-daemon-rs`.
 ./target/release/streaming-daemon-rs --backend mock
 
 # Or with explicit socket path
-./target/release/streaming-daemon-rs --socket /var/run/streaming-daemon-rs.sock --backend mock
+./target/release/streaming-daemon-rs --socket /run/streaming-daemon-rs.sock --backend mock
 ```
 
 ### With Configuration File
@@ -71,7 +71,7 @@ The following settings can be overridden via environment variables:
 
 ```bash
 # Server settings
-export DAEMON_SOCKET_PATH=/var/run/streaming-daemon-rs.sock
+export DAEMON_SOCKET_PATH=/run/streaming-daemon-rs.sock
 export DAEMON_MAX_CONNECTIONS=50000
 export DAEMON_HANDOFF_TIMEOUT_SECS=5
 export DAEMON_WRITE_TIMEOUT_SECS=30
@@ -88,7 +88,7 @@ export DAEMON_TOKEN_DELAY_MS=50         # Mock backend: delay between tokens (ms
 # OpenAI settings
 export OPENAI_API_KEY=sk-...
 export OPENAI_API_BASE=https://api.openai.com/v1
-export OPENAI_API_SOCKET=/var/run/proxy.sock  # Unix socket (HTTP/1.1 mode only)
+export OPENAI_API_SOCKET=/run/proxy.sock  # Unix socket (HTTP/1.1 mode only)
 export OPENAI_HTTP2_ENABLED=true        # false or 0 to disable
 export OPENAI_INSECURE_SSL=false        # true or 1 for self-signed certs
 
@@ -125,7 +125,7 @@ See `config/daemon.toml` for all options:
 
 ```toml
 [server]
-socket_path = "/var/run/streaming-daemon-rs.sock"
+socket_path = "/run/streaming-daemon-rs.sock"
 socket_mode = "0o660"  # Restrict access to owner/group
 max_connections = 100000
 handoff_timeout_secs = 5
@@ -142,7 +142,7 @@ timeout_secs = 120
 [backend.openai]
 # api_key = "sk-..."          # Or set OPENAI_API_KEY env var
 api_base = "https://api.openai.com/v1"
-# api_socket = "/var/run/proxy.sock"  # Unix socket (HTTP/1.1 only)
+# api_socket = "/run/proxy.sock"  # Unix socket (HTTP/1.1 only)
 pool_max_idle_per_host = 100
 insecure_ssl = false           # Skip TLS verification (testing only)
 
@@ -175,7 +175,7 @@ SocketHandoffConnectTimeoutMs 100
 ```
 
 Note: The systemd service uses `RuntimeDirectory` which creates the socket under
-`/run/`. While `/var/run` is typically a symlink to `/run` on modern Linux systems,
+`/run/`. While `/run` is typically a symlink to `/run` on modern Linux systems,
 using `/run/` explicitly is more consistent with systemd conventions.
 
 ## PHP Integration
@@ -436,11 +436,11 @@ streaming-daemon-rs/
 
 ```bash
 # Check socket permissions
-ls -la /var/run/streaming-daemon-rs.sock
+ls -la /run/streaming-daemon-rs.sock
 
 # Ensure www-data (or appropriate service user) can access
-sudo chown www-data:www-data /var/run/streaming-daemon-rs.sock
-sudo chmod 660 /var/run/streaming-daemon-rs.sock
+sudo chown www-data:www-data /run/streaming-daemon-rs.sock
+sudo chmod 660 /run/streaming-daemon-rs.sock
 ```
 
 ### Connection Refused
@@ -453,7 +453,7 @@ sudo systemctl status streaming-daemon-rs
 sudo journalctl -u streaming-daemon-rs -n 50
 
 # Test socket directly
-echo '{"prompt":"test"}' | nc -U /var/run/streaming-daemon-rs.sock
+echo '{"prompt":"test"}' | nc -U /run/streaming-daemon-rs.sock
 ```
 
 ### Debug Logging

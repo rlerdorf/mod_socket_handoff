@@ -11,7 +11,7 @@
  * - mod_xsendfile: Output filter pattern for intercepting response headers
  *
  * Usage:
- *   PHP sets header: X-Socket-Handoff: /var/run/streaming.sock
+ *   PHP sets header: X-Socket-Handoff: /run/streaming.sock
  *   Optional data:   X-Handoff-Data: {"user_id":123,"prompt":"..."}
  *
  * The module:
@@ -29,7 +29,7 @@
  *
  * Configuration:
  *   SocketHandoffEnabled On|Off
- *   SocketHandoffAllowedPrefix /var/run/
+ *   SocketHandoffAllowedPrefix /run/
  *
  * Build:
  *   apxs -c mod_socket_handoff.c
@@ -94,7 +94,7 @@ static void *create_server_config(apr_pool_t *p, server_rec *s)
     socket_handoff_config *conf = apr_pcalloc(p, sizeof(socket_handoff_config));
     conf->enabled = 1;
     conf->enabled_set = 0;
-    conf->allowed_socket_prefix = "/var/run/";
+    conf->allowed_socket_prefix = "/run/";
     conf->connect_timeout_ms = 100;
     conf->connect_timeout_ms_set = 0;
     conf->send_timeout_ms = 200;
@@ -1048,7 +1048,7 @@ static const command_rec socket_handoff_cmds[] = {
         set_allowed_prefix,
         NULL,
         RSRC_CONF,
-        "Required prefix for socket paths (default: /var/run/)"
+        "Required prefix for socket paths (default: /run/)"
     ),
     AP_INIT_TAKE1(
         "SocketHandoffConnectTimeoutMs",

@@ -3,7 +3,7 @@
 
 [server]
 # Unix socket path for receiving connections from Apache
-socket = "/var/run/streaming-daemon.sock"
+socket = "/run/streaming-daemon.sock"
 
 # Socket permissions (octal)
 socket_mode = 0660

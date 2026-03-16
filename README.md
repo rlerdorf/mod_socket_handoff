@@ -62,7 +62,7 @@ Add to Apache config:
 LoadModule socket_handoff_module modules/mod_socket_handoff.so
 
 SocketHandoffEnabled On
-SocketHandoffAllowedPrefix /var/run/
+SocketHandoffAllowedPrefix /run/
 SocketHandoffConnectTimeoutMs 100
 ```
 
@@ -83,10 +83,10 @@ Default: `On`
 Security setting: only allow socket paths under this prefix.
 
 ```apache
-SocketHandoffAllowedPrefix /var/run/
+SocketHandoffAllowedPrefix /run/
 ```
 
-Default: `/var/run/`
+Default: `/run/`
 
 ### SocketHandoffConnectTimeoutMs
 
@@ -114,7 +114,7 @@ $data = json_encode([
 ]);
 
 // Tell Apache to hand off to streaming daemon
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 
 // Exit immediately - module takes over
@@ -149,13 +149,13 @@ The simplest option - use any program as a handler:
 cc -o fdrecv examples/fdrecv.c
 
 # Run with shell script
-fdrecv /var/run/streaming-daemon.sock ./handler.sh
+fdrecv /run/streaming-daemon.sock ./handler.sh
 
 # Run with PHP
-fdrecv /var/run/streaming-daemon.sock php handler.php
+fdrecv /run/streaming-daemon.sock php handler.php
 
 # Run with any command
-fdrecv /var/run/streaming-daemon.sock python3 handler.py
+fdrecv /run/streaming-daemon.sock python3 handler.py
 ```
 
 The handler receives:
@@ -164,7 +164,7 @@ The handler receives:
 
 Example with figlet:
 ```bash
-fdrecv /var/run/streaming-daemon.sock ./figlet_handler.sh
+fdrecv /run/streaming-daemon.sock ./figlet_handler.sh
 
 curl "http://localhost/api/stream?prompt=Hello+World"
 #  _   _      _ _        __        __         _     _
@@ -216,7 +216,7 @@ $handoff_data = json_encode([
 ]);
 
 // 4. Set handoff headers
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $handoff_data);
 
 // 5. Exit - mod_socket_handoff takes over
@@ -398,7 +398,7 @@ Common conventions:
 Path to the Unix socket of the daemon.
 
 ```
-X-Socket-Handoff: /var/run/streaming-daemon.sock
+X-Socket-Handoff: /run/streaming-daemon.sock
 ```
 
 ### X-Handoff-Data (optional)

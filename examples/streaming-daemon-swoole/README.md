@@ -54,7 +54,7 @@ php -r "echo 'HTTP/2: ' . (class_exists('Swoole\Coroutine\Http2\Client') ? 'Yes'
 
 ```bash
 # Mock mode (test messages)
-sudo php streaming_daemon.php -s /var/run/streaming-daemon-swoole.sock
+sudo php streaming_daemon.php -s /run/streaming-daemon-swoole.sock
 
 # OpenAI backend with HTTP/2
 sudo OPENAI_API_KEY=your-key php streaming_daemon.php \
@@ -74,7 +74,7 @@ sudo php streaming_daemon.php --benchmark
 
 | Option | Description |
 |--------|-------------|
-| `-s, --socket PATH` | Unix socket path (default: /var/run/streaming-daemon-swoole.sock) |
+| `-s, --socket PATH` | Unix socket path (default: /run/streaming-daemon-swoole.sock) |
 | `-m, --mode MODE` | Socket permissions in octal (default: 0660) |
 | `-d, --delay MS` | Delay between SSE messages in mock mode (default: 50) |
 | `--backend TYPE` | Backend type: 'mock' or 'openai' |

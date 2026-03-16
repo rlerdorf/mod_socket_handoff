@@ -7,7 +7,7 @@ connections concurrently using coroutines. Unlike the synchronous test_daemon.py
 this can handle thousands of concurrent connections in a single process.
 
 Usage:
-    sudo python3 streaming_daemon_async.py [-s /var/run/streaming-daemon.sock] [-w 50]
+    sudo python3 streaming_daemon_async.py [-s /run/streaming-daemon.sock] [-w 50]
     sudo python3 streaming_daemon_async.py --backend openai --openai-socket /tmp/api.sock
 
 Environment variables (for OpenAI backend):
@@ -52,7 +52,7 @@ except ImportError:
     UVLOOP_AVAILABLE = False
 
 # Default configuration
-DEFAULT_SOCKET_PATH = "/var/run/streaming-daemon-py.sock"
+DEFAULT_SOCKET_PATH = "/run/streaming-daemon-py.sock"
 DEFAULT_SOCKET_MODE = 0o660
 
 # OpenAI backend configuration (set from args/env)

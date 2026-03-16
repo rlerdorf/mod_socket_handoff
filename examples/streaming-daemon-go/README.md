@@ -243,7 +243,7 @@ Copy `config/example.yaml` to `config/local.yaml` and customize:
 
 ```yaml
 server:
-  socket_path: /var/run/streaming-daemon.sock
+  socket_path: /run/streaming-daemon.sock
   socket_mode: 0660
   max_connections: 50000
   max_stream_duration_ms: 300000  # Max per-stream duration (0 = no timeout, default: 5 min)
@@ -259,14 +259,14 @@ backend:
   openai:
     # api_key: sk-...  # Better to use OPENAI_API_KEY env var
     api_base: https://api.openai.com/v1
-    # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
+    # api_socket: /run/openai-proxy.sock  # Unix socket for high concurrency
     http2_enabled: true
     insecure_ssl: false
 
   langgraph:
     # api_key: lgk_...  # Better to use LANGGRAPH_API_KEY env var
     api_base: https://api.langchain.com/v1
-    # api_socket: /var/run/langgraph-proxy.sock  # Unix socket for high concurrency
+    # api_socket: /run/langgraph-proxy.sock  # Unix socket for high concurrency
     assistant_id: agent
     stream_mode: messages-tuple
     http2_enabled: true
@@ -335,7 +335,7 @@ Flags override config file values when explicitly set. The "Config Default" colu
 | Flag | Config Default | Description |
 |------|----------------|-------------|
 | `-config` | - | Path to YAML config file |
-| `-socket` | `/var/run/streaming-daemon.sock` | Unix socket path |
+| `-socket` | `/run/streaming-daemon.sock` | Unix socket path |
 | `-socket-mode` | `0660` | Socket permission mode |
 | `-max-connections` | `50000` | Max concurrent connections |
 | `-backend` | `mock` | Backend: langgraph, mock, openai, typing |
@@ -389,7 +389,7 @@ Ensure `mod_socket_handoff` is enabled and configured:
 
 ```apache
 SocketHandoffEnabled On
-SocketHandoffAllowedPrefix /var/run/
+SocketHandoffAllowedPrefix /run/
 SocketHandoffConnectTimeoutMs 100
 ```
 
@@ -414,7 +414,7 @@ $data = json_encode([
 ]);
 
 // Set handoff headers
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 
 // Exit - mod_socket_handoff takes over
@@ -465,7 +465,7 @@ $data = json_encode([
     ],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -517,7 +517,7 @@ $data = json_encode([
     ],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -556,7 +556,7 @@ $data = json_encode([
     ],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -600,7 +600,7 @@ $data = json_encode([
     ],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -653,7 +653,7 @@ $data = json_encode([
     ],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -687,7 +687,7 @@ $data = json_encode([
     ]],
 ]);
 
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 exit;
 ```
@@ -938,7 +938,7 @@ The daemon uses mode 0660 by default (owner + group access only):
 
 ```bash
 # Check socket permissions
-ls -la /var/run/streaming-daemon.sock
+ls -la /run/streaming-daemon.sock
 
 # Option 1: Run daemon as www-data (same user as Apache)
 sudo -u www-data ./streaming-daemon
@@ -957,10 +957,10 @@ sudo usermod -aG streaming-daemon www-data
 pgrep -a streaming-daemon
 
 # Check socket exists
-ls -la /var/run/streaming-daemon.sock
+ls -la /run/streaming-daemon.sock
 
 # Test socket directly
-echo '{"prompt":"test"}' | nc -U /var/run/streaming-daemon.sock
+echo '{"prompt":"test"}' | nc -U /run/streaming-daemon.sock
 ```
 
 ### OpenAI API Errors

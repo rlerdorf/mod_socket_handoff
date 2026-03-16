@@ -5,7 +5,7 @@
 //
 // Usage:
 //
-//	./test-runner -socket /var/run/streaming-daemon.sock -backend http://127.0.0.1:8080
+//	./test-runner -socket /run/streaming-daemon.sock -backend http://127.0.0.1:8080
 package main
 
 import (
@@ -34,7 +34,7 @@ type Config struct {
 func main() {
 	cfg := Config{}
 
-	flag.StringVar(&cfg.SocketPath, "socket", "/var/run/streaming-daemon.sock",
+	flag.StringVar(&cfg.SocketPath, "socket", "/run/streaming-daemon.sock",
 		"Path to daemon Unix socket")
 	flag.StringVar(&cfg.BackendURL, "backend", "http://127.0.0.1:8080",
 		"Backend API URL for daemon to connect to")

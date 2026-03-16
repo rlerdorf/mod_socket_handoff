@@ -275,7 +275,7 @@ func Default() *Config {
 	http2 := true
 	return &Config{
 		Server: ServerConfig{
-			SocketPath:          "/var/run/streaming-daemon.sock",
+			SocketPath:          "/run/streaming-daemon.sock",
 			SocketMode:          0660,
 			MaxConnections:      50000,
 			MaxStreamDurationMs: 300000,

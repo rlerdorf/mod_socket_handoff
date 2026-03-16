@@ -5,9 +5,9 @@
  * and executes a handler program with the fd as stdin/stdout.
  *
  * Usage:
- *   fdrecv /var/run/streaming-daemon.sock ./handler.sh
- *   fdrecv /var/run/streaming-daemon.sock php handler.php
- *   fdrecv /var/run/streaming-daemon.sock cat response.http
+ *   fdrecv /run/streaming-daemon.sock ./handler.sh
+ *   fdrecv /run/streaming-daemon.sock php handler.php
+ *   fdrecv /run/streaming-daemon.sock cat response.http
  *
  * The handler receives:
  *   - stdin/stdout connected to the client socket
@@ -144,8 +144,8 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <socket-path> <handler> [args...]\n", argv[0]);
         fprintf(stderr, "\nExample:\n");
-        fprintf(stderr, "  %s /var/run/daemon.sock ./handler.sh\n", argv[0]);
-        fprintf(stderr, "  %s /var/run/daemon.sock php stream.php\n", argv[0]);
+        fprintf(stderr, "  %s /run/daemon.sock ./handler.sh\n", argv[0]);
+        fprintf(stderr, "  %s /run/daemon.sock php stream.php\n", argv[0]);
         return 1;
     }
 

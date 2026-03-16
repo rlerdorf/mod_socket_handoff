@@ -10,7 +10,7 @@
 //! streaming-daemon-rs config/daemon.toml
 //!
 //! # With environment variables
-//! DAEMON_SOCKET_PATH=/var/run/test.sock streaming-daemon-rs
+//! DAEMON_SOCKET_PATH=/run/test.sock streaming-daemon-rs
 //!
 //! # Mock backend for testing
 //! DAEMON_BACKEND_PROVIDER=mock streaming-daemon-rs

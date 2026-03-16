@@ -58,7 +58,7 @@ api_base = "https://api.openai.com/v1"
 
 # Unix socket path for API connections (HTTP/1.1 mode only)
 # Eliminates ephemeral port exhaustion under high concurrency
-# api_socket = "/var/run/openai-proxy.sock"
+# api_socket = "/run/openai-proxy.sock"
 
 # Maximum idle connections per host in the HTTP pool
 pool_max_idle_per_host = 100

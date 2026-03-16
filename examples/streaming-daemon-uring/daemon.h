@@ -16,7 +16,7 @@
 #define DAEMON_VERSION "0.4.0"
 
 /* Default configuration */
-#define DEFAULT_SOCKET_PATH      "/var/run/streaming-daemon.sock"
+#define DEFAULT_SOCKET_PATH      "/run/streaming-daemon.sock"
 #define DEFAULT_SOCKET_MODE      0660
 #define DEFAULT_MAX_CONNECTIONS  10000
 #define DEFAULT_HANDOFF_TIMEOUT_MS  5000

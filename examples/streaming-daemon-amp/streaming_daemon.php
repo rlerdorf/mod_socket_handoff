@@ -13,7 +13,7 @@
  * - Non-blocking I/O for all operations
  *
  * Usage:
- *   sudo php streaming_daemon.php [-s /var/run/streaming-daemon.sock]
+ *   sudo php streaming_daemon.php [-s /run/streaming-daemon.sock]
  *
  * Requirements:
  *   - PHP 8.1+ with sockets extension
@@ -43,7 +43,7 @@ use function Amp\async;
 use function Amp\delay;
 use function Amp\Socket\connect;
 
-const DEFAULT_SOCKET_PATH = '/var/run/streaming-daemon-amp.sock';
+const DEFAULT_SOCKET_PATH = '/run/streaming-daemon-amp.sock';
 const DEFAULT_SOCKET_MODE = 0660;
 const DEFAULT_SSE_DELAY_MS = 50;
 const MAX_HANDOFF_DATA_SIZE = 65536;  // 64KB - matches Go daemon
@@ -94,7 +94,7 @@ AMPHP Async Streaming Daemon for mod_socket_handoff
 Usage: php streaming_daemon.php [options]
 
 Options:
-  -s, --socket PATH    Unix socket path (default: /var/run/streaming-daemon-amp.sock)
+  -s, --socket PATH    Unix socket path (default: /run/streaming-daemon-amp.sock)
   -m, --mode MODE      Socket permissions in octal (default: 0660)
   -d, --delay MS       Delay between SSE messages in ms (default: 50, use 3333 for 30s streams)
   --backend TYPE       Backend type: 'mock' (demo messages) or 'openai' (HTTP streaming API)

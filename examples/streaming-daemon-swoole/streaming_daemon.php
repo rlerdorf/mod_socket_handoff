@@ -13,7 +13,7 @@
  * - Native HTTP/2 multiplexing for backend requests
  *
  * Usage:
- *   sudo php streaming_daemon.php [-s /var/run/streaming-daemon-swoole.sock]
+ *   sudo php streaming_daemon.php [-s /run/streaming-daemon-swoole.sock]
  *
  * Requirements:
  *   - PHP 8.1+ with Swoole extension (--with-nghttp2-dir for HTTP/2)
@@ -31,7 +31,7 @@ use Swoole\Http2\Request as Http2Request;
 ini_set('memory_limit', '-1');
 
 // Constants
-const DEFAULT_SOCKET_PATH = '/var/run/streaming-daemon-swoole.sock';
+const DEFAULT_SOCKET_PATH = '/run/streaming-daemon-swoole.sock';
 const DEFAULT_SOCKET_MODE = 0660;
 const MAX_HANDOFF_DATA_SIZE = 65536;
 const DEFAULT_MAX_CONNECTIONS = 50000;
@@ -85,7 +85,7 @@ Swoole Streaming Daemon for mod_socket_handoff (HTTP/2 support)
 Usage: php streaming_daemon.php [options]
 
 Options:
-  -s, --socket PATH      Unix socket path (default: /var/run/streaming-daemon-swoole.sock)
+  -s, --socket PATH      Unix socket path (default: /run/streaming-daemon-swoole.sock)
   -m, --mode MODE        Socket permissions in octal (default: 0660)
   -d, --delay MS         Delay between SSE messages in ms for mock mode (default: 50)
   --backend TYPE         Backend type: 'mock' (demo messages) or 'openai' (HTTP streaming API)

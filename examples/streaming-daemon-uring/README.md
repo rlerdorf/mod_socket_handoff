@@ -45,7 +45,7 @@ make sanitize
 ## Usage
 
 ```bash
-# Run with defaults (socket at /var/run/streaming-daemon.sock)
+# Run with defaults (socket at /run/streaming-daemon.sock)
 sudo ./streaming-daemon-uring
 
 # Custom socket path
@@ -66,7 +66,7 @@ export OPENAI_API_KEY="sk-..."
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--socket PATH` | /var/run/streaming-daemon.sock | Unix socket path |
+| `--socket PATH` | /run/streaming-daemon.sock | Unix socket path |
 | `--socket-mode MODE` | 0660 | Socket permissions (octal) |
 | `--max-connections N` | 10000 | Maximum concurrent connections |
 | `--delay MS` | 50 | Delay between SSE messages (mock backend) |
@@ -183,7 +183,7 @@ streaming_daemon_info                  - Daemon version and config
 3. Create a PHP endpoint that sets handoff headers:
    ```php
    <?php
-   header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+   header('X-Socket-Handoff: /run/streaming-daemon.sock');
    header('X-Handoff-Data: ' . json_encode([
        'user_id' => 123,
        'prompt' => 'Hello world'

@@ -50,7 +50,7 @@ sudo DAEMON_BACKEND_PROVIDER=mock ./target/release/streaming-daemon-rs
 
 **Environment Variables:**
 ```
-DAEMON_SOCKET_PATH        Unix socket path (default: /var/run/streaming-daemon.sock)
+DAEMON_SOCKET_PATH        Unix socket path (default: /run/streaming-daemon.sock)
 DAEMON_SOCKET_MODE        Socket permissions (default: 0660)
 DAEMON_BACKEND_PROVIDER   Backend: "mock" or "openai"
 DAEMON_TOKEN_DELAY_MS     Delay between messages in ms (default: 50)
@@ -64,7 +64,7 @@ Event-driven daemon using AMPHP with PHP 8.1+ Fibers and HTTP/2 multiplexing via
 ```bash
 cd streaming-daemon-amp
 composer install
-sudo php streaming_daemon.php -s /var/run/streaming-daemon.sock -m 0666
+sudo php streaming_daemon.php -s /run/streaming-daemon.sock -m 0666
 ```
 
 **Performance Enhancement - ev extension:**
@@ -73,7 +73,7 @@ For significantly better performance, install and use the `ev` PECL extension:
 
 ```bash
 sudo pecl install ev
-sudo php -dextension=ev.so streaming_daemon.php -s /var/run/streaming-daemon.sock
+sudo php -dextension=ev.so streaming_daemon.php -s /run/streaming-daemon.sock
 ```
 
 The AMPHP Revolt event loop automatically detects and uses `ev` when available, providing faster event handling than the default stream_select() implementation.
@@ -102,7 +102,7 @@ High-performance daemon using Swoole's native coroutine scheduler and HTTP/2 cli
 
 ```bash
 cd streaming-daemon-swoole
-sudo php -d extension=swoole.so streaming_daemon.php -s /var/run/streaming-daemon.sock -m 0666
+sudo php -d extension=swoole.so streaming_daemon.php -s /run/streaming-daemon.sock -m 0666
 ```
 
 **Features:**
@@ -135,7 +135,7 @@ High-performance daemon using Swow's coroutine scheduler and libcurl for HTTP/2.
 
 ```bash
 cd streaming-daemon-swow
-sudo php -d extension=swow.so streaming_daemon.php -s /var/run/streaming-daemon.sock -m 0666
+sudo php -d extension=swow.so streaming_daemon.php -s /run/streaming-daemon.sock -m 0666
 ```
 
 **Features:**
@@ -166,7 +166,7 @@ OPENAI_HTTP2_ENABLED     Set to "true" for HTTP/2 multiplexing (requires https:/
 Event-driven daemon using Python asyncio with optional uvloop.
 
 ```bash
-sudo python3 streaming_daemon_async.py -s /var/run/streaming-daemon.sock -m 0666
+sudo python3 streaming_daemon_async.py -s /run/streaming-daemon.sock -m 0666
 ```
 
 **Performance Enhancement - uvloop:**
@@ -175,7 +175,7 @@ For 2-4x better performance, install uvloop:
 
 ```bash
 pip install uvloop
-sudo python3 streaming_daemon_async.py -s /var/run/streaming-daemon.sock
+sudo python3 streaming_daemon_async.py -s /run/streaming-daemon.sock
 ```
 
 The daemon automatically detects and uses uvloop when available, replacing the default asyncio event loop with a libuv-based implementation.

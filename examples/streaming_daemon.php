@@ -19,7 +19,7 @@
 
 declare(strict_types=1);
 
-const SOCKET_PATH = '/var/run/streaming-daemon.sock';
+const SOCKET_PATH = '/run/streaming-daemon.sock';
 
 /**
  * Receive a file descriptor and data via SCM_RIGHTS

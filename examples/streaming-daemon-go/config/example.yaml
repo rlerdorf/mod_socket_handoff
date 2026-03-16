@@ -2,7 +2,7 @@
 # Copy to local.yaml and customize (local.yaml is gitignored)
 
 server:
-  socket_path: /var/run/streaming-daemon.sock
+  socket_path: /run/streaming-daemon.sock
   socket_mode: 0660
   max_connections: 50000
   max_stream_duration_ms: 300000  # Max per-stream duration in ms (0 = no timeout, default: 300000 = 5 min)
@@ -22,7 +22,7 @@ backend:
     # Use OPENAI_API_KEY environment variable instead (recommended).
     # api_key: sk-...
     api_base: https://api.openai.com/v1
-    # api_socket: /var/run/openai-proxy.sock  # Unix socket for high concurrency
+    # api_socket: /run/openai-proxy.sock  # Unix socket for high concurrency
     http2_enabled: true
     insecure_ssl: false
 
@@ -32,7 +32,7 @@ backend:
     # Use LANGGRAPH_API_KEY environment variable instead (recommended).
     # api_key: lgk_...
     api_base: https://api.langchain.com/v1
-    # api_socket: /var/run/langgraph-proxy.sock  # Unix socket for high concurrency
+    # api_socket: /run/langgraph-proxy.sock  # Unix socket for high concurrency
     assistant_id: agent
     stream_mode: messages-tuple
     http2_enabled: true

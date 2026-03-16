@@ -9,7 +9,7 @@ Usage:
     sudo python3 test_daemon.py
 
 The daemon will:
-1. Listen on /var/run/streaming-daemon.sock
+1. Listen on /run/streaming-daemon.sock
 2. Receive client socket fd via SCM_RIGHTS
 3. Send HTTP response with SSE stream
 4. Close the connection
@@ -22,7 +22,7 @@ import json
 import time
 import array
 
-SOCKET_PATH = "/var/run/streaming-daemon.sock"
+SOCKET_PATH = "/run/streaming-daemon.sock"
 
 
 def recv_fd(conn):

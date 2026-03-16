@@ -85,11 +85,11 @@ Security check using `realpath()` to prevent path traversal attacks.
 ## Configuration Directives
 
 ```apache
-SocketHandoffEnabled On|Off              # Enable/disable (default: On)
-SocketHandoffAllowedPrefix /var/run/     # Security prefix for socket paths
-SocketHandoffConnectTimeoutMs 100        # Daemon connect timeout (default: 100ms)
-SocketHandoffSendTimeoutMs 200           # Daemon send timeout (default: 200ms)
-SocketHandoffMaxRetries 2                # Retries for transient errors (default: 2)
+SocketHandoffEnabled On|Off          # Enable/disable (default: On)
+SocketHandoffAllowedPrefix /run/     # Security prefix for socket paths
+SocketHandoffConnectTimeoutMs 100    # Daemon connect timeout (default: 100ms)
+SocketHandoffSendTimeoutMs 200       # Daemon send timeout (default: 200ms)
+SocketHandoffMaxRetries 2            # Retries for transient errors (default: 2)
 ```
 
 ### Timeout Directives
@@ -122,7 +122,7 @@ $user = authenticate();
 $data = json_encode(['user_id' => $user->id, 'prompt' => $_POST['prompt']]);
 
 // 2. Set handoff headers
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 
 // 3. Exit - module takes over
@@ -191,7 +191,7 @@ sudo systemctl reload apache2
 
 2. Create test PHP endpoint:
    ```php
-   header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+   header('X-Socket-Handoff: /run/streaming-daemon.sock');
    header('X-Handoff-Data: {"prompt":"test"}');
    exit;
    ```
@@ -210,7 +210,7 @@ sudo systemctl reload apache2
 ### Socket permission denied
 **Cause**: Apache (www-data) can't connect to daemon socket.
 **Fix**: Set proper ownership and permissions on the socket. For example:
-- `chown www-data:www-data /var/run/streaming-daemon.sock` (if daemon runs as www-data)
+- `chown www-data:www-data /run/streaming-daemon.sock` (if daemon runs as www-data)
 - Or add Apache user to daemon's group and use `chmod 660`
 - Avoid `chmod 666` as it allows any local user to connect, bypassing authentication
 
@@ -219,7 +219,7 @@ sudo systemctl reload apache2
 
 ### Path traversal blocked
 **Cause**: Socket path doesn't start with allowed prefix.
-**Fix**: Ensure path starts with `SocketHandoffAllowedPrefix` (default: /var/run/).
+**Fix**: Ensure path starts with `SocketHandoffAllowedPrefix` (default: /run/).
 
 ### 503 errors during daemon restart
 **Cause**: Daemon socket briefly unavailable during restart.

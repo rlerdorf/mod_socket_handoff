@@ -40,8 +40,13 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 
-# Allow writing to /var/run for the socket
-ReadWritePaths=/var/run
+# Allow writing to /run for the socket
+ReadWritePaths=/run
+
+# Create /run/handoff-data for image and other multi-modal handoff between Apache and daemon.
+# Both services must share this directory (not subject to PrivateTmp isolation).
+RuntimeDirectory=handoff-data
+RuntimeDirectoryMode=0770
 
 [Install]
 WantedBy=multi-user.target

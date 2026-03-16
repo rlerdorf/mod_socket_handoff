@@ -50,7 +50,7 @@ import (
 
 const (
 	// Socket path - must match SocketHandoffAllowedPrefix in Apache config
-	DaemonSocket = "/var/run/streaming-daemon.sock"
+	DaemonSocket = "/run/streaming-daemon.sock"
 
 	// Timeouts for robustness
 	HandoffTimeout  = 5 * time.Second // Max time to receive fd from Apache

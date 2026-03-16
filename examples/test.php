@@ -26,7 +26,7 @@ $handoff_data = json_encode([
 
 // Set headers for handoff
 // The module will intercept these and pass the connection to the daemon
-header('X-Socket-Handoff: /var/run/streaming-daemon.sock');
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $handoff_data);
 
 // Exit immediately

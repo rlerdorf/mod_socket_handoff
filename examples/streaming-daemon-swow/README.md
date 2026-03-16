@@ -39,14 +39,14 @@ extension=swow.so
 ```bash
 # Basic usage with mock backend
 sudo php -d extension=swow.so streaming_daemon.php \
-    -s /var/run/streaming-daemon.sock \
+    -s /run/streaming-daemon.sock \
     -m 0666
 
 # With OpenAI backend (HTTP/2 via HTTPS)
 OPENAI_API_KEY=sk-xxx \
 OPENAI_HTTP2_ENABLED=true \
 sudo php -d extension=swow.so streaming_daemon.php \
-    -s /var/run/streaming-daemon.sock \
+    -s /run/streaming-daemon.sock \
     --backend openai \
     --openai-base https://api.openai.com/v1
 ```
