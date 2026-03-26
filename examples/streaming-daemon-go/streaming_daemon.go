@@ -266,29 +266,59 @@ var sseHeadersBytes = []byte("HTTP/1.1 200 OK\r\n" +
 	"X-Accel-Buffering: no\r\n" +
 	"\r\n")
 
-// sseHeadersPrefix is sseHeadersBytes without the trailing \r\n, used when
-// custom response headers need to be appended before the blank line.
-var sseHeadersPrefix = []byte("HTTP/1.1 200 OK\r\n" +
-	"Content-Type: text/event-stream\r\n" +
-	"Cache-Control: no-cache\r\n" +
-	"Connection: close\r\n" +
-	"X-Accel-Buffering: no\r\n")
+// sseHeadersPrefix is sseHeadersBytes without the trailing blank line,
+// derived from the single source of truth to avoid drift.
+var sseHeadersPrefix = sseHeadersBytes[:len(sseHeadersBytes)-2]
 
-// blockedResponseHeaders are headers that conflict with SSE framing and
-// must not be overridden by PHP userspace.
-var blockedResponseHeaders = map[string]struct{}{
-	"content-type":       {},
-	"cache-control":      {},
-	"connection":         {},
-	"x-accel-buffering":  {},
-	"transfer-encoding":  {},
-	"content-length":     {},
+// blockedResponseHeaders that conflict with SSE framing and must not be
+// overridden by PHP userspace.
+var blockedResponseHeaders = [...]string{
+	"content-type",
+	"cache-control",
+	"connection",
+	"x-accel-buffering",
+	"transfer-encoding",
+	"content-length",
+}
+
+// isBlockedHeader reports whether name matches a blocked SSE header
+// using case-insensitive comparison without allocating.
+func isBlockedHeader(name string) bool {
+	for _, blocked := range blockedResponseHeaders {
+		if strings.EqualFold(name, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidHeaderName reports whether name is a valid HTTP token per RFC 7230.
+// Rejects empty names, names containing whitespace, control characters, or
+// delimiters that could cause header smuggling.
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		// Valid token chars: !#$%&'*+-.0-9A-Z^_`a-z|~
+		// Reject control chars (0-31, 127), space, tab, and delimiters: ():;<=>?@[\]{},"/
+		if c <= ' ' || c == 0x7f ||
+			c == '(' || c == ')' || c == ',' || c == '/' ||
+			c == ':' || c == ';' || c == '<' || c == '=' ||
+			c == '>' || c == '?' || c == '@' || c == '[' ||
+			c == '\\' || c == ']' || c == '{' || c == '}' ||
+			c == '"' {
+			return false
+		}
+	}
+	return true
 }
 
 // writeSSEHeaders writes the HTTP response status line and headers to conn.
 // When handoff.ResponseHeaders is non-empty, custom headers are appended after
-// the standard SSE headers. Headers that conflict with SSE framing or contain
-// invalid characters are silently dropped.
+// the standard SSE headers. Headers that conflict with SSE framing or have
+// invalid names/values are silently dropped.
 func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error) {
 	if len(handoff.ResponseHeaders) == 0 {
 		n, err := conn.Write(sseHeadersBytes)
@@ -301,16 +331,14 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 	buf = append(buf, sseHeadersPrefix...)
 
 	for name, value := range handoff.ResponseHeaders {
-		// Drop headers that conflict with SSE framing.
-		if _, blocked := blockedResponseHeaders[strings.ToLower(name)]; blocked {
+		if !isValidHeaderName(name) {
 			continue
 		}
-		// Drop headers with characters that could cause response splitting.
-		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
+		if isBlockedHeader(name) {
 			continue
 		}
-		// Drop empty header names.
-		if name == "" {
+		// Drop values with characters that could cause response splitting.
+		if strings.ContainsAny(value, "\r\n") {
 			continue
 		}
 		buf = append(buf, name...)

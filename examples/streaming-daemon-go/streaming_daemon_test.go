@@ -1641,14 +1641,18 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("empty header name is dropped", func(t *testing.T) {
+	t.Run("invalid header names are dropped", func(t *testing.T) {
 		server, client := net.Pipe()
 		defer client.Close()
 
 		handoff := backends.HandoffData{
 			ResponseHeaders: map[string]string{
-				"":       "no-name",
-				"X-Real": "value",
+				"":              "empty-name",
+				" X-Leading":   "leading-space",
+				"X Space":      "interior-space",
+				"X\tTab":       "has-tab",
+				"X:Colon":      "has-colon",
+				"X-Valid":      "good",
 			},
 		}
 		go func() {
@@ -1661,10 +1665,12 @@ func TestWriteSSEHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp := string(got)
-		if strings.Contains(resp, "no-name") {
-			t.Errorf("empty header name should be dropped, got:\n%s", resp)
+		for _, bad := range []string{"empty-name", "leading-space", "interior-space", "has-tab", "has-colon"} {
+			if strings.Contains(resp, bad) {
+				t.Errorf("invalid header name should be dropped, but found %q in:\n%s", bad, resp)
+			}
 		}
-		if !strings.Contains(resp, "X-Real: value\r\n") {
+		if !strings.Contains(resp, "X-Valid: good\r\n") {
 			t.Errorf("valid header should be present, got:\n%s", resp)
 		}
 	})
