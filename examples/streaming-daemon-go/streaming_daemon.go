@@ -279,6 +279,7 @@ var blockedResponseHeaders = [...]string{
 	"x-accel-buffering",
 	"transfer-encoding",
 	"content-length",
+	"content-encoding",
 }
 
 // isBlockedHeader reports whether name matches a blocked SSE header
@@ -361,8 +362,18 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 	}
 
 	buf = append(buf, '\r', '\n') // End of headers.
-	n, err := conn.Write(buf)
-	return int64(n), err
+
+	// Write the full buffer, handling short writes.
+	var written int64
+	for len(buf) > 0 {
+		n, err := conn.Write(buf)
+		written += int64(n)
+		if err != nil {
+			return written, err
+		}
+		buf = buf[n:]
+	}
+	return written, nil
 }
 
 // initLogging configures the default slog logger based on LoggingConfig.
