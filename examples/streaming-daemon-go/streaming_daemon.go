@@ -330,14 +330,27 @@ func isValidHeaderValue(value string) bool {
 	return true
 }
 
+// writeAll writes the entire buffer to conn, handling short writes.
+func writeAll(conn net.Conn, buf []byte) (int64, error) {
+	var written int64
+	for len(buf) > 0 {
+		n, err := conn.Write(buf)
+		written += int64(n)
+		if err != nil {
+			return written, err
+		}
+		buf = buf[n:]
+	}
+	return written, nil
+}
+
 // writeSSEHeaders writes the HTTP response status line and headers to conn.
 // When handoff.ResponseHeaders is non-empty, custom headers are appended after
 // the standard SSE headers. Headers that conflict with SSE framing or have
 // invalid names/values are silently dropped.
 func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error) {
 	if len(handoff.ResponseHeaders) == 0 {
-		n, err := conn.Write(sseHeadersBytes)
-		return int64(n), err
+		return writeAll(conn, sseHeadersBytes)
 	}
 
 	// Collect valid custom headers first to avoid allocating a buffer
@@ -353,8 +366,7 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 
 	// If no custom headers survived validation, use the fast path.
 	if len(valid) == 0 {
-		n, err := conn.Write(sseHeadersBytes)
-		return int64(n), err
+		return writeAll(conn, sseHeadersBytes)
 	}
 
 	// Build response with custom headers.
@@ -369,17 +381,7 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 	}
 	buf = append(buf, '\r', '\n') // End of headers.
 
-	// Write the full buffer, handling short writes.
-	var written int64
-	for len(buf) > 0 {
-		n, err := conn.Write(buf)
-		written += int64(n)
-		if err != nil {
-			return written, err
-		}
-		buf = buf[n:]
-	}
-	return written, nil
+	return writeAll(conn, buf)
 }
 
 // initLogging configures the default slog logger based on LoggingConfig.
