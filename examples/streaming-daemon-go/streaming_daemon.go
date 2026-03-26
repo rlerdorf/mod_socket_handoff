@@ -266,6 +266,131 @@ var sseHeadersBytes = []byte("HTTP/1.1 200 OK\r\n" +
 	"X-Accel-Buffering: no\r\n" +
 	"\r\n")
 
+// sseHeadersPrefix is sseHeadersBytes without the trailing blank line,
+// derived from the single source of truth to avoid drift.
+var sseHeadersPrefix = sseHeadersBytes[:len(sseHeadersBytes)-2]
+
+// blockedResponseHeaders that conflict with SSE framing and must not be
+// overridden by PHP userspace.
+var blockedResponseHeaders = [...]string{
+	"content-type",
+	"cache-control",
+	"connection",
+	"x-accel-buffering",
+	"transfer-encoding",
+	"content-length",
+	"content-encoding",
+}
+
+// isBlockedHeader reports whether name matches a blocked SSE header
+// using case-insensitive comparison without allocating.
+func isBlockedHeader(name string) bool {
+	for _, blocked := range blockedResponseHeaders {
+		if strings.EqualFold(name, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidHeaderName reports whether name is a valid HTTP token per RFC 7230.
+// Rejects empty names, non-ASCII bytes, control characters, whitespace, and
+// delimiter characters that could cause header smuggling.
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		// Valid token chars are ASCII: !#$%&'*+-.0-9A-Z^_`a-z|~
+		// Reject control chars (0-31, 127), non-ASCII (>= 128), space,
+		// and delimiters: ():;<=>?@[\]{},"/
+		if c <= ' ' || c >= 0x7f ||
+			c == '(' || c == ')' || c == ',' || c == '/' ||
+			c == ':' || c == ';' || c == '<' || c == '=' ||
+			c == '>' || c == '?' || c == '@' || c == '[' ||
+			c == '\\' || c == ']' || c == '{' || c == '}' ||
+			c == '"' {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidHeaderValue reports whether value is a valid HTTP field-value
+// per RFC 7230. Rejects control characters (0x00-0x1F, 0x7F) except
+// horizontal tab (0x09).
+func isValidHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// writeAll writes the entire buffer to conn, handling short writes.
+func writeAll(conn net.Conn, buf []byte) (int64, error) {
+	var written int64
+	for len(buf) > 0 {
+		n, err := conn.Write(buf)
+		if n > 0 {
+			written += int64(n)
+			buf = buf[n:]
+		}
+		if err != nil {
+			return written, err
+		}
+		// Guard against no-progress writes (n == 0, err == nil), which are
+		// permitted by io.Writer and would otherwise cause an infinite loop.
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+// writeSSEHeaders writes the HTTP response status line and headers to conn.
+// When handoff.ResponseHeaders is non-empty, custom headers are appended after
+// the standard SSE headers. Headers that conflict with SSE framing or have
+// invalid names/values are silently dropped.
+func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error) {
+	if len(handoff.ResponseHeaders) == 0 {
+		return writeAll(conn, sseHeadersBytes)
+	}
+
+	// Collect valid custom headers first to avoid allocating a buffer
+	// when all headers end up being dropped (blocked/invalid).
+	type hdr struct{ name, value string }
+	var valid []hdr
+	for name, value := range handoff.ResponseHeaders {
+		if !isValidHeaderName(name) || isBlockedHeader(name) || !isValidHeaderValue(value) {
+			continue
+		}
+		valid = append(valid, hdr{name, value})
+	}
+
+	// If no custom headers survived validation, use the fast path.
+	if len(valid) == 0 {
+		return writeAll(conn, sseHeadersBytes)
+	}
+
+	// Build response with custom headers.
+	// Estimate: prefix + ~64 bytes per custom header + terminator.
+	buf := make([]byte, 0, len(sseHeadersPrefix)+64*len(valid)+2)
+	buf = append(buf, sseHeadersPrefix...)
+	for _, h := range valid {
+		buf = append(buf, h.name...)
+		buf = append(buf, ':', ' ')
+		buf = append(buf, h.value...)
+		buf = append(buf, '\r', '\n')
+	}
+	buf = append(buf, '\r', '\n') // End of headers.
+
+	return writeAll(conn, buf)
+}
+
 // initLogging configures the default slog logger based on LoggingConfig.
 func initLogging(cfg config.LoggingConfig) {
 	var level slog.Level
@@ -1076,12 +1201,13 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	// Write directly to conn without buffering for lowest latency SSE streaming.
 	// Each write goes straight to the kernel, minimizing TTFB.
 
-	// Send HTTP headers for SSE (use pre-allocated bytes to avoid conversion)
-	headerBytes, err := conn.Write(sseHeadersBytes)
+	// Send HTTP headers for SSE. Uses pre-allocated bytes when no custom
+	// response headers are present; otherwise builds headers dynamically.
+	headerBytes, err := writeSSEHeaders(conn, handoff)
 	if err != nil {
 		return totalBytes, fmt.Errorf("failed to write headers: %w", err)
 	}
-	totalBytes += int64(headerBytes)
+	totalBytes += headerBytes
 	if !*benchmarkMode {
 		metricBytesSent.Add(float64(headerBytes))
 	}

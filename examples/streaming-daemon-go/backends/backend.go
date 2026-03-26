@@ -4,6 +4,7 @@ package backends
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"maps"
 	"net"
@@ -12,6 +13,44 @@ import (
 
 	"examples/config"
 )
+
+// StringMap is a map[string]string that silently ignores non-string values
+// during JSON unmarshalling instead of failing the entire decode.
+type StringMap map[string]string
+
+// UnmarshalJSON decodes a JSON object into a string-to-string map, skipping
+// any values that are not JSON strings. Non-object inputs (null, array, etc.)
+// are silently treated as an empty map to avoid failing the entire handoff decode.
+func (m *StringMap) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// Non-object value (null, array, number, etc.) — treat as empty.
+		// Callers only check len/range, so nil avoids an allocation.
+		*m = nil
+		return nil
+	}
+	// JSON null or {} — treat as empty without allocating.
+	if len(raw) == 0 {
+		*m = nil
+		return nil
+	}
+	var result StringMap
+	for k, v := range raw {
+		// Skip JSON null values without allocating a string.
+		if len(v) == 4 && v[0] == 'n' && v[1] == 'u' && v[2] == 'l' && v[3] == 'l' {
+			continue
+		}
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			if result == nil {
+				result = make(StringMap, len(raw))
+			}
+			result[k] = s
+		}
+	}
+	*m = result
+	return nil
+}
 
 // Message represents a single message in the conversation.
 type Message struct {
@@ -52,6 +91,11 @@ type HandoffData struct {
 	// Multi-image support
 	Images     []ImageData `json:"images,omitempty"`      // Inline base64 images (small images only)
 	ImagePaths []string    `json:"image_paths,omitempty"` // Paths to image files on disk (daemon reads, encodes, deletes)
+
+	// Custom HTTP response headers to include in the response to the client.
+	// Headers that conflict with SSE framing (Content-Type, Connection, etc.) are silently dropped.
+	// Uses StringMap to silently ignore non-string values without failing the entire unmarshal.
+	ResponseHeaders StringMap `json:"response_headers,omitempty"`
 
 	// Generalized attachments: ref_name -> relative file path (under data_dir)
 	Attachments     map[string]string `json:"attachments,omitempty"`

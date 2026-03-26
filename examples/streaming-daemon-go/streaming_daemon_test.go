@@ -1521,3 +1521,249 @@ func TestResolveAttachments(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteSSEHeaders(t *testing.T) {
+	t.Run("no custom headers produces standard SSE output", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, backends.HandoffData{}); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, sseHeadersBytes) {
+			t.Errorf("expected pre-allocated headers, got:\n%s", got)
+		}
+	})
+
+	t.Run("custom headers are included", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: backends.StringMap{
+				"X-Request-Id": "abc-123",
+			},
+		}
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if !strings.Contains(resp, "X-Request-Id: abc-123\r\n") {
+			t.Errorf("expected X-Request-Id header in response, got:\n%s", resp)
+		}
+		if !strings.HasPrefix(resp, "HTTP/1.1 200 OK\r\n") {
+			t.Errorf("expected HTTP status line, got:\n%s", resp)
+		}
+		if !strings.HasSuffix(resp, "\r\n\r\n") {
+			t.Errorf("expected blank line terminator, got:\n%s", resp)
+		}
+	})
+
+	t.Run("blocked headers are silently dropped", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: backends.StringMap{
+				"Content-Type":      "text/html",
+				"content-length":    "999",
+				"Cache-Control":     "max-age=3600",
+				"Connection":        "keep-alive",
+				"Transfer-Encoding": "chunked",
+				"X-Accel-Buffering": "yes",
+				"X-Custom":          "allowed",
+			},
+		}
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if !strings.Contains(resp, "X-Custom: allowed\r\n") {
+			t.Errorf("expected X-Custom header, got:\n%s", resp)
+		}
+		// Count occurrences of blocked headers — they should only appear once
+		// (from the fixed prefix), not duplicated by custom values.
+		if strings.Count(resp, "Content-Type:") != 1 {
+			t.Errorf("Content-Type should appear exactly once (from prefix), got:\n%s", resp)
+		}
+		if strings.Contains(resp, "content-length") || strings.Contains(resp, "Content-Length") {
+			t.Errorf("Content-Length should not appear, got:\n%s", resp)
+		}
+		if strings.Contains(resp, "Transfer-Encoding") || strings.Contains(resp, "transfer-encoding") {
+			t.Errorf("Transfer-Encoding should not appear, got:\n%s", resp)
+		}
+	})
+
+	t.Run("header injection is rejected", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: backends.StringMap{
+				"X-Bad\r\nInjected": "value",
+				"X-Also-Bad":        "val\r\nInjected: header",
+				"X-Good":            "safe-value",
+			},
+		}
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if strings.Contains(resp, "Injected") {
+			t.Errorf("response splitting should be blocked, got:\n%s", resp)
+		}
+		if !strings.Contains(resp, "X-Good: safe-value\r\n") {
+			t.Errorf("valid header should still be present, got:\n%s", resp)
+		}
+	})
+
+	t.Run("invalid header names are dropped", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: backends.StringMap{
+				"":           "empty-name",
+				" X-Leading": "leading-space",
+				"X Space":    "interior-space",
+				"X\tTab":     "has-tab",
+				"X:Colon":    "has-colon",
+				"X-Caf\xe9":  "non-ascii",
+				"X-Valid":    "good",
+			},
+		}
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		for _, bad := range []string{"empty-name", "leading-space", "interior-space", "has-tab", "has-colon", "non-ascii"} {
+			if strings.Contains(resp, bad) {
+				t.Errorf("invalid header name should be dropped, but found %q in:\n%s", bad, resp)
+			}
+		}
+		if !strings.Contains(resp, "X-Valid: good\r\n") {
+			t.Errorf("valid header should be present, got:\n%s", resp)
+		}
+	})
+
+	t.Run("control characters in values are rejected", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: backends.StringMap{
+				"X-Null":   "val\x00ue",
+				"X-Bell":   "val\x07ue",
+				"X-Escape": "val\x1bue",
+				"X-Del":    "val\x7fue",
+				"X-Tab":    "val\tue", // HTAB is allowed in values
+				"X-Valid":  "good",
+			},
+		}
+		go func() {
+			defer server.Close()
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if !strings.Contains(resp, "X-Tab: val\tue\r\n") {
+			t.Errorf("HTAB should be allowed in values, got:\n%s", resp)
+		}
+		if !strings.Contains(resp, "X-Valid: good\r\n") {
+			t.Errorf("valid header should be present, got:\n%s", resp)
+		}
+		// CTL values should be dropped
+		if strings.Contains(resp, "X-Null:") || strings.Contains(resp, "X-Bell:") ||
+			strings.Contains(resp, "X-Escape:") || strings.Contains(resp, "X-Del:") {
+			t.Errorf("headers with CTL values should be dropped, got:\n%s", resp)
+		}
+	})
+}
+
+func TestStringMapUnmarshal(t *testing.T) {
+	input := `{"response_headers":{"X-Good":"value","X-Num":123,"X-Null":null,"X-Bool":true},"prompt":"test"}`
+	var handoff backends.HandoffData
+	if err := json.Unmarshal([]byte(input), &handoff); err != nil {
+		t.Fatalf("unmarshal should not fail: %v", err)
+	}
+	if handoff.Prompt != "test" {
+		t.Errorf("prompt should be preserved, got %q", handoff.Prompt)
+	}
+	if v, ok := handoff.ResponseHeaders["X-Good"]; !ok || v != "value" {
+		t.Errorf("string value should be kept, got %q", v)
+	}
+	if _, ok := handoff.ResponseHeaders["X-Num"]; ok {
+		t.Error("non-string value (number) should be skipped")
+	}
+	if _, ok := handoff.ResponseHeaders["X-Null"]; ok {
+		t.Error("non-string value (null) should be skipped")
+	}
+	if _, ok := handoff.ResponseHeaders["X-Bool"]; ok {
+		t.Error("non-string value (bool) should be skipped")
+	}
+
+	// Non-object response_headers should not break the handoff.
+	for _, input := range []string{
+		`{"response_headers":null,"prompt":"ok"}`,
+		`{"response_headers":[1,2],"prompt":"ok"}`,
+		`{"response_headers":42,"prompt":"ok"}`,
+		`{"response_headers":"bad","prompt":"ok"}`,
+	} {
+		var h backends.HandoffData
+		if err := json.Unmarshal([]byte(input), &h); err != nil {
+			t.Errorf("non-object response_headers should not fail unmarshal: input=%s err=%v", input, err)
+		}
+		if h.Prompt != "ok" {
+			t.Errorf("prompt should be preserved for input=%s, got %q", input, h.Prompt)
+		}
+		if len(h.ResponseHeaders) != 0 {
+			t.Errorf("non-object response_headers should be empty, got %v for input=%s", h.ResponseHeaders, input)
+		}
+	}
+}
