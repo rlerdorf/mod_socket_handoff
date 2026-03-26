@@ -1523,7 +1523,7 @@ func TestResolveAttachments(t *testing.T) {
 }
 
 func TestWriteSSEHeaders(t *testing.T) {
-	t.Run("no custom headers uses pre-allocated bytes", func(t *testing.T) {
+	t.Run("no custom headers produces standard SSE output", func(t *testing.T) {
 		server, client := net.Pipe()
 		defer client.Close()
 
@@ -1734,5 +1734,24 @@ func TestStringMapUnmarshal(t *testing.T) {
 	}
 	if _, ok := handoff.ResponseHeaders["X-Bool"]; ok {
 		t.Error("non-string value (bool) should be skipped")
+	}
+
+	// Non-object response_headers should not break the handoff.
+	for _, input := range []string{
+		`{"response_headers":null,"prompt":"ok"}`,
+		`{"response_headers":[1,2],"prompt":"ok"}`,
+		`{"response_headers":42,"prompt":"ok"}`,
+		`{"response_headers":"bad","prompt":"ok"}`,
+	} {
+		var h backends.HandoffData
+		if err := json.Unmarshal([]byte(input), &h); err != nil {
+			t.Errorf("non-object response_headers should not fail unmarshal: input=%s err=%v", input, err)
+		}
+		if h.Prompt != "ok" {
+			t.Errorf("prompt should be preserved for input=%s, got %q", input, h.Prompt)
+		}
+		if len(h.ResponseHeaders) != 0 {
+			t.Errorf("non-object response_headers should be empty, got %v for input=%s", h.ResponseHeaders, input)
+		}
 	}
 }

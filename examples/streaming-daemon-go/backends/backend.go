@@ -19,11 +19,14 @@ import (
 type StringMap map[string]string
 
 // UnmarshalJSON decodes a JSON object into a string-to-string map, skipping
-// any values that are not JSON strings.
+// any values that are not JSON strings. Non-object inputs (null, array, etc.)
+// are silently treated as an empty map to avoid failing the entire handoff decode.
 func (m *StringMap) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		// Non-object value (null, array, number, etc.) — treat as empty.
+		*m = nil
+		return nil
 	}
 	result := make(StringMap, len(raw))
 	for k, v := range raw {

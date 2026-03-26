@@ -340,27 +340,33 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 		return int64(n), err
 	}
 
-	// Build response with custom headers.
-	// Estimate: prefix + ~64 bytes per custom header + terminator.
-	buf := make([]byte, 0, len(sseHeadersPrefix)+64*len(handoff.ResponseHeaders)+2)
-	buf = append(buf, sseHeadersPrefix...)
-
+	// Collect valid custom headers first to avoid allocating a buffer
+	// when all headers end up being dropped (blocked/invalid).
+	type hdr struct{ name, value string }
+	var valid []hdr
 	for name, value := range handoff.ResponseHeaders {
-		if !isValidHeaderName(name) {
+		if !isValidHeaderName(name) || isBlockedHeader(name) || !isValidHeaderValue(value) {
 			continue
 		}
-		if isBlockedHeader(name) {
-			continue
-		}
-		if !isValidHeaderValue(value) {
-			continue
-		}
-		buf = append(buf, name...)
-		buf = append(buf, ':', ' ')
-		buf = append(buf, value...)
-		buf = append(buf, '\r', '\n')
+		valid = append(valid, hdr{name, value})
 	}
 
+	// If no custom headers survived validation, use the fast path.
+	if len(valid) == 0 {
+		n, err := conn.Write(sseHeadersBytes)
+		return int64(n), err
+	}
+
+	// Build response with custom headers.
+	// Estimate: prefix + ~64 bytes per custom header + terminator.
+	buf := make([]byte, 0, len(sseHeadersPrefix)+64*len(valid)+2)
+	buf = append(buf, sseHeadersPrefix...)
+	for _, h := range valid {
+		buf = append(buf, h.name...)
+		buf = append(buf, ':', ' ')
+		buf = append(buf, h.value...)
+		buf = append(buf, '\r', '\n')
+	}
 	buf = append(buf, '\r', '\n') // End of headers.
 
 	// Write the full buffer, handling short writes.

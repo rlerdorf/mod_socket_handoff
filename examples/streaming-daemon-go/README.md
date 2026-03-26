@@ -212,7 +212,7 @@ header('X-Socket-Handoff: /run/streaming-daemon.sock');
 header('X-Handoff-Data: ' . $data);
 ```
 
-The daemon appends these headers to the standard SSE response headers before streaming begins. Headers that conflict with SSE framing (`Content-Type`, `Cache-Control`, `Connection`, `Transfer-Encoding`, `Content-Length`, `X-Accel-Buffering`) are silently dropped. Headers containing `\r` or `\n` in the name or value are also dropped to prevent response splitting.
+The daemon appends these headers to the standard SSE response headers before streaming begins. Headers that conflict with SSE framing (`Content-Type`, `Cache-Control`, `Connection`, `Transfer-Encoding`, `Content-Length`, `Content-Encoding`, `X-Accel-Buffering`) are silently dropped. Header names must be valid HTTP tokens (ASCII only, no whitespace or delimiters); header values must not contain control characters. Invalid headers are silently dropped.
 
 When `response_headers` is empty or absent, the daemon uses pre-allocated header bytes with zero additional allocation.
 
