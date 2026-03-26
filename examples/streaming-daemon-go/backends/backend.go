@@ -29,6 +29,11 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 		*m = nil
 		return nil
 	}
+	// JSON null or {} — treat as empty without allocating.
+	if len(raw) == 0 {
+		*m = nil
+		return nil
+	}
 	result := make(StringMap, len(raw))
 	for k, v := range raw {
 		// Skip JSON null values without allocating a string.
