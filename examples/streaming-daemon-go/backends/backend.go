@@ -34,7 +34,7 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 		*m = nil
 		return nil
 	}
-	result := make(StringMap, len(raw))
+	var result StringMap
 	for k, v := range raw {
 		// Skip JSON null values without allocating a string.
 		if len(v) == 4 && v[0] == 'n' && v[1] == 'u' && v[2] == 'l' && v[3] == 'l' {
@@ -42,6 +42,9 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 		}
 		var s string
 		if json.Unmarshal(v, &s) == nil {
+			if result == nil {
+				result = make(StringMap, len(raw))
+			}
 			result[k] = s
 		}
 	}

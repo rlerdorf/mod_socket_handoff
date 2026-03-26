@@ -335,11 +335,18 @@ func writeAll(conn net.Conn, buf []byte) (int64, error) {
 	var written int64
 	for len(buf) > 0 {
 		n, err := conn.Write(buf)
-		written += int64(n)
+		if n > 0 {
+			written += int64(n)
+			buf = buf[n:]
+		}
 		if err != nil {
 			return written, err
 		}
-		buf = buf[n:]
+		// Guard against no-progress writes (n == 0, err == nil), which are
+		// permitted by io.Writer and would otherwise cause an infinite loop.
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
 	}
 	return written, nil
 }
