@@ -24,8 +24,8 @@ type StringMap map[string]string
 func (m *StringMap) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		// Non-object value (null, array, number, etc.) — treat as empty.
-		*m = nil
+		// Non-object value (null, array, number, etc.) — treat as empty map.
+		*m = make(StringMap)
 		return nil
 	}
 	result := make(StringMap, len(raw))

@@ -1529,7 +1529,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, backends.HandoffData{})
+			if _, err := writeSSEHeaders(server, backends.HandoffData{}); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
@@ -1552,7 +1554,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, handoff)
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
@@ -1588,7 +1592,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, handoff)
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
@@ -1625,7 +1631,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, handoff)
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
@@ -1658,7 +1666,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, handoff)
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
@@ -1692,7 +1702,9 @@ func TestWriteSSEHeaders(t *testing.T) {
 		}
 		go func() {
 			defer server.Close()
-			writeSSEHeaders(server, handoff)
+			if _, err := writeSSEHeaders(server, handoff); err != nil {
+				t.Errorf("writeSSEHeaders: %v", err)
+			}
 		}()
 
 		got, err := io.ReadAll(client)
