@@ -293,22 +293,36 @@ func isBlockedHeader(name string) bool {
 }
 
 // isValidHeaderName reports whether name is a valid HTTP token per RFC 7230.
-// Rejects empty names, names containing whitespace, control characters, or
-// delimiters that could cause header smuggling.
+// Rejects empty names, non-ASCII bytes, control characters, whitespace, and
+// delimiter characters that could cause header smuggling.
 func isValidHeaderName(name string) bool {
 	if name == "" {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
 		c := name[i]
-		// Valid token chars: !#$%&'*+-.0-9A-Z^_`a-z|~
-		// Reject control chars (0-31, 127), space, tab, and delimiters: ():;<=>?@[\]{},"/
-		if c <= ' ' || c == 0x7f ||
+		// Valid token chars are ASCII: !#$%&'*+-.0-9A-Z^_`a-z|~
+		// Reject control chars (0-31, 127), non-ASCII (>= 128), space,
+		// and delimiters: ():;<=>?@[\]{},"/
+		if c <= ' ' || c >= 0x7f ||
 			c == '(' || c == ')' || c == ',' || c == '/' ||
 			c == ':' || c == ';' || c == '<' || c == '=' ||
 			c == '>' || c == '?' || c == '@' || c == '[' ||
 			c == '\\' || c == ']' || c == '{' || c == '}' ||
 			c == '"' {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidHeaderValue reports whether value is a valid HTTP field-value
+// per RFC 7230. Rejects control characters (0x00-0x1F, 0x7F) except
+// horizontal tab (0x09).
+func isValidHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
 			return false
 		}
 	}
@@ -337,8 +351,7 @@ func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error)
 		if isBlockedHeader(name) {
 			continue
 		}
-		// Drop values with characters that could cause response splitting.
-		if strings.ContainsAny(value, "\r\n") {
+		if !isValidHeaderValue(value) {
 			continue
 		}
 		buf = append(buf, name...)
