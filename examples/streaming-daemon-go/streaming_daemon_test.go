@@ -1619,8 +1619,8 @@ func TestWriteSSEHeaders(t *testing.T) {
 		handoff := backends.HandoffData{
 			ResponseHeaders: backends.StringMap{
 				"X-Bad\r\nInjected": "value",
-				"X-Also-Bad":       "val\r\nInjected: header",
-				"X-Good":           "safe-value",
+				"X-Also-Bad":        "val\r\nInjected: header",
+				"X-Good":            "safe-value",
 			},
 		}
 		go func() {
@@ -1647,13 +1647,13 @@ func TestWriteSSEHeaders(t *testing.T) {
 
 		handoff := backends.HandoffData{
 			ResponseHeaders: backends.StringMap{
-				"":              "empty-name",
-				" X-Leading":   "leading-space",
-				"X Space":      "interior-space",
-				"X\tTab":       "has-tab",
-				"X:Colon":      "has-colon",
-				"X-Caf\xe9":    "non-ascii",
-				"X-Valid":      "good",
+				"":           "empty-name",
+				" X-Leading": "leading-space",
+				"X Space":    "interior-space",
+				"X\tTab":     "has-tab",
+				"X:Colon":    "has-colon",
+				"X-Caf\xe9":  "non-ascii",
+				"X-Valid":    "good",
 			},
 		}
 		go func() {
@@ -1682,12 +1682,12 @@ func TestWriteSSEHeaders(t *testing.T) {
 
 		handoff := backends.HandoffData{
 			ResponseHeaders: backends.StringMap{
-				"X-Null":    "val\x00ue",
-				"X-Bell":    "val\x07ue",
-				"X-Escape":  "val\x1bue",
-				"X-Del":     "val\x7fue",
-				"X-Tab":     "val\tue", // HTAB is allowed in values
-				"X-Valid":   "good",
+				"X-Null":   "val\x00ue",
+				"X-Bell":   "val\x07ue",
+				"X-Escape": "val\x1bue",
+				"X-Del":    "val\x7fue",
+				"X-Tab":    "val\tue", // HTAB is allowed in values
+				"X-Valid":  "good",
 			},
 		}
 		go func() {
