@@ -53,6 +53,10 @@ type HandoffData struct {
 	Images     []ImageData `json:"images,omitempty"`      // Inline base64 images (small images only)
 	ImagePaths []string    `json:"image_paths,omitempty"` // Paths to image files on disk (daemon reads, encodes, deletes)
 
+	// Custom HTTP response headers to include in the response to the client.
+	// Headers that conflict with SSE framing (Content-Type, Connection, etc.) are silently dropped.
+	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
+
 	// Generalized attachments: ref_name -> relative file path (under data_dir)
 	Attachments     map[string]string `json:"attachments,omitempty"`
 	AttachmentTypes map[string]string `json:"attachment_types,omitempty"` // ref_name -> MIME type override (skips extension detection)

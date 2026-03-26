@@ -1521,3 +1521,151 @@ func TestResolveAttachments(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteSSEHeaders(t *testing.T) {
+	t.Run("no custom headers uses pre-allocated bytes", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		go func() {
+			defer server.Close()
+			writeSSEHeaders(server, backends.HandoffData{})
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, sseHeadersBytes) {
+			t.Errorf("expected pre-allocated headers, got:\n%s", got)
+		}
+	})
+
+	t.Run("custom headers are included", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: map[string]string{
+				"X-Request-Id": "abc-123",
+			},
+		}
+		go func() {
+			defer server.Close()
+			writeSSEHeaders(server, handoff)
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if !strings.Contains(resp, "X-Request-Id: abc-123\r\n") {
+			t.Errorf("expected X-Request-Id header in response, got:\n%s", resp)
+		}
+		if !strings.HasPrefix(resp, "HTTP/1.1 200 OK\r\n") {
+			t.Errorf("expected HTTP status line, got:\n%s", resp)
+		}
+		if !strings.HasSuffix(resp, "\r\n\r\n") {
+			t.Errorf("expected blank line terminator, got:\n%s", resp)
+		}
+	})
+
+	t.Run("blocked headers are silently dropped", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: map[string]string{
+				"Content-Type":      "text/html",
+				"content-length":    "999",
+				"Cache-Control":     "max-age=3600",
+				"Connection":        "keep-alive",
+				"Transfer-Encoding": "chunked",
+				"X-Accel-Buffering": "yes",
+				"X-Custom":          "allowed",
+			},
+		}
+		go func() {
+			defer server.Close()
+			writeSSEHeaders(server, handoff)
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if !strings.Contains(resp, "X-Custom: allowed\r\n") {
+			t.Errorf("expected X-Custom header, got:\n%s", resp)
+		}
+		// Count occurrences of blocked headers — they should only appear once
+		// (from the fixed prefix), not duplicated by custom values.
+		if strings.Count(resp, "Content-Type:") != 1 {
+			t.Errorf("Content-Type should appear exactly once (from prefix), got:\n%s", resp)
+		}
+		if strings.Contains(resp, "content-length") || strings.Contains(resp, "Content-Length") {
+			t.Errorf("Content-Length should not appear, got:\n%s", resp)
+		}
+		if strings.Contains(resp, "Transfer-Encoding") || strings.Contains(resp, "transfer-encoding") {
+			t.Errorf("Transfer-Encoding should not appear, got:\n%s", resp)
+		}
+	})
+
+	t.Run("header injection is rejected", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: map[string]string{
+				"X-Bad\r\nInjected": "value",
+				"X-Also-Bad":       "val\r\nInjected: header",
+				"X-Good":           "safe-value",
+			},
+		}
+		go func() {
+			defer server.Close()
+			writeSSEHeaders(server, handoff)
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if strings.Contains(resp, "Injected") {
+			t.Errorf("response splitting should be blocked, got:\n%s", resp)
+		}
+		if !strings.Contains(resp, "X-Good: safe-value\r\n") {
+			t.Errorf("valid header should still be present, got:\n%s", resp)
+		}
+	})
+
+	t.Run("empty header name is dropped", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer client.Close()
+
+		handoff := backends.HandoffData{
+			ResponseHeaders: map[string]string{
+				"":       "no-name",
+				"X-Real": "value",
+			},
+		}
+		go func() {
+			defer server.Close()
+			writeSSEHeaders(server, handoff)
+		}()
+
+		got, err := io.ReadAll(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := string(got)
+		if strings.Contains(resp, "no-name") {
+			t.Errorf("empty header name should be dropped, got:\n%s", resp)
+		}
+		if !strings.Contains(resp, "X-Real: value\r\n") {
+			t.Errorf("valid header should be present, got:\n%s", resp)
+		}
+	})
+}

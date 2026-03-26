@@ -266,6 +266,64 @@ var sseHeadersBytes = []byte("HTTP/1.1 200 OK\r\n" +
 	"X-Accel-Buffering: no\r\n" +
 	"\r\n")
 
+// sseHeadersPrefix is sseHeadersBytes without the trailing \r\n, used when
+// custom response headers need to be appended before the blank line.
+var sseHeadersPrefix = []byte("HTTP/1.1 200 OK\r\n" +
+	"Content-Type: text/event-stream\r\n" +
+	"Cache-Control: no-cache\r\n" +
+	"Connection: close\r\n" +
+	"X-Accel-Buffering: no\r\n")
+
+// blockedResponseHeaders are headers that conflict with SSE framing and
+// must not be overridden by PHP userspace.
+var blockedResponseHeaders = map[string]struct{}{
+	"content-type":       {},
+	"cache-control":      {},
+	"connection":         {},
+	"x-accel-buffering":  {},
+	"transfer-encoding":  {},
+	"content-length":     {},
+}
+
+// writeSSEHeaders writes the HTTP response status line and headers to conn.
+// When handoff.ResponseHeaders is non-empty, custom headers are appended after
+// the standard SSE headers. Headers that conflict with SSE framing or contain
+// invalid characters are silently dropped.
+func writeSSEHeaders(conn net.Conn, handoff backends.HandoffData) (int64, error) {
+	if len(handoff.ResponseHeaders) == 0 {
+		n, err := conn.Write(sseHeadersBytes)
+		return int64(n), err
+	}
+
+	// Build response with custom headers.
+	// Estimate: prefix + ~64 bytes per custom header + terminator.
+	buf := make([]byte, 0, len(sseHeadersPrefix)+64*len(handoff.ResponseHeaders)+2)
+	buf = append(buf, sseHeadersPrefix...)
+
+	for name, value := range handoff.ResponseHeaders {
+		// Drop headers that conflict with SSE framing.
+		if _, blocked := blockedResponseHeaders[strings.ToLower(name)]; blocked {
+			continue
+		}
+		// Drop headers with characters that could cause response splitting.
+		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
+			continue
+		}
+		// Drop empty header names.
+		if name == "" {
+			continue
+		}
+		buf = append(buf, name...)
+		buf = append(buf, ':', ' ')
+		buf = append(buf, value...)
+		buf = append(buf, '\r', '\n')
+	}
+
+	buf = append(buf, '\r', '\n') // End of headers.
+	n, err := conn.Write(buf)
+	return int64(n), err
+}
+
 // initLogging configures the default slog logger based on LoggingConfig.
 func initLogging(cfg config.LoggingConfig) {
 	var level slog.Level
@@ -1076,12 +1134,13 @@ func streamToClientWithBytes(ctx context.Context, conn net.Conn, handoff backend
 	// Write directly to conn without buffering for lowest latency SSE streaming.
 	// Each write goes straight to the kernel, minimizing TTFB.
 
-	// Send HTTP headers for SSE (use pre-allocated bytes to avoid conversion)
-	headerBytes, err := conn.Write(sseHeadersBytes)
+	// Send HTTP headers for SSE. Uses pre-allocated bytes when no custom
+	// response headers are present; otherwise builds headers dynamically.
+	headerBytes, err := writeSSEHeaders(conn, handoff)
 	if err != nil {
 		return totalBytes, fmt.Errorf("failed to write headers: %w", err)
 	}
-	totalBytes += int64(headerBytes)
+	totalBytes += headerBytes
 	if !*benchmarkMode {
 		metricBytesSent.Add(float64(headerBytes))
 	}

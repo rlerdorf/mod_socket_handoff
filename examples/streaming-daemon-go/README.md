@@ -196,6 +196,26 @@ LangGraph-specific handoff data fields:
 | `image_path` | *(deprecated)* Single image file path — use `attachments` instead |
 | `image_paths` | *(deprecated)* Array of image file paths — use `attachments` instead |
 
+### Custom Response Headers
+
+PHP can pass custom HTTP response headers to include in the daemon's response to the client via the `response_headers` field in `X-Handoff-Data`:
+
+```php
+$data = json_encode([
+    'prompt' => $_POST['prompt'],
+    'response_headers' => [
+        'X-Request-Id' => $requestId,
+        'X-Conversation-Id' => $conversationId,
+    ],
+]);
+header('X-Socket-Handoff: /run/streaming-daemon.sock');
+header('X-Handoff-Data: ' . $data);
+```
+
+The daemon appends these headers to the standard SSE response headers before streaming begins. Headers that conflict with SSE framing (`Content-Type`, `Cache-Control`, `Connection`, `Transfer-Encoding`, `Content-Length`, `X-Accel-Buffering`) are silently dropped. Headers containing `\r` or `\n` in the name or value are also dropped to prevent response splitting.
+
+When `response_headers` is empty or absent, the daemon uses pre-allocated header bytes with zero additional allocation.
+
 ### Typing Backend
 
 Streams characters one at a time with realistic typing delays. Uses `/usr/games/fortune` for dynamic content when the prompt isn't recognized.
