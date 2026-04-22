@@ -8,8 +8,37 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	// Socket path - must match SocketHandoffAllowedPrefix in Apache config
+	DaemonSocket = "/run/streaming-daemon.sock"
+
+	// Timeouts for robustness
+	HandoffTimeout  = 5 * time.Second // Max time to receive fd from Apache
+	ShutdownTimeout = 2 * time.Minute // Graceful shutdown timeout; long enough for LLM streams to complete
+
+	// DefaultMaxConnections is the default maximum concurrent connections.
+	// Can be overridden with -max-connections flag for benchmarking.
+	DefaultMaxConnections = 50000
+
+	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
+	// via the Unix socket. The data originates from the X-Handoff-Data response
+	// header set by PHP. Apache has no size limit on response headers, so the
+	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
+	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
+	MaxHandoffDataSize = 131072 // 128KB
+
+	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
+	DefaultMetricsAddr = "127.0.0.1:9090"
+
+	// DefaultSocketMode is the default permission mode for the Unix socket.
+	// 0660 restricts access to owner and group only. Apache (www-data) must be
+	// in the same group as the daemon, or run the daemon as www-data.
+	DefaultSocketMode = 0660
 )
 
 // Config is the root configuration structure.
@@ -275,9 +304,9 @@ func Default() *Config {
 	http2 := true
 	return &Config{
 		Server: ServerConfig{
-			SocketPath:          "/run/streaming-daemon.sock",
-			SocketMode:          0660,
-			MaxConnections:      50000,
+			SocketPath:          DaemonSocket,
+			SocketMode:          DefaultSocketMode,
+			MaxConnections:      DefaultMaxConnections,
 			MaxStreamDurationMs: 300000,
 			DataDir:             "/run/handoff-data",
 		},
@@ -300,7 +329,7 @@ func Default() *Config {
 		},
 		Metrics: MetricsConfig{
 			Enabled:    true,
-			ListenAddr: "127.0.0.1:9090",
+			ListenAddr: DefaultMetricsAddr,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

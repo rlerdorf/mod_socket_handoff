@@ -48,35 +48,6 @@ import (
 	"examples/config"
 )
 
-const (
-	// Socket path - must match SocketHandoffAllowedPrefix in Apache config
-	DaemonSocket = "/run/streaming-daemon.sock"
-
-	// Timeouts for robustness
-	HandoffTimeout  = 5 * time.Second // Max time to receive fd from Apache
-	ShutdownTimeout = 2 * time.Minute // Graceful shutdown timeout; long enough for LLM streams to complete
-
-	// DefaultMaxConnections is the default maximum concurrent connections.
-	// Can be overridden with -max-connections flag for benchmarking.
-	DefaultMaxConnections = 50000
-
-	// MaxHandoffDataSize is the buffer size for receiving handoff JSON from Apache
-	// via the Unix socket. The data originates from the X-Handoff-Data response
-	// header set by PHP. Apache has no size limit on response headers, so the
-	// effective limit is this buffer size and the kernel's SO_SNDBUF (~208KB
-	// default on Linux) which caps SOCK_SEQPACKET message size. Increase if needed.
-	MaxHandoffDataSize = 131072 // 128KB
-
-	// DefaultMetricsAddr is the default address for the Prometheus metrics HTTP server.
-	DefaultMetricsAddr = "127.0.0.1:9090"
-
-	// DefaultSocketMode is the default permission mode for the Unix socket.
-	// 0660 restricts access to owner and group only. Apache (www-data) must be
-	// in the same group as the daemon, or run the daemon as www-data.
-	DefaultSocketMode = 0660
-
-)
-
 // Command-line flags
 var (
 	configFile = flag.String("config", "",
@@ -245,7 +216,7 @@ var (
 // memory pressure and GC overhead under high connection throughput.
 var handoffBufPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, MaxHandoffDataSize)
+		buf := make([]byte, config.MaxHandoffDataSize)
 		return &buf
 	},
 }
@@ -856,7 +827,7 @@ func main() {
 	select {
 	case <-done:
 		slog.Info("all connections closed gracefully")
-	case <-time.After(ShutdownTimeout):
+	case <-time.After(config.ShutdownTimeout):
 		slog.Warn("timeout waiting for connections", "still_active", atomic.LoadInt64(&activeConns))
 	}
 
@@ -1078,7 +1049,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 	}
 
 	// Set read deadline for timeout
-	if err := unixConn.SetReadDeadline(time.Now().Add(HandoffTimeout)); err != nil {
+	if err := unixConn.SetReadDeadline(time.Now().Add(config.HandoffTimeout)); err != nil {
 		return -1, nil, fmt.Errorf("could not set read deadline: %w", err)
 	}
 
@@ -1129,7 +1100,7 @@ func receiveFd(conn net.Conn) (int, []byte, error) {
 		closeReceivedFDs()
 		handoffBufPool.Put(bufPtr)
 		oobBufPool.Put(oobPtr)
-		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", MaxHandoffDataSize)
+		return -1, nil, fmt.Errorf("handoff data truncated (exceeded %d byte buffer); increase MaxHandoffDataSize", config.MaxHandoffDataSize)
 	}
 
 	// Check MSG_CTRUNC flag to detect if control message (containing fd) was truncated
