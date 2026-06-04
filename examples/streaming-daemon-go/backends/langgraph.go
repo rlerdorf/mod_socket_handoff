@@ -364,15 +364,21 @@ func ensureThreadExists(ctx context.Context, p *langgraphProfile, threadID strin
 
 // Stream sends a request to the LangGraph API and streams the response to the client.
 func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
-	var totalBytes int64
-	backendStart := time.Now()
-	var ttfbRecorded bool
-
-	// Resolve the effective profile for this request
+	// Resolve the effective profile for this request (needed by both paths)
 	p, err := resolveLangGraphProfile(handoff)
 	if err != nil {
 		return 0, err
 	}
+
+	// v2 path: PHP built the full run envelope; daemon only injects attachments and forwards.
+	if len(handoff.LGBody) > 0 {
+		return streamLGBody(ctx, conn, handoff, p)
+	}
+
+	// Legacy path — unchanged below this line.
+	var totalBytes int64
+	backendStart := time.Now()
+	var ttfbRecorded bool
 
 	// Determine assistant ID (handoff override > profile)
 	assistantID := p.assistantID
