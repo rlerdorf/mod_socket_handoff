@@ -370,12 +370,12 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		return 0, err
 	}
 
-	// v2 path: client built the full run envelope; daemon only injects attachments and forwards.
+	// Client pre-built the run envelope: inject attachments and forward.
 	if len(handoff.LGBody) > 0 {
 		slog.Debug("langgraph backend v2 (lg_body)", "thread_id", handoff.ThreadID)
 		return streamLGBody(ctx, conn, handoff, p)
 	}
-	slog.Debug("langgraph backend v1 (legacy)", "thread_id", handoff.ThreadID)
+	slog.Debug("langgraph backend v1 (discrete fields)", "thread_id", handoff.ThreadID)
 
 	var totalBytes int64
 	backendStart := time.Now()

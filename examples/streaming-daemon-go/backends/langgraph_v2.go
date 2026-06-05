@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// streamLGBody is the v2 LangGraph path. PHP has built the complete run
-// envelope in handoff.LGBody; the daemon's only job is to inject resolved
-// file attachments into the message content and forward the request.
+// streamLGBody handles LangGraph requests where the caller has pre-built the
+// complete run envelope in LGBody. The daemon injects resolved file attachments
+// into the message content and forwards the request.
 func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *langgraphProfile) (int64, error) {
 	var totalBytes int64
 	backendStart := time.Now()
@@ -81,7 +81,7 @@ func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *la
 		return 0, fmt.Errorf("set write deadline: %w", err)
 	}
 
-	// Proxy SSE stream — identical loop to the legacy path.
+	// Proxy SSE stream.
 	copyBufPtr := copyBufPool.Get().(*[]byte)
 	copyBuf := *copyBufPtr
 	defer func() {
