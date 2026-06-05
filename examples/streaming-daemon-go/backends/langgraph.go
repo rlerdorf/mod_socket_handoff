@@ -409,6 +409,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		reqURL = p.apiBase + "/runs/stream"
 	}
 
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, buf, "", "  ") == nil {
+			slog.Debug("langgraph v1 request body", "url", reqURL, "body", pretty.String())
+		}
+	}
+
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(buf))
 	if err != nil {

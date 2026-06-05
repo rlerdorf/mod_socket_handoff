@@ -45,6 +45,13 @@ func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *la
 		reqURL = p.apiBase + "/runs/stream"
 	}
 
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, body, "", "  ") == nil {
+			slog.Debug("langgraph v2 request body", "url", reqURL, "body", pretty.String())
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
