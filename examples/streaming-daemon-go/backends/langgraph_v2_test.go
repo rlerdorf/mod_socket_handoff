@@ -141,6 +141,88 @@ func TestMergeAttachmentsIntoLGBody(t *testing.T) {
 			t.Errorf("last message content should be an array, got: %s", result.Input.Messages[1].Content)
 		}
 	})
+
+	t.Run("empty array content + image produces valid JSON array", func(t *testing.T) {
+		body := json.RawMessage(`{"input":{"messages":[{"type":"human","content":[]}]}}`)
+		images := []ImageData{{Base64: "aW1n", MimeType: "image/png"}}
+		got, err := mergeAttachmentsIntoLGBody(body, nil, images, "openai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Must be valid JSON (no trailing comma)
+		var v any
+		if err := json.Unmarshal(got, &v); err != nil {
+			t.Errorf("result is not valid JSON: %v\nbody: %s", err, got)
+		}
+		if !strings.Contains(string(got), `"image_url"`) {
+			t.Errorf("expected image_url in output: %s", got)
+		}
+	})
+
+	t.Run("text attachment in array mode appended as text part", func(t *testing.T) {
+		body := json.RawMessage(`{"input":{"messages":[{"type":"human","content":[{"type":"text","text":"hello"}]}]}}`)
+		resolved := map[string]ResolvedAttachment{
+			"doc": {MimeType: "text/plain", IsText: true, Text: "appended text"},
+		}
+		got, err := mergeAttachmentsIntoLGBody(body, resolved, nil, "openai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(got)
+		if !strings.Contains(s, "appended text") {
+			t.Errorf("text attachment content missing from output: %s", s)
+		}
+		var v any
+		if err := json.Unmarshal(got, &v); err != nil {
+			t.Errorf("result is not valid JSON: %v", err)
+		}
+	})
+
+	t.Run("multiple binary attachments in array mode have deterministic order", func(t *testing.T) {
+		body := json.RawMessage(`{"input":{"messages":[{"type":"human","content":[{"type":"text","text":"hi"}]}]}}`)
+		resolved := map[string]ResolvedAttachment{
+			"zzz": {MimeType: "image/png", IsText: false, Base64: "enp6"},
+			"aaa": {MimeType: "image/png", IsText: false, Base64: "YWFh"},
+			"mmm": {MimeType: "image/png", IsText: false, Base64: "bW1t"},
+		}
+		first, err := mergeAttachmentsIntoLGBody(body, resolved, nil, "openai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := mergeAttachmentsIntoLGBody(body, resolved, nil, "openai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(first) != string(second) {
+			t.Errorf("output is non-deterministic:\nfirst:  %s\nsecond: %s", first, second)
+		}
+		// aaa sorts before mmm before zzz, so base64 values should appear in that order
+		s := string(first)
+		aaaIdx := strings.Index(s, "YWFh")
+		mmmIdx := strings.Index(s, "bW1t")
+		zzzIdx := strings.Index(s, "enp6")
+		if !(aaaIdx < mmmIdx && mmmIdx < zzzIdx) {
+			t.Errorf("attachments not in sorted order: aaa@%d mmm@%d zzz@%d in: %s", aaaIdx, mmmIdx, zzzIdx, s)
+		}
+	})
+
+	t.Run("uppercase MIME type treated as image not document", func(t *testing.T) {
+		body := json.RawMessage(`{"input":{"messages":[{"type":"human","content":"look"}]}}`)
+		resolved := map[string]ResolvedAttachment{
+			"img": {MimeType: "image/PNG", IsText: false, Base64: "aW1n"},
+		}
+		got, err := mergeAttachmentsIntoLGBody(body, resolved, nil, "anthropic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(got)
+		if strings.Contains(s, `"document"`) {
+			t.Errorf("image/PNG should produce image_url not document: %s", s)
+		}
+		if !strings.Contains(s, `"image_url"`) {
+			t.Errorf("expected image_url for image/PNG: %s", s)
+		}
+	})
 }
 
 // ---- streamLGBody integration ----

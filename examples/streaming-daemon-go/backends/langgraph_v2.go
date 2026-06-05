@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -237,18 +239,13 @@ func mergeAttachmentsIntoLGBody(lgBody json.RawMessage, resolved map[string]Reso
 }
 
 // prependAttachmentsToContentArray prepends unreferenced binary attachments and
-// images to an existing JSON content array. Referenced attachments (those whose
-// ref names appear as placeholders in a text part) are not handled here — they
-// are expected to have been placed by PHP. Existing array elements are untouched.
+// images to an existing JSON content array. Text attachments are appended as a
+// trailing text part. Existing array elements are untouched.
 func prependAttachmentsToContentArray(existingArray []byte, resolved map[string]ResolvedAttachment, images []ImageData, contentFormat string) []byte {
-	// Build just the prepend parts using the existing helpers, then splice them in.
-	// Use an empty string as the text so appendContentWithAttachments emits only
-	// the binary parts before the (empty) text part, then we drop the text part.
 	if len(resolved) == 0 && len(images) == 0 {
 		return existingArray
 	}
 
-	// Collect unreferenced binary attachments (text attachments have no binary part to prepend).
 	var prependParts []byte
 	first := true
 
@@ -279,25 +276,54 @@ func prependAttachmentsToContentArray(existingArray []byte, resolved map[string]
 		}
 		appendBinaryPart(mime, img.Base64)
 	}
-	for _, att := range resolved {
-		if !att.IsText {
+
+	// Sort ref names for deterministic output (map iteration order is random).
+	names := make([]string, 0, len(resolved))
+	for name := range resolved {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var textParts []byte
+	for _, name := range names {
+		att := resolved[name]
+		if att.IsText {
+			// Append text attachments as a trailing text part rather than silently dropping them.
+			textParts = appendJSONEscaped(textParts, att.Text)
+		} else {
 			appendBinaryPart(att.MimeType, att.Base64)
 		}
 	}
 
-	if len(prependParts) == 0 {
-		return existingArray
+	// Build result: '[' + prepend + [comma + inner if non-empty] + [trailing text part] + ']'
+	// inner is existingArray[1:], which is either ']' (empty array) or '{...}]' (non-empty).
+	inner := existingArray[1:]
+	arrayEmpty := len(inner) > 0 && inner[0] == ']'
+
+	var result []byte
+	result = append(result, '[')
+	result = append(result, prependParts...)
+
+	if !arrayEmpty {
+		if len(prependParts) > 0 {
+			result = append(result, ',')
+		}
+		// inner ends with ']'; strip it so we can append the text part before closing.
+		result = append(result, inner[:len(inner)-1]...)
 	}
 
-	// Splice: strip the leading '[' from existingArray and build '[prepend, ...existing]'.
-	// existingArray is like `[{"type":"text",...}]`; we want `[<prepend>,{"type":"text",...}]`.
-	inner := existingArray[1:] // strip leading '['
-	result := append([]byte{'['}, prependParts...)
-	result = append(result, ',')
-	result = append(result, inner...)
+	if len(textParts) > 0 {
+		if len(result) > 1 { // something already in the array
+			result = append(result, ',')
+		}
+		result = append(result, `{"type":"text","text":"`...)
+		result = append(result, textParts...)
+		result = append(result, `"}`...)
+	}
+
+	result = append(result, ']')
 	return result
 }
 
 func isImageMime(mimeType string) bool {
-	return len(mimeType) >= 6 && mimeType[:6] == "image/"
+	return strings.HasPrefix(strings.ToLower(mimeType), "image/")
 }
