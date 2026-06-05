@@ -370,12 +370,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		return 0, err
 	}
 
-	// v2 path: PHP built the full run envelope; daemon only injects attachments and forwards.
+	// v2 path: client built the full run envelope; daemon only injects attachments and forwards.
 	if len(handoff.LGBody) > 0 {
+		slog.Debug("langgraph backend v2 (lg_body)", "thread_id", handoff.ThreadID)
 		return streamLGBody(ctx, conn, handoff, p)
 	}
+	slog.Debug("langgraph backend v1 (legacy)", "thread_id", handoff.ThreadID)
 
-	// Legacy path — unchanged below this line.
 	var totalBytes int64
 	backendStart := time.Now()
 	var ttfbRecorded bool

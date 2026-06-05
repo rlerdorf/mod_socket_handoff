@@ -61,10 +61,9 @@ type Message struct {
 // HandoffData is the JSON structure passed from PHP via X-Handoff-Data header.
 // Customize this struct to match your application's needs.
 type HandoffData struct {
-	// LGBody is the complete LangGraph run envelope built by PHP (assistant_id,
+	// The complete LangGraph run envelope built by the client (assistant_id,
 	// input, stream_mode, config, on_disconnect, etc.). When present, the daemon
-	// forwards it verbatim after injecting resolved file attachments. This is the
-	// v2 path; the discrete fields below are the legacy path kept for compatibility.
+	// forwards it verbatim after injecting resolved file attachments.
 	LGBody json.RawMessage `json:"lg_body,omitempty"`
 
 	UserID      int64     `json:"user_id"`
