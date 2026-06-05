@@ -66,36 +66,39 @@ type HandoffData struct {
 	// forwards it verbatim after injecting resolved file attachments.
 	LGBody json.RawMessage `json:"lg_body,omitempty"`
 
+	// Deprecated: use lg_body
 	UserID      int64     `json:"user_id"`
-	Prompt      string    `json:"prompt"`             // Single prompt (legacy, used if Messages is empty)
-	Messages    []Message `json:"messages,omitempty"` // Full conversation history
-	Model       string    `json:"model,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Timestamp   int64     `json:"timestamp,omitempty"`
-	TestPattern string    `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
+	Prompt      string    `json:"prompt"`             // Deprecated: use lg_body.input.messages
+	Messages    []Message `json:"messages,omitempty"` // Deprecated: use lg_body.input.messages
+	AssistantID    string         `json:"assistant_id,omitempty"`     // Deprecated: use lg_body.assistant_id
+	StreamMode     []string       `json:"stream_mode,omitempty"`      // Deprecated: use lg_body.stream_mode
+	LangGraphInput map[string]any `json:"langgraph_input,omitempty"`  // Deprecated: use lg_body.input.*
+	Images     []ImageData `json:"images,omitempty"` // Deprecated: use lg_body content or ImagePaths
 
-	// LangGraph-specific fields
-	ThreadID       string         `json:"thread_id,omitempty"`        // For stateful runs (uses /threads/{id}/runs/stream)
-	AssistantID    string         `json:"assistant_id,omitempty"`     // Override default assistant ID
-	StreamMode     []string       `json:"stream_mode,omitempty"`      // Stream modes (e.g., ["messages", "updates", "custom"])
-	LangGraphInput map[string]any `json:"langgraph_input,omitempty"`  // Custom input fields (seller_id, shop_id, etc.)
-	Profile        string         `json:"profile,omitempty"`          // Named LangGraph profile from config
-	LangGraphURL   string         `json:"langgraph_url,omitempty"`    // Per-request API base URL override
-	LangGraphKey   string         `json:"langgraph_api_key,omitempty"` // Per-request API key override
-	LG             string         `json:"lg,omitempty"`               // Compact: "profile|url|key" (pipe-delimited, empty segment = no override for that position)
+	// Deprecated: unused
+	Model       string `json:"model,omitempty"`
+	MaxTokens   int    `json:"max_tokens,omitempty"`
+	Timestamp   int64  `json:"timestamp,omitempty"`
+
+	// Deprecated: use Attachments
+	ImagePath     string `json:"image_path,omitempty"`
+	ImageBase64   string `json:"image_base64,omitempty"`
+	ImageMimeType string `json:"image_mime_type,omitempty"`
+
+	TestPattern string `json:"test_pattern,omitempty"` // For testing: passed to backend as X-Test-Pattern header
+
+	// LangGraph transport/routing fields
+	ThreadID     string `json:"thread_id,omitempty"`         // For stateful runs (uses /threads/{id}/runs/stream)
+	Profile      string `json:"profile,omitempty"`           // Named LangGraph profile from config
+	LangGraphURL string `json:"langgraph_url,omitempty"`     // Per-request API base URL override
+	LangGraphKey string `json:"langgraph_api_key,omitempty"` // Per-request API key override
+	LG           string `json:"lg,omitempty"`                // Compact: "profile|url|key" (pipe-delimited)
 
 	// Per-request backend selection (overrides the daemon's default provider)
 	Backend string `json:"backend,omitempty"`
 
-	// Image handoff fields (for multimodal requests)
-	// Legacy single-image fields (deprecated, use Images/ImagePaths instead)
-	ImagePath     string `json:"image_path,omitempty"`      // Deprecated: use ImagePaths
-	ImageBase64   string `json:"image_base64,omitempty"`    // Deprecated: use Images
-	ImageMimeType string `json:"image_mime_type,omitempty"` // Deprecated: use Images with MimeType
-
-	// Multi-image support
-	Images     []ImageData `json:"images,omitempty"`      // Inline base64 images (small images only)
-	ImagePaths []string    `json:"image_paths,omitempty"` // Paths to image files on disk (daemon reads, encodes, deletes)
+	// Image and attachment file paths — daemon reads, base64-encodes, and deletes
+	ImagePaths []string `json:"image_paths,omitempty"`
 
 	// Custom HTTP response headers to include in the response to the client.
 	// Headers that conflict with SSE framing (Content-Type, Connection, etc.) are silently dropped.

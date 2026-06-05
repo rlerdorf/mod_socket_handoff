@@ -183,18 +183,26 @@ LangGraph-specific handoff data fields:
 
 | Field | Description |
 |-------|-------------|
-| `thread_id` | Thread ID for stateful conversations (uses `/threads/{id}/runs/stream`) |
-| `assistant_id` | Override the default assistant ID |
-| `stream_mode` | Stream modes to use (e.g., `["messages"]`, `["events"]`); defaults to configured `LANGGRAPH_STREAM_MODE` |
+| `lg_body` | **Preferred.** Complete LangGraph run envelope built by the client (`assistant_id`, `input`, `stream_mode`, `config`, `on_disconnect`, etc.). The daemon forwards it verbatim, injecting resolved file attachments into the last message. |
+| `thread_id` | Thread ID for stateful conversations — routes to `/threads/{id}/runs/stream` and triggers `ensureThreadExists`. Minted by the client; required alongside `lg_body` for stateful runs. |
+| `lg` | Transport selection: compact `profile\|url\|key` syntax (pipe-delimited, empty segment = no override for that position) |
 | `profile` | Named LangGraph profile from config (selects API base, key, assistant, content format) |
-| `langgraph_input` | Custom input fields passed to the agent (e.g., `seller_id`, `shop_id`) |
+| `langgraph_url` | Per-request API base URL override |
+| `langgraph_api_key` | Per-request API key override |
 | `attachments` | Map of ref names to file paths (relative to `data_dir`) for multimodal requests — see [Attachments](#attachments-multimodal-requests) |
 | `attachment_types` | Optional map of ref names to MIME types (overrides extension-based detection) |
-| `images` | Array of `{"base64": "...", "mime_type": "..."}` for inline images already in memory |
-| `image_base64` | *(deprecated)* Single inline base64 image — use `images` array instead |
-| `image_mime_type` | *(deprecated)* MIME type for `image_base64` — defaults to `image/jpeg` |
-| `image_path` | *(deprecated)* Single image file path — use `attachments` instead |
-| `image_paths` | *(deprecated)* Array of image file paths — use `attachments` instead |
+| `image_paths` | Array of image file paths — daemon reads, base64-encodes, and injects into the last message |
+| `response_headers` | Custom HTTP headers to include in the SSE response (e.g., `{"X-Thread-Id": "..."}`) |
+| `test_pattern` | Passed as `X-Test-Pattern` request header to the backend; for validation testing |
+| `assistant_id` | *(deprecated — use `lg_body.assistant_id`)* Override the default assistant ID |
+| `stream_mode` | *(deprecated — use `lg_body.stream_mode`)* Stream modes (e.g., `["messages"]`, `["custom"]`) |
+| `langgraph_input` | *(deprecated — use `lg_body.input.*`)* Custom input fields passed to the agent |
+| `prompt` | *(deprecated — use `lg_body.input.messages`)* Single prompt string |
+| `messages` | *(deprecated — use `lg_body.input.messages`)* Full conversation history |
+| `images` | *(deprecated — use `lg_body` content or `image_paths`)* Inline base64 images |
+| `image_base64` | *(deprecated — use `attachments`)* Single inline base64 image |
+| `image_mime_type` | *(deprecated)* MIME type for `image_base64` |
+| `image_path` | *(deprecated — use `attachments`)* Single image file path |
 
 ### Custom Response Headers
 
@@ -388,8 +396,10 @@ streaming-daemon-go/
 ├── go.sum
 ├── backends/
 │   ├── backend.go           # Backend interface + registry
-│   ├── langgraph.go         # LangGraph Platform API backend
+│   ├── langgraph.go         # LangGraph backend (legacy path)
+│   ├── langgraph_v2.go      # LangGraph backend (lg_body path)
 │   ├── langgraph_test.go    # LangGraph backend tests
+│   ├── langgraph_v2_test.go # LangGraph v2 backend tests
 │   ├── mock.go              # Mock demo backend
 │   ├── openai.go            # OpenAI streaming backend
 │   ├── openai_test.go       # OpenAI backend tests
