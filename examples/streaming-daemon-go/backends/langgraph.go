@@ -364,15 +364,22 @@ func ensureThreadExists(ctx context.Context, p *langgraphProfile, threadID strin
 
 // Stream sends a request to the LangGraph API and streams the response to the client.
 func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (int64, error) {
-	var totalBytes int64
-	backendStart := time.Now()
-	var ttfbRecorded bool
-
-	// Resolve the effective profile for this request
+	// Resolve the effective profile for this request (needed by both paths)
 	p, err := resolveLangGraphProfile(handoff)
 	if err != nil {
 		return 0, err
 	}
+
+	// Client pre-built the run envelope: inject attachments and forward.
+	if len(handoff.LGBody) > 0 {
+		slog.Debug("langgraph backend v2 (lg_body)", "thread_id", handoff.ThreadID)
+		return streamLGBody(ctx, conn, handoff, p)
+	}
+	slog.Debug("langgraph backend v1 (discrete fields)", "thread_id", handoff.ThreadID)
+
+	var totalBytes int64
+	backendStart := time.Now()
+	var ttfbRecorded bool
 
 	// Determine assistant ID (handoff override > profile)
 	assistantID := p.assistantID
@@ -400,6 +407,13 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", p.apiBase, url.PathEscape(handoff.ThreadID))
 	} else {
 		reqURL = p.apiBase + "/runs/stream"
+	}
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, buf, "", "  ") == nil {
+			slog.Debug("langgraph v1 request body", "url", reqURL, "body", pretty.String())
+		}
 	}
 
 	// Create HTTP request
