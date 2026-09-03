@@ -362,10 +362,17 @@ func (c *lazyHeaderConn) Write(p []byte) (int, error) {
 	if c.headersSent {
 		return c.Conn.Write(p)
 	}
+	// headersSent stays true even if the write fails part-way: once any byte of
+	// the status line is on the wire, a retry would emit a second status line
+	// into a partially written response, so the caller must abort instead.
 	c.headersSent = true
 	hdr := buildSSEHeaders(c.handoff)
 	bufs := net.Buffers{hdr, p}
 	n, err := bufs.WriteTo(c.Conn)
+	if err == nil && n < int64(len(hdr)+len(p)) {
+		// The generic WriteTo path does not check for short writes itself.
+		err = io.ErrShortWrite
+	}
 	if n >= int64(len(hdr)) {
 		c.headerBytes = int64(len(hdr))
 		n -= int64(len(hdr))
@@ -1414,6 +1421,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 // any other error means the path could not be resolved (typically a missing
 // file), which callers treat as skippable.
 func containedPath(allowedDir, p string) (resolved string, outside bool, err error) {
+	// Without an absolute allowedDir there is nothing to contain against: a
+	// relative p would silently resolve against the process working directory.
+	if !filepath.IsAbs(allowedDir) {
+		return "", true, fmt.Errorf("%q cannot be resolved: data_dir is not configured", p)
+	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(allowedDir, p)
 	}
@@ -1421,10 +1433,8 @@ func containedPath(allowedDir, p string) (resolved string, outside bool, err err
 
 	// Canonicalize allowedDir so resolved paths compare correctly even when
 	// allowedDir contains symlinks (e.g. /var/run -> /run).
-	if allowedDir != "" {
-		if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
-			allowedDir = canon
-		}
+	if canon, err := filepath.EvalSymlinks(allowedDir); err == nil {
+		allowedDir = canon
 	}
 
 	if !isInside(allowedDir, cleaned) {
@@ -1534,6 +1544,14 @@ func resolveImages(handoff *backends.HandoffData, allowedDir string) error {
 
 	// Copy inline images to ResolvedImages
 	handoff.ResolvedImages = append(handoff.ResolvedImages, handoff.Images...)
+
+	if len(handoff.ImagePaths) == 0 {
+		return nil
+	}
+	// Fail fast if data_dir is not configured (same rule as attachments)
+	if !filepath.IsAbs(allowedDir) {
+		return fmt.Errorf("data_dir is not configured (required for image_paths)")
+	}
 
 	// Load file images
 	for _, path := range handoff.ImagePaths {

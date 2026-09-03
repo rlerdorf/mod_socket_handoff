@@ -399,6 +399,72 @@ func TestRelativeImagePathResolvedUnderDataDir(t *testing.T) {
 	}
 }
 
+// Without a configured data_dir, relative image_paths must be rejected rather
+// than resolved (and deleted) relative to the daemon's working directory.
+func TestImagePathsRequireDataDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cwdFile := filepath.Join(dir, "cwd.png")
+	if err := os.WriteFile(cwdFile, []byte("png"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, allowedDir := range []string{"", "relative/dir"} {
+		handoff := backends.HandoffData{ImagePaths: []string{"cwd.png"}}
+		err := resolveImages(&handoff, allowedDir)
+		if err == nil || !strings.Contains(err.Error(), "data_dir is not configured") {
+			t.Errorf("allowedDir %q: err = %v, want data_dir-not-configured error", allowedDir, err)
+		}
+		if len(handoff.ResolvedImages) != 0 {
+			t.Errorf("allowedDir %q: image was resolved from CWD", allowedDir)
+		}
+	}
+	if _, err := os.Stat(cwdFile); err != nil {
+		t.Error("file in CWD must not be deleted")
+	}
+
+	// Inline images still work without a data_dir.
+	handoff := backends.HandoffData{Images: []backends.ImageData{{Base64: "QUJD"}}}
+	if err := resolveImages(&handoff, ""); err != nil || len(handoff.ResolvedImages) != 1 {
+		t.Errorf("inline images without data_dir: err=%v resolved=%d", err, len(handoff.ResolvedImages))
+	}
+}
+
+// shortWriteConn accepts only the first `limit` bytes of each Write and
+// reports success, violating the io.Writer contract the way a buggy wrapper might.
+type shortWriteConn struct {
+	net.Conn
+	limit   int
+	written []byte
+}
+
+func (s *shortWriteConn) Write(p []byte) (int, error) {
+	n := min(len(p), s.limit)
+	s.written = append(s.written, p[:n]...)
+	return n, nil
+}
+
+// A short write while sending headers must surface as an error so the backend
+// aborts instead of continuing after a truncated status line.
+func TestLazyHeaderConnShortWriteIsError(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	sw := &shortWriteConn{Conn: server, limit: 10}
+	lc := &lazyHeaderConn{Conn: sw, handoff: backends.HandoffData{}}
+
+	_, err := lc.Write([]byte("data: x\n\n"))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("err = %v, want io.ErrShortWrite", err)
+	}
+	if !lc.headersSent {
+		t.Error("headersSent must stay true after a partial header write")
+	}
+	// Byte accounting is only a metric; it must never claim more than the header length.
+	if lc.headerBytes > int64(len(sseHeadersBytes)) {
+		t.Errorf("headerBytes = %d, exceeds header length %d", lc.headerBytes, len(sseHeadersBytes))
+	}
+}
+
 // The per-request budget caps the sum of all staged files, not just each one.
 func TestTotalAttachmentBudget(t *testing.T) {
 	if testing.Short() {
