@@ -300,11 +300,27 @@ func isValidHeaderValue(value string) bool {
 	return true
 }
 
-// writeAll writes buf to conn. net.Conn.Write already loops until the whole
-// buffer is written or an error occurs, so this only adapts the return type.
+// writeAll writes the entire buffer to conn. The io.Writer contract requires
+// a non-nil error on a short write and the standard net.Conn implementations
+// honour it, but this is used for status lines and headers where a truncated
+// write from a misbehaving wrapped conn would yield a malformed response, so
+// it loops defensively and treats a no-progress write as an error.
 func writeAll(conn net.Conn, buf []byte) (int64, error) {
-	n, err := conn.Write(buf)
-	return int64(n), err
+	var written int64
+	for len(buf) > 0 {
+		n, err := conn.Write(buf)
+		if n > 0 {
+			written += int64(n)
+			buf = buf[n:]
+		}
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
 }
 
 // writeErrorResponse writes a complete non-streaming HTTP error response
@@ -1799,6 +1815,11 @@ func resolveAttachments(handoff *backends.HandoffData, allowedDir string) error 
 func classifyError(err error) string {
 	if err == nil {
 		return "none"
+	}
+	// Streams cut short because the client went away are rewritten to this
+	// sentinel in handleConnection; check it before the generic context error.
+	if errors.Is(err, errClientDisconnected) {
+		return "client_disconnected"
 	}
 	// Use errors.Is for context errors (handles wrapped errors)
 	if errors.Is(err, context.Canceled) {

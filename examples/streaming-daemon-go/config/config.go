@@ -220,7 +220,7 @@ func (c *Config) ValidateReloadable() error {
 	switch strings.ToLower(c.Logging.Level) {
 	case "", "debug", "info", "warn", "warning", "error":
 	default:
-		return fmt.Errorf("logging.level must be one of debug, info, warn, error; got %q", c.Logging.Level)
+		return fmt.Errorf("logging.level must be one of debug, info, warn, warning, error; got %q", c.Logging.Level)
 	}
 	switch strings.ToLower(c.Logging.Format) {
 	case "", "text", "json":

@@ -302,6 +302,21 @@ func TestBackendPanicRestoresGaugeAndSends500(t *testing.T) {
 	}
 }
 
+// The disconnect sentinel must map to the client_disconnected metric label,
+// including when wrapped, and must not be mistaken for a plain cancellation.
+func TestClassifyErrorClientDisconnected(t *testing.T) {
+	if got := classifyError(errClientDisconnected); got != "client_disconnected" {
+		t.Errorf("classifyError(errClientDisconnected) = %q, want client_disconnected", got)
+	}
+	wrapped := fmt.Errorf("stream: %w", errClientDisconnected)
+	if got := classifyError(wrapped); got != "client_disconnected" {
+		t.Errorf("classifyError(wrapped) = %q, want client_disconnected", got)
+	}
+	if got := classifyError(context.Canceled); got != "canceled" {
+		t.Errorf("classifyError(context.Canceled) = %q, want canceled", got)
+	}
+}
+
 func TestSweepDataDir(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, "old.png")
