@@ -5,11 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -19,19 +16,10 @@ import (
 // complete run envelope in LGBody. The daemon injects resolved file attachments
 // into the message content and forwards the request.
 func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *langgraphProfile) (int64, error) {
-	var totalBytes int64
 	backendStart := time.Now()
-	var ttfbRecorded bool
 
 	// Set content format from profile for attachment serialization
 	handoff.ContentFormat = p.contentFormat
-
-	// For stateful runs, ensure the thread exists before streaming.
-	if handoff.ThreadID != "" {
-		if err := ensureThreadExists(ctx, p, handoff.ThreadID); err != nil {
-			return 0, fmt.Errorf("ensure thread: %w", err)
-		}
-	}
 
 	// Inject resolved file attachments into the body (passthrough if none).
 	body, err := mergeAttachmentsIntoLGBody(handoff.LGBody, handoff.ResolvedAttachments, handoff.ResolvedImages, p.contentFormat)
@@ -39,13 +27,7 @@ func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *la
 		return 0, fmt.Errorf("merge attachments: %w", err)
 	}
 
-	// Determine endpoint: stateful or stateless.
-	var reqURL string
-	if handoff.ThreadID != "" {
-		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", p.apiBase, url.PathEscape(handoff.ThreadID))
-	} else {
-		reqURL = p.apiBase + "/runs/stream"
-	}
+	reqURL := langgraphRunURL(p, handoff.ThreadID)
 
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		var pretty bytes.Buffer
@@ -54,99 +36,14 @@ func streamLGBody(ctx context.Context, conn net.Conn, handoff HandoffData, p *la
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
+	// Thread creation is lazy (only on 404); see doLangGraphRun.
+	resp, err := doLangGraphRun(ctx, p, reqURL, body, handoff)
 	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", p.apiKey)
-	if handoff.TestPattern != "" {
-		req.Header.Set("X-Test-Pattern", handoff.TestPattern)
-	}
-
-	RecordBackendRequest("langgraph")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		RecordBackendError("langgraph")
-		return 0, fmt.Errorf("http request: %w", err)
+		return 0, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		RecordBackendError("langgraph")
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return 0, fmt.Errorf("set write deadline: %w", err)
-	}
-
-	// Proxy SSE stream.
-	copyBufPtr := copyBufPool.Get().(*[]byte)
-	copyBuf := *copyBufPtr
-	defer func() {
-		*copyBufPtr = copyBuf
-		copyBufPool.Put(copyBufPtr)
-	}()
-	var nr int
-	var newlines int
-	for {
-		select {
-		case <-ctx.Done():
-			return totalBytes, ctx.Err()
-		default:
-		}
-		nr, err = resp.Body.Read(copyBuf)
-		if nr > 0 {
-			if !ttfbRecorded {
-				RecordBackendTTFB("langgraph", time.Since(backendStart).Seconds())
-				ttfbRecorded = true
-			}
-			chunk := copyBuf[:nr]
-			for _, b := range chunk {
-				switch b {
-				case '\n':
-					newlines++
-					if newlines >= 2 {
-						RecordChunkSent()
-						newlines = 0
-					}
-				case '\r':
-				default:
-					newlines = 0
-				}
-			}
-			written := 0
-			for written < len(chunk) {
-				nw, errw := conn.Write(chunk[written:])
-				totalBytes += int64(nw)
-				written += nw
-				if errw != nil {
-					RecordBackendError("langgraph")
-					RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-					return totalBytes, errw
-				}
-			}
-			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-				RecordBackendError("langgraph")
-				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-				return totalBytes, fmt.Errorf("set write deadline: %w", err)
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			RecordBackendError("langgraph")
-			RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-			return totalBytes, err
-		}
-	}
-
-	RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-	return totalBytes, nil
+	return proxySSE(ctx, conn, resp.Body, "langgraph", backendStart)
 }
 
 // mergeAttachmentsIntoLGBody injects resolved file attachments into the last
@@ -258,13 +155,13 @@ func prependAttachmentsToContentArray(existingArray []byte, resolved map[string]
 			prependParts = append(prependParts, `{"type":"document","source":{"type":"base64","media_type":"`...)
 			prependParts = appendJSONEscaped(prependParts, mimeType)
 			prependParts = append(prependParts, `","data":"`...)
-			prependParts = append(prependParts, base64Data...)
+			prependParts = appendJSONEscaped(prependParts, base64Data)
 			prependParts = append(prependParts, `"}}`...)
 		} else {
 			prependParts = append(prependParts, `{"type":"image_url","image_url":{"url":"data:`...)
 			prependParts = appendJSONEscaped(prependParts, mimeType)
 			prependParts = append(prependParts, `;base64,`...)
-			prependParts = append(prependParts, base64Data...)
+			prependParts = appendJSONEscaped(prependParts, base64Data)
 			prependParts = append(prependParts, `"}}`...)
 		}
 	}
@@ -295,9 +192,12 @@ func prependAttachmentsToContentArray(existingArray []byte, resolved map[string]
 	}
 
 	// Build result: '[' + prepend + [comma + inner if non-empty] + [trailing text part] + ']'
-	// inner is existingArray[1:], which is either ']' (empty array) or '{...}]' (non-empty).
-	inner := existingArray[1:]
-	arrayEmpty := len(inner) > 0 && inner[0] == ']'
+	// inner is the existing array's contents without the surrounding brackets and
+	// without insignificant whitespace, so "[ ]" and "[\n]" are treated as empty
+	// (otherwise a trailing comma would be emitted and the body would be invalid JSON).
+	inner := bytes.TrimSpace(existingArray[1:])
+	inner = bytes.TrimSpace(inner[:len(inner)-1]) // strip closing ']'
+	arrayEmpty := len(inner) == 0
 
 	var result []byte
 	result = append(result, '[')
@@ -307,8 +207,7 @@ func prependAttachmentsToContentArray(existingArray []byte, resolved map[string]
 		if len(prependParts) > 0 {
 			result = append(result, ',')
 		}
-		// inner ends with ']'; strip it so we can append the text part before closing.
-		result = append(result, inner[:len(inner)-1]...)
+		result = append(result, inner...)
 	}
 
 	if len(textParts) > 0 {

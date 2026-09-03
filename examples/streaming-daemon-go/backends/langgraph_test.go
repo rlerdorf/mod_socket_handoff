@@ -3,6 +3,7 @@ package backends
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,18 +16,18 @@ import (
 
 func TestBuildLangGraphRequestBody(t *testing.T) {
 	tests := []struct {
-		name             string
-		handoff          HandoffData
-		assistantID      string
+		name              string
+		handoff           HandoffData
+		assistantID       string
 		defaultStreamMode string
-		wantContains     []string
+		wantContains      []string
 	}{
 		{
 			name: "single prompt",
 			handoff: HandoffData{
 				Prompt: "Hello, how are you?",
 			},
-			assistantID:      "test-agent",
+			assistantID:       "test-agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"test-agent"`,
@@ -46,7 +47,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Role: "user", Content: "And 3+3?"},
 				},
 			},
-			assistantID:      "math-agent",
+			assistantID:       "math-agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"math-agent"`,
@@ -64,7 +65,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					"shop_id":   int64(456),
 				},
 			},
-			assistantID:      "shop-agent",
+			assistantID:       "shop-agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"seller_id":"seller123"`,
@@ -72,9 +73,9 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 			},
 		},
 		{
-			name:             "empty prompt uses default",
-			handoff:          HandoffData{},
-			assistantID:      "agent",
+			name:              "empty prompt uses default",
+			handoff:           HandoffData{},
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":"Hello"`,
@@ -88,7 +89,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Role: "user", Content: "Hi"},
 				},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"type":"system","content":"You are helpful."`,
@@ -103,7 +104,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", MimeType: "image/png"},
 				},
 			},
-			assistantID:      "vision-agent",
+			assistantID:       "vision-agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"assistant_id":"vision-agent"`,
@@ -125,7 +126,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Base64: "SGVsbG8gV29ybGQ=", MimeType: "image/jpeg"},
 				},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"type":"human","content":"Hello"`,
@@ -143,7 +144,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Base64: "dGVzdA=="},
 				},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":[`,
@@ -160,7 +161,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 					{Base64: "aW1hZ2Uy", MimeType: "image/jpeg"},
 				},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"content":[`,
@@ -175,7 +176,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				Prompt:     "test",
 				StreamMode: []string{"events"},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"stream_mode":["events"]`,
@@ -187,7 +188,7 @@ func TestBuildLangGraphRequestBody(t *testing.T) {
 				Prompt:     "test",
 				StreamMode: []string{"messages", "updates"},
 			},
-			assistantID:      "agent",
+			assistantID:       "agent",
 			defaultStreamMode: "messages-tuple",
 			wantContains: []string{
 				`"stream_mode":["messages","updates"]`,
@@ -356,66 +357,88 @@ func TestLangGraphStreamProxy(t *testing.T) {
 func TestLangGraphStreamProxyWithThreadID(t *testing.T) {
 	ssePayload := "event: messages\ndata: [{\"content\":\"Hi\"}]\n\nevent: end\ndata: null\n\n"
 
-	var requestPaths []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestPaths = append(requestPaths, r.URL.Path)
-		if r.URL.Path == "/threads" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(ssePayload))
-	}))
-	defer srv.Close()
-
-	origDefault := langgraphDefault
-	origProfiles := langgraphProfiles
-	langgraphDefault = &langgraphProfile{
-		apiBase:     srv.URL,
-		apiKey:      "test-key",
-		assistantID: "agent",
-		streamMode:  "messages-tuple",
-		httpClient:  srv.Client(),
+	// Thread creation is lazy: the daemon streams first and only creates the
+	// thread (then retries once) when upstream answers 404.
+	tests := []struct {
+		name         string
+		threadExists bool
+		wantPaths    []string
+	}{
+		{
+			name:         "missing thread is created on 404 then retried",
+			threadExists: false,
+			wantPaths:    []string{"/threads/thread-abc/runs/stream", "/threads", "/threads/thread-abc/runs/stream"},
+		},
+		{
+			name:         "existing thread streams in a single round-trip",
+			threadExists: true,
+			wantPaths:    []string{"/threads/thread-abc/runs/stream"},
+		},
 	}
-	langgraphProfiles = make(map[string]*langgraphProfile)
-	defer func() {
-		langgraphDefault = origDefault
-		langgraphProfiles = origProfiles
-	}()
 
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			threadExists := tt.threadExists
+			var requestPaths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestPaths = append(requestPaths, r.URL.Path)
+				if r.URL.Path == "/threads" {
+					threadExists = true
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				if !threadExists {
+					http.Error(w, `{"detail":"Thread not found"}`, http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(ssePayload))
+			}))
+			defer srv.Close()
 
-	var received bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(&received, clientConn)
-		done <- err
-	}()
+			origDefault := langgraphDefault
+			origProfiles := langgraphProfiles
+			langgraphDefault = &langgraphProfile{
+				apiBase:     srv.URL,
+				apiKey:      "test-key",
+				assistantID: "agent",
+				streamMode:  "messages-tuple",
+				httpClient:  srv.Client(),
+			}
+			langgraphProfiles = make(map[string]*langgraphProfile)
+			defer func() {
+				langgraphDefault = origDefault
+				langgraphProfiles = origProfiles
+			}()
 
-	lg := &LangGraph{}
-	handoff := HandoffData{Prompt: "test", ThreadID: "thread-abc"}
-	_, err := lg.Stream(context.Background(), serverConn, handoff)
-	serverConn.Close()
-	<-done
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
 
-	if err != nil {
-		t.Fatalf("Stream() error = %v", err)
-	}
-	// Verify thread creation was called first, then streaming
-	if len(requestPaths) < 2 {
-		t.Fatalf("expected at least 2 requests, got %d: %v", len(requestPaths), requestPaths)
-	}
-	if requestPaths[0] != "/threads" {
-		t.Errorf("first request path = %q, want /threads", requestPaths[0])
-	}
-	if requestPaths[1] != "/threads/thread-abc/runs/stream" {
-		t.Errorf("second request path = %q, want /threads/thread-abc/runs/stream", requestPaths[1])
-	}
-	if received.String() != ssePayload {
-		t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), ssePayload)
+			var received bytes.Buffer
+			done := make(chan error, 1)
+			go func() {
+				_, err := io.Copy(&received, clientConn)
+				done <- err
+			}()
+
+			lg := &LangGraph{}
+			handoff := HandoffData{Prompt: "test", ThreadID: "thread-abc"}
+			_, err := lg.Stream(context.Background(), serverConn, handoff)
+			serverConn.Close()
+			<-done
+
+			if err != nil {
+				t.Fatalf("Stream() error = %v", err)
+			}
+			if fmt.Sprint(requestPaths) != fmt.Sprint(tt.wantPaths) {
+				t.Errorf("request paths = %v, want %v", requestPaths, tt.wantPaths)
+			}
+			if received.String() != ssePayload {
+				t.Errorf("Stream() proxied data mismatch:\ngot:  %q\nwant: %q", received.String(), ssePayload)
+			}
+		})
 	}
 }
 
@@ -589,7 +612,7 @@ func TestLangGraphStreamProxyMalformedSSE(t *testing.T) {
 
 func TestParseLG(t *testing.T) {
 	tests := []struct {
-		input               string
+		input                         string
 		wantProfile, wantURL, wantKey string
 	}{
 		{"sales", "sales", "", ""},
@@ -1090,11 +1113,11 @@ func TestResolveLangGraphProfile(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name        string
-		handoff     HandoffData
-		wantBase    string
-		wantKey     string
-		wantErr     bool
+		name     string
+		handoff  HandoffData
+		wantBase string
+		wantKey  string
+		wantErr  bool
 	}{
 		// Default fallback (no routing fields)
 		{

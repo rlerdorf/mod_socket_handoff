@@ -6,6 +6,7 @@ server:
   socket_mode: 0660
   max_connections: 50000
   max_stream_duration_ms: 300000  # Max per-stream duration in ms (0 = no timeout, default: 300000 = 5 min)
+  data_dir_max_age_ms: 600000     # Remove staged attachment files older than this (0 = disable sweeper, default: 10 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
   # mem_limit: 768MiB            # Soft memory limit (e.g. 512MiB, 1GiB); empty = no limit
   # gc_percent: 100             # GOGC value; 0 = not set (use -gc-percent=0 flag to disable GC)

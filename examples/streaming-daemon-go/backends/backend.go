@@ -67,18 +67,18 @@ type HandoffData struct {
 	LGBody json.RawMessage `json:"lg_body,omitempty"`
 
 	// Deprecated: use lg_body
-	UserID      int64     `json:"user_id"`
-	Prompt      string    `json:"prompt"`             // Deprecated: use lg_body.input.messages
-	Messages    []Message `json:"messages,omitempty"` // Deprecated: use lg_body.input.messages
-	AssistantID    string         `json:"assistant_id,omitempty"`     // Deprecated: use lg_body.assistant_id
-	StreamMode     []string       `json:"stream_mode,omitempty"`      // Deprecated: use lg_body.stream_mode
-	LangGraphInput map[string]any `json:"langgraph_input,omitempty"`  // Deprecated: use lg_body.input.*
-	Images     []ImageData `json:"images,omitempty"` // Deprecated: use lg_body content or ImagePaths
+	UserID         int64          `json:"user_id"`
+	Prompt         string         `json:"prompt"`                    // Deprecated: use lg_body.input.messages
+	Messages       []Message      `json:"messages,omitempty"`        // Deprecated: use lg_body.input.messages
+	AssistantID    string         `json:"assistant_id,omitempty"`    // Deprecated: use lg_body.assistant_id
+	StreamMode     []string       `json:"stream_mode,omitempty"`     // Deprecated: use lg_body.stream_mode
+	LangGraphInput map[string]any `json:"langgraph_input,omitempty"` // Deprecated: use lg_body.input.*
+	Images         []ImageData    `json:"images,omitempty"`          // Deprecated: use lg_body content or ImagePaths
 
 	// Deprecated: unused
-	Model       string `json:"model,omitempty"`
-	MaxTokens   int    `json:"max_tokens,omitempty"`
-	Timestamp   int64  `json:"timestamp,omitempty"`
+	Model     string `json:"model,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
 
 	// Deprecated: use Attachments
 	ImagePath     string `json:"image_path,omitempty"`
@@ -114,6 +114,11 @@ type HandoffData struct {
 
 	// Computed field populated by resolveAttachments() before Stream()
 	ResolvedAttachments map[string]ResolvedAttachment `json:"-"`
+
+	// StagedBytes is the running total of on-disk bytes consumed by image and
+	// attachment files for this request, used to enforce the per-request cap
+	// (config.MaxTotalAttachmentBytes) across resolveImages and resolveAttachments.
+	StagedBytes int64 `json:"-"`
 
 	// Content format for non-text/non-image attachments (populated from LangGraph profile)
 	ContentFormat string `json:"-"`

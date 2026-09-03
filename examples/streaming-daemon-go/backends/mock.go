@@ -85,11 +85,6 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 		"[DONE-CONTENT]",
 	}
 
-	// Set write deadline once upfront, refresh periodically
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return 0, fmt.Errorf("set write deadline: %w", err)
-	}
-
 	// Use a reusable timer to avoid leaking timers from time.After
 	delayTimer := time.NewTimer(0)
 	if !delayTimer.Stop() {
@@ -120,13 +115,6 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 			return totalBytes, err
 		}
 
-		// Refresh write deadline every 5 writes to reduce syscalls
-		if (i+1)%5 == 0 {
-			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-				return totalBytes, fmt.Errorf("set write deadline: %w", err)
-			}
-		}
-
 		// Simulate token generation delay (configurable via config or -message-delay flag).
 		// Use a reusable timer to avoid leaking timers when context is cancelled.
 		if i < len(messages)-1 {
@@ -147,10 +135,10 @@ func (m *Mock) Stream(ctx context.Context, conn net.Conn, handoff HandoffData) (
 	}
 
 	// Send completion marker
-	n, err := conn.Write(doneMsg)
+	n, err := SendSSEDone(conn)
 	totalBytes += int64(n)
 	if err != nil {
-		return totalBytes, fmt.Errorf("write failed: %w", err)
+		return totalBytes, err
 	}
 
 	// Record backend duration
