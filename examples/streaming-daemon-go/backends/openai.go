@@ -32,15 +32,15 @@ var (
 
 // SSE scanner buffer sizes for parsing upstream API responses.
 const (
-	scannerInitialBufferSize = 4096  // Initial buffer for bufio.Scanner
-	scannerMaxBufferSize     = 65536 // Maximum buffer for bufio.Scanner (64KB)
+	scannerInitialBufferSize = 4096    // Initial buffer for bufio.Scanner
+	scannerMaxBufferSize     = 1 << 20 // Maximum SSE line length (1 MiB); tool-call argument deltas and coalescing proxies can exceed 64 KB
 )
 
 // Package-level byte slices to avoid allocation in hot paths
 var (
 	contentFieldPattern = []byte(`"content":"`)
 	deltaFieldPattern   = []byte(`"delta":{`)
-	dataPrefix          = []byte("data: ")
+	dataPrefix          = []byte("data:") // SSE allows "data:" with or without a following space
 	doneMarker          = []byte("[DONE]")
 )
 
@@ -213,12 +213,16 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 
 	buf = append(buf, `],"stream":true}`...)
 
+	// The request body must stay untouched until the response body is closed:
+	// on HTTP/2, Do() can return (headers received) before the body has been
+	// fully flushed, so recycling the buffer earlier could corrupt an in-flight
+	// request. This defer runs after the deferred resp.Body.Close() below.
+	defer putPooledBuf(&requestBufPool, bufPtr, buf)
+
 	// Create HTTP request
 	url := openaiAPIBase + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(buf))
 	if err != nil {
-		*bufPtr = buf
-		requestBufPool.Put(bufPtr)
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -234,11 +238,6 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 
 	// Make request
 	resp, err := httpClient.Do(req)
-
-	// Return buffer to pool after request is sent
-	*bufPtr = buf
-	requestBufPool.Put(bufPtr)
-
 	if err != nil {
 		RecordBackendError("openai")
 		return 0, fmt.Errorf("http request: %w", err)
@@ -252,16 +251,11 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Set write deadline once for entire stream (refreshed periodically below)
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return 0, fmt.Errorf("set write deadline: %w", err)
-	}
-
-	// Parse SSE stream and forward to client
+	// Parse SSE stream and forward to client. Write deadlines are re-armed per
+	// event inside SendSSE, so a slow upstream cannot expire the client deadline.
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, scannerInitialBufferSize), scannerMaxBufferSize)
 
-	writeCount := 0
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -275,7 +269,8 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 			continue
 		}
 
-		data := line[6:] // Skip "data: " prefix
+		// Skip "data:" and the optional single space that follows it
+		data := bytes.TrimPrefix(line[len(dataPrefix):], []byte(" "))
 
 		// Check for [DONE] marker using bytes comparison (no allocation)
 		if bytes.Equal(data, doneMarker) {
@@ -295,28 +290,25 @@ func (o *OpenAI) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 			totalBytes += int64(n)
 			RecordChunkSent()
 			if err != nil {
+				RecordBackendError("openai")
 				return totalBytes, err
-			}
-
-			// Refresh write deadline every 10 writes instead of every write
-			writeCount++
-			if writeCount%10 == 0 {
-				if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-					return totalBytes, fmt.Errorf("set write deadline: %w", err)
-				}
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
+		RecordBackendError("openai")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return totalBytes, ctxErr
+		}
 		return totalBytes, fmt.Errorf("read stream: %w", err)
 	}
 
 	// Send completion marker
-	n, err := conn.Write(doneMsg)
+	n, err := SendSSEDone(conn)
 	totalBytes += int64(n)
 	if err != nil {
-		return totalBytes, fmt.Errorf("write done: %w", err)
+		return totalBytes, err
 	}
 
 	// Record backend duration

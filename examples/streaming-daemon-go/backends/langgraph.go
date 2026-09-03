@@ -23,8 +23,8 @@ import (
 
 // LangGraph backend configuration flags (can override config file)
 var (
-	langgraphBaseFlag = flag.String("langgraph-base", "", "LangGraph API base URL (overrides config file)")
-	langgraphSocketFlag = flag.String("langgraph-socket", "", "Unix socket for LangGraph API (overrides config file)")
+	langgraphBaseFlag      = flag.String("langgraph-base", "", "LangGraph API base URL (overrides config file)")
+	langgraphSocketFlag    = flag.String("langgraph-socket", "", "Unix socket for LangGraph API (overrides config file)")
 	langgraphAssistantFlag = flag.String("langgraph-assistant", "", "LangGraph assistant ID (overrides config file)")
 )
 
@@ -310,14 +310,6 @@ func parseLG(lg string) (profile, url, key string) {
 	return profile, rest[:second], rest[second+1:]
 }
 
-// langgraphBufPool reuses buffers for building HTTP request bodies.
-var langgraphBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]byte, 0, 1024)
-		return &buf
-	},
-}
-
 // copyBufPool reuses 32KB read buffers for the raw proxy loop to reduce allocations under load.
 var copyBufPool = sync.Pool{
 	New: func() any {
@@ -377,9 +369,7 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	}
 	slog.Debug("langgraph backend v1 (discrete fields)", "thread_id", handoff.ThreadID)
 
-	var totalBytes int64
 	backendStart := time.Now()
-	var ttfbRecorded bool
 
 	// Determine assistant ID (handoff override > profile)
 	assistantID := p.assistantID
@@ -390,24 +380,9 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 	// Set content format from profile for attachment serialization
 	handoff.ContentFormat = p.contentFormat
 
-	// For stateful runs, ensure the thread exists before streaming (same as PHP: create then stream).
-	if handoff.ThreadID != "" {
-		if err := ensureThreadExists(ctx, p, handoff.ThreadID); err != nil {
-			return 0, fmt.Errorf("ensure thread: %w", err)
-		}
-	}
-
 	// Build request body (shared with tests via buildLangGraphRequestBody)
 	buf := buildLangGraphRequestBody(handoff, assistantID, p.streamMode)
-
-	// Determine endpoint: stateful (with thread_id) or stateless
-	var reqURL string
-	if handoff.ThreadID != "" {
-		// URL-escape ThreadID to prevent path traversal attacks
-		reqURL = fmt.Sprintf("%s/threads/%s/runs/stream", p.apiBase, url.PathEscape(handoff.ThreadID))
-	} else {
-		reqURL = p.apiBase + "/runs/stream"
-	}
+	reqURL := langgraphRunURL(p, handoff.ThreadID)
 
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		var pretty bytes.Buffer
@@ -416,62 +391,115 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 		}
 	}
 
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(buf))
+	resp, err := doLangGraphRun(ctx, p, reqURL, buf, handoff)
 	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	// Proxy raw SSE stream from LangGraph to client (no parsing; forwards heartbeats, all events, etc.)
+	return proxySSE(ctx, conn, resp.Body, "langgraph", backendStart)
+}
+
+// langgraphRunURL returns the stateless or stateful run-stream endpoint.
+func langgraphRunURL(p *langgraphProfile, threadID string) string {
+	if threadID != "" {
+		// URL-escape ThreadID to prevent path traversal attacks
+		return fmt.Sprintf("%s/threads/%s/runs/stream", p.apiBase, url.PathEscape(threadID))
+	}
+	return p.apiBase + "/runs/stream"
+}
+
+// postLangGraph issues one run-stream POST. The caller owns the response body.
+func postLangGraph(ctx context.Context, p *langgraphProfile, reqURL string, body []byte, testPattern string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", p.apiKey)
-
 	// Add test pattern header if present (for validation testing)
-	if handoff.TestPattern != "" {
-		req.Header.Set("X-Test-Pattern", handoff.TestPattern)
+	if testPattern != "" {
+		req.Header.Set("X-Test-Pattern", testPattern)
 	}
-
-	// Record backend request attempt
 	RecordBackendRequest("langgraph")
-
-	// Make request
 	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	return resp, nil
+}
 
+// doLangGraphRun POSTs the run body and returns a 200 response ready for
+// streaming; any other outcome is returned as an error with the body closed.
+//
+// For stateful runs the thread is created lazily: the first attempt goes
+// straight to /threads/{id}/runs/stream, and only a 404 (thread does not exist
+// yet) triggers ensureThreadExists followed by a single retry. Creating the
+// thread up front on every request would add a full upstream round-trip to the
+// time-to-first-byte of every message after the first one in a conversation.
+func doLangGraphRun(ctx context.Context, p *langgraphProfile, reqURL string, body []byte, handoff HandoffData) (*http.Response, error) {
+	resp, err := postLangGraph(ctx, p, reqURL, body, handoff.TestPattern)
 	if err != nil {
 		RecordBackendError("langgraph")
-		return 0, fmt.Errorf("http request: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound && handoff.ThreadID != "" {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		slog.Debug("thread not found, creating and retrying", "thread_id", handoff.ThreadID)
+		if err := ensureThreadExists(ctx, p, handoff.ThreadID); err != nil {
+			RecordBackendError("langgraph")
+			return nil, fmt.Errorf("ensure thread: %w", err)
+		}
+		resp, err = postLangGraph(ctx, p, reqURL, body, handoff.TestPattern)
+		if err != nil {
+			RecordBackendError("langgraph")
+			return nil, err
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		RecordBackendError("langgraph")
 		// Limit error body size to prevent memory exhaustion from large error payloads
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
+	return resp, nil
+}
 
-	// Set write deadline for first chunk
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return 0, fmt.Errorf("set write deadline: %w", err)
-	}
+// proxySSE copies an upstream SSE body to the client verbatim (heartbeats,
+// all event types), counting event boundaries for metrics. The client write
+// deadline is re-armed before every write so that it bounds time blocked on
+// the client only, never time spent waiting for upstream. Upstream reads are
+// cancelled through ctx because the request was created with it.
+func proxySSE(ctx context.Context, conn net.Conn, body io.Reader, backendName string, backendStart time.Time) (int64, error) {
+	var totalBytes int64
+	var ttfbRecorded bool
 
-	// Proxy raw SSE stream from LangGraph to client (no parsing; forwards heartbeats, all events, etc.)
 	copyBufPtr := copyBufPool.Get().(*[]byte)
 	copyBuf := *copyBufPtr
-	defer func() {
-		*copyBufPtr = copyBuf
-		copyBufPool.Put(copyBufPtr)
-	}()
-	var nr int
+	defer copyBufPool.Put(copyBufPtr)
+
+	finish := func(err error) (int64, error) {
+		if err != nil {
+			RecordBackendError(backendName)
+		}
+		RecordBackendDuration(backendName, time.Since(backendStart).Seconds())
+		return totalBytes, err
+	}
+
 	var newlines int // consecutive \n count (ignoring \r) for SSE boundary detection
 	for {
-		select {
-		case <-ctx.Done():
-			return totalBytes, ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return finish(err)
 		}
-		nr, err = resp.Body.Read(copyBuf)
+		nr, err := body.Read(copyBuf)
 		if nr > 0 {
 			if !ttfbRecorded {
-				RecordBackendTTFB("langgraph", time.Since(backendStart).Seconds())
+				RecordBackendTTFB(backendName, time.Since(backendStart).Seconds())
 				ttfbRecorded = true
 			}
 			chunk := copyBuf[:nr]
@@ -486,51 +514,39 @@ func (l *LangGraph) Stream(ctx context.Context, conn net.Conn, handoff HandoffDa
 						newlines = 0
 					}
 				case '\r':
-					// ignore \r — treat \r\n same as \n
+					// ignore \r - treat \r\n same as \n
 				default:
 					newlines = 0
 				}
 			}
-			// Write full chunk, handling short writes
-			written := 0
-			for written < len(chunk) {
-				nw, errw := conn.Write(chunk[written:])
-				totalBytes += int64(nw)
-				written += nw
-				if errw != nil {
-					RecordBackendError("langgraph")
-					RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-					return totalBytes, errw
-				}
-			}
-			if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-				RecordBackendError("langgraph")
-				RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-				return totalBytes, fmt.Errorf("set write deadline: %w", err)
+			// net.Conn.Write returns an error on any short write, so one call suffices.
+			nw, errw := WriteSSE(conn, chunk)
+			totalBytes += int64(nw)
+			if errw != nil {
+				return finish(errw)
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
-				break
+				return finish(nil)
 			}
-			RecordBackendError("langgraph")
-			RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-			return totalBytes, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return finish(ctxErr)
+			}
+			return finish(err)
 		}
 	}
-
-	// Record backend duration
-	RecordBackendDuration("langgraph", time.Since(backendStart).Seconds())
-
-	return totalBytes, nil
 }
 
 // buildLangGraphRequestBody builds the JSON request body for a LangGraph API call.
 // Used by both Stream() and tests. The defaultStreamMode parameter specifies the
 // fallback stream mode when handoff.StreamMode is empty.
 func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultStreamMode string) []byte {
-	bufPtr := langgraphBufPool.Get().(*[]byte)
-	buf := (*bufPtr)[:0]
+	// Right-size the buffer up front. The body is handed to the HTTP client and
+	// must outlive Do() (HTTP/2 may still be flushing it when Do returns), so
+	// it is deliberately not pooled: with multi-megabyte attachments a pool
+	// would only keep huge buffers alive between requests.
+	buf := make([]byte, 0, estimateLangGraphBodySize(handoff))
 
 	buf = append(buf, `{"assistant_id":"`...)
 	buf = appendJSONEscaped(buf, assistantID)
@@ -625,13 +641,23 @@ func buildLangGraphRequestBody(handoff HandoffData, assistantID string, defaultS
 
 	buf = append(buf, `,"stream_subgraphs":false,"on_completion":"delete","on_disconnect":"cancel"}`...)
 
-	// Return buffer to pool (make a copy since we're returning the content for tests)
-	result := make([]byte, len(buf))
-	copy(result, buf)
-	*bufPtr = buf
-	langgraphBufPool.Put(bufPtr)
+	return buf
+}
 
-	return result
+// estimateLangGraphBodySize returns a capacity estimate for the request body so
+// buildLangGraphRequestBody can allocate once instead of growing repeatedly.
+func estimateLangGraphBodySize(handoff HandoffData) int {
+	n := 512 + len(handoff.Prompt)
+	for _, m := range handoff.Messages {
+		n += 64 + len(m.Content)
+	}
+	for _, img := range handoff.ResolvedImages {
+		n += 64 + len(img.Base64)
+	}
+	for _, att := range handoff.ResolvedAttachments {
+		n += 96 + len(att.Base64) + len(att.Text)
+	}
+	return n
 }
 
 // contentPart represents a parsed segment of prompt text with placeholder resolution.
@@ -819,7 +845,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		buf = append(buf, `{"type":"image_url","image_url":{"url":"data:`...)
 		buf = appendJSONEscaped(buf, mimeType)
 		buf = append(buf, `;base64,`...)
-		buf = append(buf, base64Data...)
+		buf = appendJSONEscaped(buf, base64Data)
 		buf = append(buf, `"}}`...)
 	}
 
@@ -832,7 +858,7 @@ func appendContentWithAttachments(buf []byte, text string, attachments map[strin
 		buf = append(buf, `{"type":"document","source":{"type":"base64","media_type":"`...)
 		buf = appendJSONEscaped(buf, mimeType)
 		buf = append(buf, `","data":"`...)
-		buf = append(buf, base64Data...)
+		buf = appendJSONEscaped(buf, base64Data)
 		buf = append(buf, `"}}`...)
 	}
 
@@ -908,8 +934,9 @@ func appendMultimodalContent(buf []byte, text string, images []ImageData) []byte
 	buf = append(buf, '[')
 
 	// Add image parts first, matching the LangChain convention where images
-	// precede the text prompt. Base64 is inherently JSON-safe ([A-Za-z0-9+/=]),
-	// but mimeType is user-controlled so we escape it to prevent JSON injection.
+	// precede the text prompt. Both mimeType and the base64 payload are escaped:
+	// inline images arrive verbatim from the handoff JSON, so the "base64" value
+	// is only as trustworthy as whatever PHP forwarded.
 	for i, img := range images {
 		if i > 0 {
 			buf = append(buf, ',')
@@ -921,7 +948,7 @@ func appendMultimodalContent(buf []byte, text string, images []ImageData) []byte
 		buf = append(buf, `{"type":"image_url","image_url":{"url":"data:`...)
 		buf = appendJSONEscaped(buf, mimeType)
 		buf = append(buf, `;base64,`...)
-		buf = append(buf, img.Base64...)
+		buf = appendJSONEscaped(buf, img.Base64)
 		buf = append(buf, `"}}`...)
 	}
 

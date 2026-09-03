@@ -1,7 +1,6 @@
 package backends
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -149,21 +148,19 @@ func (t *Typing) fetchAPIResponse(ctx context.Context, handoff HandoffData) (str
 
 	buf = append(buf, `],"stream":false}`...)
 
+	// Keep the body buffer alive until the response body is closed (HTTP/2 may
+	// still be flushing it when Do returns). Runs after the deferred Close.
+	defer putPooledBuf(&requestBufPool, bufPtr, buf)
+
 	url := t.apiBase + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(buf))
 	if err != nil {
-		*bufPtr = buf
-		requestBufPool.Put(bufPtr)
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+t.apiKey)
 
 	resp, err := t.httpClient.Do(req)
-
-	*bufPtr = buf
-	requestBufPool.Put(bufPtr)
-
 	if err != nil {
 		return "", fmt.Errorf("http request: %w", err)
 	}
@@ -199,13 +196,6 @@ func (t *Typing) Stream(ctx context.Context, conn net.Conn, handoff HandoffData)
 
 	// Record backend request
 	RecordBackendRequest("typing")
-
-	// Set initial write timeout
-	if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-		return 0, fmt.Errorf("could not set write deadline: %w", err)
-	}
-
-	writer := bufio.NewWriter(conn)
 
 	var response string
 	var err error
@@ -312,9 +302,10 @@ This is the end of my response. Have a great day!`
 		buf = strconv.AppendInt(buf, int64(i), 10)
 		buf = append(buf, "}\n\n"...)
 
-		n, err := writer.Write(buf)
-		*bufPtr = buf
-		sseCharBufPool.Put(bufPtr)
+		// Each event is one small write straight to the socket; buffering would
+		// only add a copy since every event must be flushed immediately anyway.
+		n, err := WriteSSE(conn, buf)
+		putPooledBuf(&sseCharBufPool, bufPtr, buf)
 		totalBytes += int64(n)
 		RecordChunkSent()
 
@@ -326,15 +317,7 @@ This is the end of my response. Have a great day!`
 
 		if err != nil {
 			RecordBackendError("typing")
-			return totalBytes, fmt.Errorf("write failed: %w", err)
-		}
-		if err := writer.Flush(); err != nil {
-			return totalBytes, fmt.Errorf("flush failed: %w", err)
-		}
-
-		// Reset deadline after successful write for per-write idle timeout
-		if err := conn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-			return totalBytes, fmt.Errorf("set write deadline failed: %w", err)
+			return totalBytes, err
 		}
 
 		// Typing speed - vary delay for realistic effect
@@ -368,13 +351,10 @@ This is the end of my response. Have a great day!`
 	}
 
 	// Send done marker
-	n, err := fmt.Fprintf(writer, "data: [DONE]\n\n")
+	n, err := SendSSEDone(conn)
 	totalBytes += int64(n)
 	if err != nil {
-		return totalBytes, fmt.Errorf("write failed: %w", err)
-	}
-	if err := writer.Flush(); err != nil {
-		return totalBytes, fmt.Errorf("flush failed: %w", err)
+		return totalBytes, err
 	}
 
 	// Record backend duration

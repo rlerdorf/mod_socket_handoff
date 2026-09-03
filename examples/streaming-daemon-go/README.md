@@ -21,8 +21,9 @@ This daemon receives client connections from Apache via `mod_socket_handoff` usi
 - **Connection limiting** - Configurable max concurrent connections (default: 50,000)
 - **Multimodal attachments** - File-based image/text/PDF attachments with placeholder syntax
 - **Hot-reload** - SIGHUP reloads logging, memory limit, and GC settings without restart
-- **Graceful shutdown** - Drains active connections on SIGTERM/SIGINT
-- **Per-write timeouts** - Prevents hung connections from blocking resources
+- **Graceful shutdown** - SIGTERM/SIGINT stops accepting and lets in-flight streams finish (up to 2 minutes)
+- **Per-write timeouts** - Every client write re-arms a 30s deadline; a slow upstream never expires it
+- **Real error responses** - Upstream failures before the first byte become 502/504, mid-stream failures an SSE `error` event, over-capacity a 503
 - **Prometheus metrics** - Built-in metrics endpoint for monitoring
 - **Panic recovery** - Isolated panics don't crash the daemon
 
@@ -184,14 +185,14 @@ LangGraph-specific handoff data fields:
 | Field | Description |
 |-------|-------------|
 | `lg_body` | **Preferred.** Complete LangGraph run envelope built by the client (`assistant_id`, `input`, `stream_mode`, `config`, `on_disconnect`, etc.). The daemon forwards it verbatim, injecting resolved file attachments into the last message. |
-| `thread_id` | Thread ID for stateful conversations — routes to `/threads/{id}/runs/stream` and triggers `ensureThreadExists`. Minted by the client; required alongside `lg_body` for stateful runs. |
+| `thread_id` | Thread ID for stateful conversations — routes to `/threads/{id}/runs/stream`. The thread is created lazily: only when that call returns 404 does the daemon POST `/threads` and retry once, so an existing thread costs a single upstream round-trip. Minted by the client; required alongside `lg_body` for stateful runs. |
 | `lg` | Transport selection: compact `profile\|url\|key` syntax (pipe-delimited, empty segment = no override for that position) |
 | `profile` | Named LangGraph profile from config (selects API base, key, assistant, content format) |
 | `langgraph_url` | Per-request API base URL override |
 | `langgraph_api_key` | Per-request API key override |
 | `attachments` | Map of ref names to file paths (relative to `data_dir`) for multimodal requests — see [Attachments](#attachments-multimodal-requests) |
 | `attachment_types` | Optional map of ref names to MIME types (overrides extension-based detection) |
-| `image_paths` | Array of image file paths — daemon reads, base64-encodes, and injects into the last message |
+| `image_paths` | Array of image file paths (relative to `data_dir`, or absolute paths inside it) — daemon reads, base64-encodes, deletes, and injects into the last message |
 | `response_headers` | Custom HTTP headers to include in the SSE response (e.g., `{"X-Thread-Id": "..."}`) |
 | `test_pattern` | Passed as `X-Test-Pattern` request header to the backend; for validation testing |
 | `assistant_id` | *(deprecated — use `lg_body.assistant_id`)* Override the default assistant ID |
@@ -275,6 +276,7 @@ server:
   socket_mode: 0660
   max_connections: 50000
   max_stream_duration_ms: 300000  # Max per-stream duration (0 = no timeout, default: 5 min)
+  data_dir_max_age_ms: 600000     # Sweep staged attachment files older than this (0 = off, default: 10 min)
   # pprof_addr: localhost:6060  # Uncomment to enable profiling
   # mem_limit: 768MiB            # Soft memory limit (e.g. 512MiB, 1GiB); empty = no limit
   # gc_percent: 100             # GOGC value; 0 = not set (use -gc-percent=0 flag to disable GC)
@@ -383,8 +385,36 @@ Flags override config file values when explicitly set. The "Config Default" colu
 
 ### Signals
 
-- **SIGTERM/SIGINT** - Graceful shutdown, waits for active streams (up to 2 minutes)
+- **SIGTERM/SIGINT** - Graceful shutdown: the listener closes immediately, handoffs already queued get a 503, and in-flight streams keep running under their own context for up to 2 minutes. Streams still running after that are cancelled (the client receives an SSE `error` event) and the daemon exits a few seconds later. A second SIGTERM/SIGINT during the drain terminates the process immediately.
 - **SIGHUP** - Hot-reloads config file (logging level/format, memory limit, GC percent). Settings that require a restart (socket path, backend, max connections) are not reloaded. If no `-config` flag was given, logs a warning and does nothing.
+
+### HTTP responses to the client
+
+The SSE status line and headers are not written until the backend produces its
+first byte, so the daemon can still answer with a real status when something
+goes wrong early:
+
+| Situation | Response |
+|-----------|----------|
+| Malformed `X-Handoff-Data` JSON | `400 Bad Request` |
+| Attachment/image path rejected (traversal, size, type) | `400 Bad Request` |
+| Upstream connect failure, non-200 status, unknown profile | `502 Bad Gateway` |
+| `max_stream_duration_ms` hit before the first byte | `504 Gateway Timeout` |
+| `max_connections` reached, or handoff arrived during shutdown | `503 Service Unavailable` + `Retry-After: 1` |
+| Failure after streaming started | SSE event `data: {"error":"..."}` then close |
+| Client closes its side mid-stream | Upstream request cancelled within one round-trip; counted as `client_disconnected` |
+
+The daemon reads (and discards) anything the client sends during the stream,
+which is how it notices a disconnect while upstream is silent.
+
+### Staged file hygiene
+
+Attachment and image files under `data_dir` are deleted as soon as they are
+read. If a request fails part-way (one attachment oversized, malformed JSON,
+rejected at capacity), the daemon removes every file that request referenced.
+A background sweeper additionally deletes regular files in `data_dir` older
+than `data_dir_max_age_ms` (default 10 minutes) to catch files whose handoff
+never arrived. One request may reference at most 32 MiB of files in total.
 
 ## File Structure
 
@@ -793,7 +823,7 @@ Client ──TLS──> Terminator ──HTTP/1.1──> Apache ──Unix Socke
 
 11. **Parse upstream SSE stream** — The API response is parsed line-by-line with `bufio.Scanner`. Lines with the `data: ` prefix are extracted; `extractContentFast()` uses byte-level pattern matching on `"content":"` to extract the content string without full JSON parsing. The `unescapeJSON()` function handles JSON escape sequences including UTF-16 surrogate pairs.
 
-12. **Forward chunks to client** — Each extracted content string is re-wrapped as an SSE event by `SendSSE()` in `backends/sse.go` (format: `data: {"content":"..."}\n\n`) and written directly to the client socket. Write deadlines are refreshed every 10 chunks to balance between timeout protection and syscall overhead.
+12. **Forward chunks to client** — Each extracted content string is re-wrapped as an SSE event by `SendSSE()` in `backends/sse.go` (format: `data: {"content":"..."}\n\n`) and written directly to the client socket. Every write re-arms the 30s write deadline (`SetWriteDeadline` is not a syscall), so the deadline bounds time blocked on the client only; pauses on the upstream side never trip it.
 
 13. **Stream completion** — When the API sends `[DONE]` or the scanner reaches EOF, a `data: [DONE]\n\n` completion marker is sent to the client. Backend duration and TTFB metrics are recorded. The client connection is closed, the goroutine exits, and the connection semaphore slot is released.
 

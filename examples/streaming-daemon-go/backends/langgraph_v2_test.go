@@ -298,12 +298,18 @@ func TestStreamLGBodyProxy(t *testing.T) {
 		}
 	})
 
-	t.Run("thread_id routes to stateful endpoint and creates thread first", func(t *testing.T) {
+	t.Run("thread_id routes to stateful endpoint and creates thread lazily on 404", func(t *testing.T) {
 		var paths []string
+		threadExists := false
 		setupLGBodyTest(t, func(w http.ResponseWriter, r *http.Request) {
 			paths = append(paths, r.URL.Path)
 			if r.URL.Path == "/threads" {
+				threadExists = true
 				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if !threadExists {
+				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -312,18 +318,39 @@ func TestStreamLGBodyProxy(t *testing.T) {
 		})
 
 		lgBody := json.RawMessage(`{"assistant_id":"agent","input":{"messages":[{"type":"human","content":"hi"}]}}`)
-		_, err := runStreamLGBody(t, HandoffData{LGBody: lgBody, ThreadID: "thread-xyz"})
+		result, err := runStreamLGBody(t, HandoffData{LGBody: lgBody, ThreadID: "thread-xyz"})
 		if err != nil {
 			t.Fatalf("Stream() error: %v", err)
 		}
-		if len(paths) < 2 {
-			t.Fatalf("expected at least 2 requests, got %d: %v", len(paths), paths)
+		want := []string{"/threads/thread-xyz/runs/stream", "/threads", "/threads/thread-xyz/runs/stream"}
+		if len(paths) != len(want) {
+			t.Fatalf("request paths = %v, want %v", paths, want)
 		}
-		if paths[0] != "/threads" {
-			t.Errorf("first request = %q, want /threads", paths[0])
+		for i := range want {
+			if paths[i] != want[i] {
+				t.Errorf("request %d = %q, want %q", i, paths[i], want[i])
+			}
 		}
-		if paths[1] != "/threads/thread-xyz/runs/stream" {
-			t.Errorf("second request = %q, want /threads/thread-xyz/runs/stream", paths[1])
+		if result != ssePayload {
+			t.Errorf("SSE not proxied after retry:\ngot:  %q\nwant: %q", result, ssePayload)
+		}
+	})
+
+	t.Run("existing thread streams without a create round-trip", func(t *testing.T) {
+		var paths []string
+		setupLGBodyTest(t, func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(ssePayload))
+		})
+
+		lgBody := json.RawMessage(`{"assistant_id":"agent","input":{"messages":[{"type":"human","content":"hi"}]}}`)
+		if _, err := runStreamLGBody(t, HandoffData{LGBody: lgBody, ThreadID: "thread-xyz"}); err != nil {
+			t.Fatalf("Stream() error: %v", err)
+		}
+		if len(paths) != 1 || paths[0] != "/threads/thread-xyz/runs/stream" {
+			t.Errorf("request paths = %v, want only the stream endpoint", paths)
 		}
 	})
 
